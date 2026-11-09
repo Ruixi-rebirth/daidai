@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
 
+	"daidai/internal/config"
 	"daidai/internal/core"
 	"daidai/internal/entity"
 	"daidai/internal/provider/llm"
@@ -25,6 +27,7 @@ type HandsConfig struct {
 	Immune          *entity.ImmuneSystem
 	Workspaces      *entity.WorkspaceManager
 	EnableNixSearch bool
+	OCIConfig       *config.OCIConfig
 }
 
 // NewHandsWithConfig 按配置挂载原子双手
@@ -51,6 +54,14 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 		h.Register(NewDelegateToolWithWorkspace(cfg.Delegates, cfg.Immune, cfg.Workspaces))
 		h.Register(NewFaceTool(cfg.Delegates))
 		h.Register(NewImageTool(cfg.Delegates))
+	}
+	if cfg.OCIConfig != nil && cfg.OCIConfig.Enabled {
+		if ociClient, err := NewOCIClient(context.Background(), *cfg.OCIConfig); err == nil {
+			h.Register(NewOCIBillTool(ociClient, cfg.OCIConfig.Timezone))
+			h.Register(NewOCIIPTool(ociClient, cfg.Immune))
+		} else {
+			slog.Warn("初始化 OCI 客户端失败，跳过 OCI 相关工具注册", "err", err)
+		}
 	}
 	return h
 }

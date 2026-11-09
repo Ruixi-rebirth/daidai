@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -20,6 +21,7 @@ import (
 	"daidai/internal/engine/agent"
 	"daidai/internal/engine/chat"
 	"daidai/internal/engine/memory"
+	"daidai/internal/engine/render"
 	"daidai/internal/engine/vision"
 	"daidai/internal/entity"
 	"daidai/internal/provider/llm"
@@ -29,10 +31,21 @@ import (
 func main() {
 	slog.Info("正在装载呆呆超级数字生命体...")
 
-	cfgPath := "config.yaml"
+	var cfgFlag string
+	flag.StringVar(&cfgFlag, "config", "", "指定配置文件路径")
+	flag.Parse()
+
+	cfgPath := cfgFlag
+	if cfgPath == "" {
+		cfgPath = os.Getenv("DAIDAI_CONFIG")
+	}
+	if cfgPath == "" {
+		cfgPath = "config.yaml"
+	}
+
 	cfg, err := config.LoadConfig(cfgPath)
 	if err != nil {
-		slog.Warn("未读取到 config.yaml，将使用默认配置运行", "err", err)
+		slog.Warn("未读取到配置文件，将使用默认配置运行", "path", cfgPath, "err", err)
 		cfg = &config.Config{}
 		cfg.Server.Port = 8080
 	}
@@ -187,6 +200,7 @@ func main() {
 		Immune:          immune,
 		Workspaces:      workspaceMgr,
 		EnableNixSearch: cfg.Plugins.NixSearch.Enabled,
+		OCIConfig:       &cfg.OCI,
 	})
 
 	// 具体认知大脑 (实现 entity.Cognition)
@@ -225,6 +239,10 @@ func main() {
 		return
 	}
 
+	if cfg.OCI.Enabled && partnerID != "" {
+		go runOCIScheduler(rootCtx, cfg.OCI, partnerID, channelRegistry)
+	}
+
 	// 启动健康检查与单实例锁监听服务
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -260,4 +278,85 @@ func main() {
 		slog.Info("SQLite 数据库连接池已安全关闭并完成 Checkpoint")
 	}
 	slog.Info("呆呆超级数字生命体已安全休眠")
+}
+
+func runOCIScheduler(ctx context.Context, ociCfg config.OCIConfig, partnerID string, channels *entity.ChannelRegistry) {
+	loc, err := time.LoadLocation(ociCfg.Timezone)
+	if err != nil {
+		loc = time.FixedZone("SGT", 8*3600)
+	}
+
+	pushHour := ociCfg.DailyReportHour
+	pushMin := ociCfg.DailyReportMinute
+	if pushHour <= 0 && pushMin <= 0 {
+		pushHour = 8
+		pushMin = 30
+	}
+
+	client, err := tool.NewOCIClient(ctx, ociCfg)
+	if err != nil {
+		slog.Warn("oci_scheduler: 初始化 OCI 客户端失败，后台定时巡检未启动", "err", err)
+		return
+	}
+
+	slog.Info("oci_scheduler: OCI 账单定时播报与异常扣费巡检中枢已装载", "pushTime", fmt.Sprintf("%02d:%02d", pushHour, pushMin), "timezone", loc.String())
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	var lastDailyPush string
+	var lastHourlyCheck string
+	var alertedCost float64
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			now := time.Now().In(loc)
+			todayStr := now.Format("2006-01-02")
+
+			// 每日定时账单播报
+			if now.Hour() == pushHour && now.Minute() >= pushMin && lastDailyPush != todayStr {
+				lastDailyPush = todayStr
+				slog.Info("oci_scheduler: 触发每日定时 OCI 账单播报", "date", todayStr)
+				report, err := tool.FetchBillReport(ctx, client, loc)
+				if err != nil {
+					slog.Error("oci_scheduler: 获取账单失败", "err", err)
+					continue
+				}
+
+				var cardData []byte
+				if png, err := render.RenderCard(ctx, report.Markdown); err == nil {
+					cardData = png
+				}
+
+				_ = channels.Transmit(ctx, &entity.Utterance{
+					Platform:  "qq",
+					IsGroup:   false,
+					ChannelID: partnerID,
+					Text:      report.Markdown,
+					CardData:  cardData,
+				})
+			}
+
+			// 每小时防扣费安全巡检
+			hourKey := now.Format("2006-01-02-15")
+			if lastHourlyCheck != hourKey {
+				lastHourlyCheck = hourKey
+				report, err := tool.FetchBillReport(ctx, client, loc)
+				if err == nil && report.TodayCost > 0.0001 && report.TodayCost > alertedCost+0.0001 {
+					alertedCost = report.TodayCost
+					slog.Warn("oci_scheduler: 检测到新增扣费，立即推送预警", "todayCost", report.TodayCost)
+					alertMsg := fmt.Sprintf("⚠️ [OCI 异常扣费预警]\n检测到今日产生新增费用: %.4f %s！\n\n%s", report.TodayCost, report.Currency, report.Markdown)
+					_ = channels.Transmit(ctx, &entity.Utterance{
+						Platform:  "qq",
+						IsGroup:   false,
+						ChannelID: partnerID,
+						Text:      alertMsg,
+					})
+				}
+			}
+		}
+	}
 }

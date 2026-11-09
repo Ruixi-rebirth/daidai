@@ -57,6 +57,21 @@ type Config struct {
 			DefaultDir  string   `yaml:"default_dir"`
 		} `yaml:"runners"`
 	} `yaml:"agent"`
+
+	OCI OCIConfig `yaml:"oci"`
+}
+
+// OCIConfig Oracle Cloud (OCI) 账单巡检与 IP 调度配置
+type OCIConfig struct {
+	Enabled           bool   `yaml:"enabled"`
+	PrivateKey        string `yaml:"private_key"`
+	UserOCID          string `yaml:"user_ocid"`
+	TenancyOCID       string `yaml:"tenancy_ocid"`
+	Region            string `yaml:"region"`
+	CompartmentID     string `yaml:"compartment_id"`
+	DailyReportHour   int    `yaml:"daily_report_hour"`
+	DailyReportMinute int    `yaml:"daily_report_minute"`
+	Timezone          string `yaml:"timezone"`
 }
 
 // LoadConfig 从指定路径加载 yaml 配置
