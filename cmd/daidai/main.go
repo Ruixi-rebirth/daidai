@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -29,12 +30,22 @@ import (
 func main() {
 	slog.Info("正在装载呆呆超级数字生命体...")
 
-	cfgPath := "config.yaml"
+	var cfgFlag string
+	flag.StringVar(&cfgFlag, "config", "", "指定配置文件路径 (亦可通过环境变量 DAIDAI_CONFIG 指定)")
+	flag.Parse()
+
+	cfgPath := cfgFlag
+	if cfgPath == "" {
+		cfgPath = os.Getenv("DAIDAI_CONFIG")
+	}
+	if cfgPath == "" {
+		cfgPath = "config.yaml"
+	}
+
 	cfg, err := config.LoadConfig(cfgPath)
 	if err != nil {
-		slog.Warn("未读取到 config.yaml，将使用默认配置运行", "err", err)
-		cfg = &config.Config{}
-		cfg.Server.Port = 8080
+		slog.Warn("未读取到指定配置文件，将依赖 sops-nix 与默认参数运行", "path", cfgPath, "err", err)
+		cfg, _ = config.LoadConfig("")
 	}
 
 	// 提前抢占端口监听，防止重复启动多个进程导致 QQ WebSocket 脑裂互踩
