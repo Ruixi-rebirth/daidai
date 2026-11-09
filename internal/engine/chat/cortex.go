@@ -183,19 +183,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 	}
 	toolCtx := entity.WithSensoryEvent(ctx, event)
 	var lastToolText string
-	var toolNotes []string
 	var directCardData []byte
-
-	formatCommit := func(spoken string) string {
-		if len(toolNotes) == 0 {
-			return spoken
-		}
-		notes := strings.Join(toolNotes, "\n")
-		if spoken == "" {
-			return notes
-		}
-		return spoken + "\n" + notes
-	}
 
 	// 单次心智推理与多轮工具调用循环
 	for round := 0; round < 4; round++ {
@@ -216,7 +204,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 
 		// 若未触发任何 Tool 调用，组装文本与（可能存在的）图像一并发送
 		if len(resp.ToolCalls) == 0 {
-			cleanText := strings.TrimSpace(resp.Content)
+			cleanText := sanitizeAssistantSpoken(resp.Content)
 			utterance := &entity.Utterance{
 				Platform:   event.Platform,
 				IsGroup:    event.IsGroup,
@@ -227,7 +215,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 			}
 
 			if c.memory != nil {
-				c.memory.Commit(ctx, event, formatCommit(cleanText))
+				c.memory.Commit(ctx, event, cleanText)
 			}
 			return utterance, nil
 		}
@@ -275,7 +263,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 				continue
 			}
 
-			if len(toolRes.ImageData) > 0 {
+			if len(toolRes.ImageData) > 0 && len(directCardData) == 0 {
 				directCardData = toolRes.ImageData
 			}
 
@@ -284,7 +272,6 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 				outText = "执行成功"
 			}
 			lastToolText = outText
-			toolNotes = append(toolNotes, fmt.Sprintf("[工具 %s: %s]", tc.Function.Name, safeTruncateOutput(outText, 500)))
 			safeOut := safeTruncateOutput(outText, 4000)
 			messages = append(messages, core.ChatMessage{
 				Role:       core.RoleTool,
@@ -296,7 +283,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 
 		// 若是纯 Markdown 排版卡片，或模型在调工具的同时已经给出了配文，直接返回
 		if len(directCardData) > 0 && (isRenderCard || strings.TrimSpace(resp.Content) != "") {
-			cleanText := strings.TrimSpace(resp.Content)
+			cleanText := sanitizeAssistantSpoken(resp.Content)
 			utter := &entity.Utterance{
 				Platform:   event.Platform,
 				IsGroup:    event.IsGroup,
@@ -306,7 +293,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 				CardData:   directCardData,
 			}
 			if c.memory != nil {
-				c.memory.Commit(ctx, event, formatCommit(cleanText))
+				c.memory.Commit(ctx, event, cleanText)
 			}
 			return utter, nil
 		}
@@ -328,9 +315,9 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 
 	finalText := ""
 	if fErr == nil && finalResp != nil && strings.TrimSpace(finalResp.Content) != "" {
-		finalText = strings.TrimSpace(finalResp.Content)
+		finalText = sanitizeAssistantSpoken(finalResp.Content)
 	} else if lastToolText != "" {
-		finalText = lastToolText
+		finalText = sanitizeAssistantSpoken(lastToolText)
 	} else {
 		finalText = "已处理完毕。"
 	}
@@ -344,9 +331,31 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 		CardData:   directCardData,
 	}
 	if c.memory != nil {
-		c.memory.Commit(ctx, event, formatCommit(utter.Text))
+		c.memory.Commit(ctx, event, utter.Text)
 	}
 	return utter, nil
+}
+
+// sanitizeAssistantSpoken 彻底清洗助手发言，剥离任何内部工具调用标记与调试残留
+func sanitizeAssistantSpoken(text string) string {
+	s := strings.TrimSpace(text)
+	if s == "" {
+		return ""
+	}
+	markers := []string{"\n\n[工具 ", "\n[工具 ", "\n\n【工具 ", "\n【工具 "}
+	for _, m := range markers {
+		if idx := strings.Index(s, m); idx != -1 {
+			s = strings.TrimSpace(s[:idx])
+		}
+	}
+	if strings.HasPrefix(s, "[工具 ") || strings.HasPrefix(s, "【工具 ") {
+		if idx := strings.Index(s, "\n"); idx != -1 {
+			s = strings.TrimSpace(s[idx:])
+		} else {
+			s = ""
+		}
+	}
+	return s
 }
 
 // safeTruncateOutput 安全按 Unicode 字符 (rune) 截断超长工具或工单输出，严防切断 UTF-8 多字节中文字符导致乱码或 JSON 序列化失败

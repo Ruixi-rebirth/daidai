@@ -43,7 +43,7 @@ func (t *ScreenshotTool) Name() string {
 }
 
 func (t *ScreenshotTool) Description() string {
-	return "网页快照与出图工具：对指定的公网网页进行快速截图，并同时提取页面正文供模型总结。单次对话最多处理 2 个链接；若用户提供了多个链接，只提取处理前 2 个核心链接，超出部分略过。返回网页截图图片与页面正文。"
+	return "网页快照与出图工具：对指定的公网网页进行快速截图，并同时提取页面正文。若用户提供了多个链接，仅对首个核心链接调用本工具出图（其余链接请调用 read_link 仅获取文本），避免图片冲突与刷屏。返回网页截图图片与页面正文。"
 }
 
 func (t *ScreenshotTool) Parameters() map[string]any {
@@ -114,9 +114,8 @@ func (t *ScreenshotTool) Execute(ctx context.Context, rawArgs json.RawMessage) (
 			summarySb.WriteString(fmt.Sprintf("【网页标题】：%s\n", title))
 		}
 		if content != "" {
-			summarySb.WriteString(fmt.Sprintf("【网页核心内容】：\n%s\n", content))
+			summarySb.WriteString(fmt.Sprintf("【网页核心内容】：\n%s", content))
 		}
-		summarySb.WriteString("\n请基于上述网页内容与标题，用2~3句自然亲切的话提炼核心信息（这是什么 + 核心亮点/要点），此回复将与截取的网页长图一同发出。")
 
 		return &core.ToolResult{
 			Text:      summarySb.String(),
@@ -141,9 +140,8 @@ func (t *ScreenshotTool) Execute(ctx context.Context, rawArgs json.RawMessage) (
 		fallbackSb.WriteString(fmt.Sprintf("【网页标题】：%s\n", title))
 	}
 	if content != "" {
-		fallbackSb.WriteString(fmt.Sprintf("【网页核心内容】：\n%s\n", content))
+		fallbackSb.WriteString(fmt.Sprintf("【网页核心内容】：\n%s", content))
 	}
-	fallbackSb.WriteString("\n请基于上述网页内容提炼2~3句核心要点，与排版卡片一同回复。")
 
 	return &core.ToolResult{
 		Text:      fallbackSb.String(),
