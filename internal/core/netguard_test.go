@@ -2,8 +2,10 @@ package core
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNetGuard_RedactSensitiveIPsAndValidateMediaURL(t *testing.T) {
@@ -52,5 +54,30 @@ func TestNetGuard_RedactSensitiveIPsAndValidateMediaURL(t *testing.T) {
 	}
 	if err := ValidateSafeExternalURL(ctx, "http://169.254.169.254/latest/meta-data"); err == nil {
 		t.Errorf("expected link-local metadata URL to be blocked")
+	}
+	if err := ValidateSafeExternalURL(ctx, "http://100.100.100.200/latest/meta-data"); err == nil {
+		t.Errorf("expected CGNAT cloud metadata URL to be blocked")
+	}
+	if err := ValidateSafeExternalURL(ctx, "http://0.0.0.1/test"); err == nil {
+		t.Errorf("expected 0.0.0.0/8 current network to be blocked")
+	}
+	if err := ValidateSafeExternalURL(ctx, "http://224.0.0.1/"); err == nil {
+		t.Errorf("expected multicast IP to be blocked")
+	}
+	if err := ValidateSafeExternalURL(ctx, "http://[::1]/secret"); err == nil {
+		t.Errorf("expected IPv6 loopback to be blocked")
+	}
+	if err := ValidateSafeExternalURL(ctx, "http://[::ffff:127.0.0.1]/secret"); err == nil {
+		t.Errorf("expected IPv4-mapped IPv6 loopback to be blocked")
+	}
+
+	// 验证 ProtectedHTTPClient 的重定向安全校验
+	client := NewProtectedHTTPClient(5 * time.Second)
+	if client.CheckRedirect == nil {
+		t.Fatalf("expected CheckRedirect to be configured on ProtectedHTTPClient")
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://127.0.0.1/admin", nil)
+	if err := client.CheckRedirect(req, []*http.Request{req}); err == nil {
+		t.Errorf("expected CheckRedirect to reject internal target")
 	}
 }

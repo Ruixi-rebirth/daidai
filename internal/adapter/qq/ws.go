@@ -98,6 +98,7 @@ func (q *QQChannel) runWebSocketSession(ctx context.Context) error {
 		return fmt.Errorf("dial websocket error: %w", err)
 	}
 	defer conn.Close()
+	conn.SetReadLimit(2 * 1024 * 1024) // 2MB，防止富媒体大事件消息载荷触发 Gorilla 默认 32KB 限制断线
 
 	slog.Info("connected to qq websocket gateway successfully")
 

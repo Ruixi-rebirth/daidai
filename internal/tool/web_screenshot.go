@@ -43,7 +43,7 @@ func (t *ScreenshotTool) Name() string {
 }
 
 func (t *ScreenshotTool) Description() string {
-	return "网页快照与出图工具：对指定的公网网页进行快速截图，并同时提取页面正文。若用户提供了多个链接，仅对首个核心链接调用本工具出图（其余链接请调用 read_link 仅获取文本），避免图片冲突与刷屏。返回网页截图图片与页面正文。"
+	return "网页快照出图与深度阅读工具（默认首选！）：对用户提供的公网链接截取高清网页长图快照，并同时提取网页标题与核心正文供你深入理解、总结、答疑或编写代码。只要用户消息中出现 HTTP/HTTPS 链接且未明确要求仅纯文本，优先调用本工具，兼具视觉长图出图与正文提取能力。若用户提供了多个链接，仅对首个核心链接出图（其余辅助链接调用 read_link 仅获取文本）。"
 }
 
 func (t *ScreenshotTool) Parameters() map[string]any {
@@ -170,6 +170,11 @@ func captureChromiumScreenshot(ctx context.Context, targetURL string) ([]byte, e
 		_ = os.Remove(shotPath)
 	}()
 
+	userDataDir, uErr := os.MkdirTemp("", "daidai_chrome_user_*")
+	if uErr == nil {
+		defer os.RemoveAll(userDataDir)
+	}
+
 	cmdArgs := []string{
 		"--headless=new",
 		"--disable-gpu",
@@ -177,7 +182,13 @@ func captureChromiumScreenshot(ctx context.Context, targetURL string) ([]byte, e
 		"--disable-dev-shm-usage",
 		"--hide-scrollbars",
 		"--window-size=1280,900",
+		"--timeout=20000",
+		"--disable-background-networking",
+		"--disable-sync",
 		"--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+	}
+	if userDataDir != "" {
+		cmdArgs = append(cmdArgs, fmt.Sprintf("--user-data-dir=%s", userDataDir))
 	}
 
 	// 强制走本地 Cloudflare WARP SOCKS5 代理隧道（若已就绪）

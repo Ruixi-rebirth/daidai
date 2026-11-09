@@ -26,6 +26,7 @@ type Client struct {
 	httpClient *http.Client
 
 	mu          sync.RWMutex
+	refreshMu   sync.Mutex
 	accessToken string
 	expiresAt   time.Time
 
@@ -113,6 +114,16 @@ func (c *Client) StartTokenRefresher(ctx context.Context) error {
 }
 
 func (c *Client) refreshToken(ctx context.Context) error {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+
+	c.mu.RLock()
+	if time.Until(c.expiresAt) > 2*time.Minute && c.accessToken != "" {
+		c.mu.RUnlock()
+		return nil
+	}
+	c.mu.RUnlock()
+
 	reqBody, _ := json.Marshal(map[string]string{
 		"appId":        c.appID,
 		"clientSecret": c.secret,
@@ -337,6 +348,28 @@ func (c *Client) doPostJSON(ctx context.Context, url string, data any) ([]byte, 
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		slog.Warn("qq api 返回 401 未授权，尝试即时刷新 token 并重发请求...", "url", url)
+		if refErr := c.refreshToken(ctx); refErr == nil {
+			retryReq, rErr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+			if rErr == nil {
+				retryReq.Header.Set("Content-Type", "application/json")
+				retryReq.Header.Set("Authorization", "QQBot "+c.Token())
+				retryResp, doErr := c.httpClient.Do(retryReq)
+				if doErr == nil {
+					defer retryResp.Body.Close()
+					retryBytes, _ := io.ReadAll(retryResp.Body)
+					if retryResp.StatusCode >= 200 && retryResp.StatusCode < 300 {
+						slog.Info("qq api 401 刷新 token 后重发成功", "url", url)
+						return retryBytes, nil
+					}
+					respBytes = retryBytes
+					resp.StatusCode = retryResp.StatusCode
+				}
+			}
+		}
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

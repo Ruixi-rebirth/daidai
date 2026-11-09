@@ -281,8 +281,9 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 			})
 		}
 
-		// 若是纯 Markdown 排版卡片，或模型在调工具的同时已经给出了配文，直接返回
-		if len(directCardData) > 0 && (isRenderCard || strings.TrimSpace(resp.Content) != "") {
+		// 若是纯 Markdown 排版卡片渲染，卡片即主要产物，直接返回；
+		// 网页截图与出图 (isRenderCard 为 false) 则继续流转到下一轮，由大脑消化提取到的页面标题与正文后输出完整自然总结
+		if len(directCardData) > 0 && isRenderCard {
 			cleanText := sanitizeAssistantSpoken(resp.Content)
 			utter := &entity.Utterance{
 				Platform:   event.Platform,

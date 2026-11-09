@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -126,10 +127,14 @@ func WarpStatus() string {
 	return fmt.Sprintf("已启用 (SOCKS5: %s / HTTP: %s)", WarpSocks5Addr, WarpHTTPAddr)
 }
 
-// NewProtectedHTTPClient 创建带 Cloudflare WARP 代理路由的受保护 HTTP 客户端（用于对外网页抓取、链接出图等）
+// NewProtectedHTTPClient 创建带 Cloudflare WARP 代理路由与防 DNS 重绑定 (TOCTOU) 的受保护 HTTP 客户端（用于对外网页抓取、链接出图等）
 func NewProtectedHTTPClient(timeout time.Duration) *http.Client {
 	if timeout <= 0 {
 		timeout = 20 * time.Second
+	}
+	dialer := &net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
 	}
 	transport := &http.Transport{
 		Proxy: func(req *http.Request) (*url.URL, error) {
@@ -138,12 +143,44 @@ func NewProtectedHTTPClient(timeout time.Duration) *http.Client {
 			}
 			return http.ProxyFromEnvironment(req)
 		},
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			// 若走本地 WARP 代理隧道，允许连接本地 WARP 端口
+			if host == "127.0.0.1" && (port == "40000" || port == "40001") {
+				return dialer.DialContext(ctx, network, addr)
+			}
+			// 直连情形：防 DNS Rebinding (TOCTOU)，在建立物理 socket 握手前再次解析校验真实目标 IP
+			ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+			if err != nil {
+				return nil, fmt.Errorf("safe dial resolve failed for host %s: %w", host, err)
+			}
+			if len(ips) == 0 {
+				return nil, fmt.Errorf("no IP resolved for host %s", host)
+			}
+			for _, ip := range ips {
+				if isForbiddenTargetIP(ip) {
+					return nil, fmt.Errorf("forbidden target IP %s for host %s", ip.String(), host)
+				}
+			}
+			// 挑选首个已严格校验安全的物理 IP 直连，杜绝连接时发生二次解析劫持
+			safeAddr := net.JoinHostPort(ips[0].String(), port)
+			return dialer.DialContext(ctx, network, safeAddr)
+		},
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: timeout,
 	}
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return fmt.Errorf("stopped after 5 redirects")
+			}
+			return ValidateSafeExternalURL(req.Context(), req.URL.String())
+		},
 	}
 }
 
@@ -453,20 +490,50 @@ func ValidateSafeExternalURL(ctx context.Context, rawURL string) error {
 	return nil
 }
 
+// forbiddenCIDRs 覆盖 RFC 保留地址、局域网私网、基准测试、云厂商内网元数据及组播/广播地址
+var forbiddenCIDRs = []netip.Prefix{
+	// IPv4 (RFC 1122, 1918, 6598, 3927, 2544, 5771, 1112)
+	netip.MustParsePrefix("0.0.0.0/8"),       // 当前网络与 0.0.0.0 回环映射
+	netip.MustParsePrefix("10.0.0.0/8"),      // 私有局域网
+	netip.MustParsePrefix("100.64.0.0/10"),   // CGNAT 与云厂商元数据 (如阿里云 100.100.100.200)
+	netip.MustParsePrefix("127.0.0.0/8"),     // 本地回环
+	netip.MustParsePrefix("169.254.0.0/16"),  // 链路本地与云元数据 (如 AWS/GCP 169.254.169.254)
+	netip.MustParsePrefix("172.16.0.0/12"),   // 私有局域网
+	netip.MustParsePrefix("192.0.0.0/24"),    // IETF 协议分配
+	netip.MustParsePrefix("192.0.2.0/24"),    // TEST-NET-1
+	netip.MustParsePrefix("192.88.99.0/24"),  // 6to4 任播废弃网段
+	netip.MustParsePrefix("192.168.0.0/16"),  // 私有局域网
+	netip.MustParsePrefix("198.18.0.0/15"),   // 基准测试网段
+	netip.MustParsePrefix("198.51.100.0/24"), // TEST-NET-2
+	netip.MustParsePrefix("203.0.113.0/24"),  // TEST-NET-3
+	netip.MustParsePrefix("224.0.0.0/4"),     // 组播 Multicast
+	netip.MustParsePrefix("240.0.0.0/4"),     // 保留网段与广播 (含 255.255.255.255)
+
+	// IPv6 (RFC 4291, 6052, 6666, 3849, 4193)
+	netip.MustParsePrefix("::1/128"),         // 本地回环
+	netip.MustParsePrefix("::/128"),          // 未指定地址
+	netip.MustParsePrefix("64:ff9b::/96"),    // IPv4/IPv6 转换
+	netip.MustParsePrefix("100::/64"),        // 丢弃前缀 (Discard-Only)
+	netip.MustParsePrefix("2001:db8::/32"),   // 文档示例专用
+	netip.MustParsePrefix("fc00::/7"),        // 唯一本地私网 ULA
+	netip.MustParsePrefix("fe80::/10"),       // 链路本地
+	netip.MustParsePrefix("ff00::/8"),        // 组播 Multicast
+}
+
 func isForbiddenTargetIP(ip net.IP) bool {
 	if ip == nil {
 		return true
 	}
-	if v4 := ip.To4(); v4 != nil {
-		ip = v4
-		// 阻断 Carrier-grade NAT 100.64.0.0/10 与基准网络
-		if ip[0] == 100 && (ip[1]&0xc0) == 64 {
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok || addr.IsUnspecified() || addr.IsLoopback() || addr.IsMulticast() || addr.IsLinkLocalUnicast() {
+		return true
+	}
+	// 自动将 IPv4-mapped IPv6 (如 ::ffff:127.0.0.1) 还原为标准 IPv4
+	addr = addr.Unmap()
+	for _, prefix := range forbiddenCIDRs {
+		if prefix.Contains(addr) {
 			return true
 		}
 	}
-	return ip.IsLoopback() ||
-		ip.IsPrivate() ||
-		ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() ||
-		ip.IsUnspecified()
+	return false
 }

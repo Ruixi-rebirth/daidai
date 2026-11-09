@@ -206,7 +206,20 @@ func CosineSimilarity(a, b []float32) float32 {
 	if normA <= 0 || normB <= 0 {
 		return 0
 	}
-	return float32(dot / (math.Sqrt(normA) * math.Sqrt(normB)))
+	denom := math.Sqrt(normA) * math.Sqrt(normB)
+	if denom <= 0 || math.IsNaN(denom) {
+		return 0
+	}
+	sim := float32(dot / denom)
+	if math.IsNaN(float64(sim)) || math.IsInf(float64(sim), 0) {
+		return 0
+	}
+	if sim > 1.0 {
+		return 1.0
+	} else if sim < -1.0 {
+		return -1.0
+	}
+	return sim
 }
 
 // FuseRRF 使用倒数秩融合 (Reciprocal Rank Fusion) 将稀疏 BM25 得分与稠密向量余弦相似度合并为统一相关性分值
