@@ -25,13 +25,6 @@ in
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
-      path = with pkgs; [
-        bash
-        git
-        coreutils
-        typst
-        source-han-sans
-      ];
       serviceConfig = {
         StateDirectory = "daidai";
         WorkingDirectory = "/var/lib/daidai";
