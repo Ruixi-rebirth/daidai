@@ -258,7 +258,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 				a.replyText(ctx, event, fmt.Sprintf("发起登录失败: %v", err))
 				return
 			}
-			reply := fmt.Sprintf("【Google Antigravity 登录授权】\n请在浏览器或手机中打开以下链接，登录 Google 账号并完成授权：\n\n%s\n\n授权成功后，页面会显示一串授权码 (Authorization Code)。\n请直接回复：\n`/agy code <授权码>`\n（授权会话 5 分钟内有效）", authURL)
+			reply := fmt.Sprintf("【Google Antigravity 登录授权】\n请在浏览器或手机中打开以下链接，登录 Google 账号并完成授权：\n\n```\n%s\n```\n\n授权成功后，页面会显示一串授权码 (Authorization Code)。\n请直接回复：\n`/agy code <授权码>`\n（授权会话 5 分钟内有效）", authURL)
 			a.replyText(ctx, event, reply)
 			return
 
