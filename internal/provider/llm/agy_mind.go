@@ -107,6 +107,111 @@ func (p *AGYMindProvider) DiscoverModels(ctx context.Context) []ModelInfo {
 	return models
 }
 
+type agyUsageBucket struct {
+	ID                string  `json:"id"`
+	Name              string  `json:"name"`
+	Description       string  `json:"description"`
+	Window            string  `json:"window"`
+	RemainingFraction float64 `json:"remaining_fraction"`
+	ResetTime         string  `json:"reset_time"`
+}
+
+type agyUsageGroup struct {
+	Name        string           `json:"name"`
+	Description string           `json:"description"`
+	Buckets     []agyUsageBucket `json:"buckets"`
+}
+
+type agyUsageEnvelope struct {
+	Status   string `json:"status"`
+	Response string `json:"response"`
+	Command  struct {
+		Name string `json:"name"`
+		Data struct {
+			Description string          `json:"description"`
+			Groups      []agyUsageGroup `json:"groups"`
+		} `json:"data"`
+	} `json:"command"`
+}
+
+// FormatAGYUsageOutput 将 `agy -p "/usage" --output-format json` 响应解析并格式化为结构化 Markdown
+func FormatAGYUsageOutput(raw []byte) (string, error) {
+	var env agyUsageEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return "", fmt.Errorf("解析 AGY 配额 JSON 失败: %w", err)
+	}
+
+	groups := env.Command.Data.Groups
+	if len(groups) == 0 {
+		if strings.TrimSpace(env.Response) != "" {
+			return strings.TrimSpace(env.Response), nil
+		}
+		return "", fmt.Errorf("未从 AGY 响应中提取到有效配额组数据")
+	}
+
+	var sb strings.Builder
+	sb.WriteString("### AGY 实时配额与剩余使用量 (Quota Pools)\n\n")
+
+	for i, g := range groups {
+		sb.WriteString(fmt.Sprintf("#### %d. %s\n", i+1, g.Name))
+		if g.Description != "" {
+			sb.WriteString(fmt.Sprintf("- 说明：%s\n", g.Description))
+		}
+		for _, b := range g.Buckets {
+			remPct := b.RemainingFraction * 100
+			resetDesc := ""
+			if b.ResetTime != "" {
+				if t, err := time.Parse(time.RFC3339, b.ResetTime); err == nil {
+					resetDesc = fmt.Sprintf("，刷新时间: %s", t.Local().Format("2006-01-02 15:04:05"))
+				} else {
+					resetDesc = fmt.Sprintf("，刷新时间: %s", b.ResetTime)
+				}
+			}
+			hint := ""
+			if b.Description != "" {
+				hint = fmt.Sprintf(" (%s)", b.Description)
+			}
+			sb.WriteString(fmt.Sprintf("- **%s**：剩余 **%.1f%%**%s%s\n", b.Name, remPct, resetDesc, hint))
+		}
+		sb.WriteString("\n")
+	}
+
+	return strings.TrimSpace(sb.String()), nil
+}
+
+// GetUsage 查询 AGY 底层当前各大配额池的实时剩余使用量与重置倒计时 (实现 UsageDiscoverer)
+func (p *AGYMindProvider) GetUsage(ctx context.Context) (string, error) {
+	p.mu.RLock()
+	command := p.command
+	cwd := p.workingDir
+	p.mu.RUnlock()
+
+	usageCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(usageCtx, command, "-p", "/usage", "--output-format", "json")
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		cmd.Env = append(os.Environ(), "HOME="+home)
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil && cmd.Process.Pid > 0 {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("执行 %s -p /usage 失败: %w", command, err)
+	}
+
+	return FormatAGYUsageOutput(out)
+}
+
 // ParseCLIModelsOutput 解析 `agy models` 标准输出，自动聚合模型 ID、展示名称与支持的思考强度列表
 func ParseCLIModelsOutput(rawOutput, channel string) []ModelInfo {
 	if channel == "" {

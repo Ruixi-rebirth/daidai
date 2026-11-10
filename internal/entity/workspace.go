@@ -26,6 +26,55 @@ type WorkspaceManager struct {
 	cache      map[string]string // channelID -> currentWorkspacePath
 }
 
+// ResolveSandboxDir 解析并规范化沙盒目录路径，确保沙盒处于受隔离的安全子目录中，
+// 若未配置或直接指向主目录根/系统根，自动收敛为 ~/sandbox
+func ResolveSandboxDir(defaultDir string) string {
+	def := strings.TrimSpace(defaultDir)
+	home, _ := os.UserHomeDir()
+	if home != "" {
+		home = filepath.Clean(home)
+	}
+
+	if def == "" {
+		if home != "" {
+			return filepath.Join(home, "sandbox")
+		}
+		return "data/workspace/sandbox"
+	}
+
+	if strings.HasPrefix(def, "~") {
+		sub := strings.TrimPrefix(def, "~")
+		sub = strings.TrimPrefix(sub, "/")
+		sub = strings.TrimPrefix(sub, string(filepath.Separator))
+		if sub == "" {
+			if home != "" {
+				return filepath.Join(home, "sandbox")
+			}
+			return "data/workspace/sandbox"
+		}
+		if home != "" {
+			return filepath.Join(home, sub)
+		}
+		return filepath.Clean(sub)
+	}
+
+	if !filepath.IsAbs(def) {
+		if abs, err := filepath.Abs(def); err == nil {
+			def = abs
+		}
+	}
+	def = filepath.Clean(def)
+
+	if def == "/" || (home != "" && def == home) {
+		if home != "" {
+			return filepath.Join(home, "sandbox")
+		}
+		return "/tmp/daidai/sandbox"
+	}
+
+	return def
+}
+
 // NewWorkspaceManager 实例化工作空间中枢
 func NewWorkspaceManager(defaultDir string, dbMgr *db.Manager) *WorkspaceManager {
 	return NewWorkspaceManagerForPlatform("qq", defaultDir, dbMgr)
@@ -33,20 +82,7 @@ func NewWorkspaceManager(defaultDir string, dbMgr *db.Manager) *WorkspaceManager
 
 // NewWorkspaceManagerForPlatform 按指定平台实例化工作空间中枢
 func NewWorkspaceManagerForPlatform(platform, defaultDir string, dbMgr *db.Manager) *WorkspaceManager {
-	def := strings.TrimSpace(defaultDir)
-	if def == "" {
-		def = "data/workspace/sandbox"
-	}
-	if strings.HasPrefix(def, "~") {
-		if home, err := os.UserHomeDir(); err == nil && home != "" {
-			def = filepath.Join(home, strings.TrimPrefix(def, "~"))
-		}
-	} else if !filepath.IsAbs(def) {
-		if abs, err := filepath.Abs(def); err == nil {
-			def = abs
-		}
-	}
-	def = filepath.Clean(def)
+	def := ResolveSandboxDir(defaultDir)
 	_ = os.MkdirAll(def, 0755)
 
 	if dbMgr == nil {
@@ -164,6 +200,12 @@ func (wm *WorkspaceManager) CleanSandbox() error {
 		return fmt.Errorf("沙盒目录未初始化")
 	}
 
+	home, _ := os.UserHomeDir()
+	cleanSandbox := filepath.Clean(sandbox)
+	if cleanSandbox == "/" || (home != "" && cleanSandbox == filepath.Clean(home)) {
+		return fmt.Errorf("安全拒绝：禁止清空主目录或根目录 (%s)", sandbox)
+	}
+
 	entries, err := os.ReadDir(sandbox)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -207,14 +249,19 @@ func (wm *WorkspaceManager) GetCurrent(channelID string) (string, string) {
 	// 从 SQLite 状态表中拉取
 	if wm.db != nil {
 		if active, err := wm.db.GetActiveWorkspace(wm.platform, channelID); err == nil && active != nil && active.Path != "" {
-			if st, sErr := os.Stat(active.Path); sErr == nil && st.IsDir() {
+			home, _ := os.UserHomeDir()
+			cleanActive := filepath.Clean(active.Path)
+			if cleanActive == "/" || (home != "" && cleanActive == filepath.Clean(home)) || (strings.EqualFold(active.ProjectName, "sandbox") && cleanActive != wm.defaultDir) {
+				_ = wm.db.RemoveChannelWorkspace(wm.platform, channelID, active.Path)
+			} else if st, sErr := os.Stat(cleanActive); sErr == nil && st.IsDir() {
 				wm.mu.Lock()
-				wm.cache[channelID] = active.Path
+				wm.cache[channelID] = cleanActive
 				wm.mu.Unlock()
-				return active.Path, filepath.Base(active.Path)
+				return cleanActive, filepath.Base(cleanActive)
+			} else {
+				// 物理目录已不存在，自动自愈剔除失效记录
+				_ = wm.db.RemoveChannelWorkspace(wm.platform, channelID, active.Path)
 			}
-			// 物理目录已不存在，自动自愈剔除失效记录
-			_ = wm.db.RemoveChannelWorkspace(wm.platform, channelID, active.Path)
 		}
 	}
 
@@ -350,9 +397,19 @@ func (wm *WorkspaceManager) ListBookmarked(channelID string) (currentPath string
 	if wm.db != nil {
 		entries, _ := wm.db.ListChannelWorkspaces(wm.platform, channelID)
 		hasCurrent := false
+		home, _ := os.UserHomeDir()
+		cleanHome := ""
+		if home != "" {
+			cleanHome = filepath.Clean(home)
+		}
 		for _, e := range entries {
-			if !wm.IsSandbox(e.Path) {
-				if st, err := os.Stat(e.Path); err != nil || !st.IsDir() {
+			cleanPath := filepath.Clean(e.Path)
+			if cleanPath == "/" || (cleanHome != "" && cleanPath == cleanHome) {
+				_ = wm.db.RemoveChannelWorkspace(wm.platform, channelID, e.Path)
+				continue
+			}
+			if !wm.IsSandbox(cleanPath) {
+				if st, err := os.Stat(cleanPath); err != nil || !st.IsDir() {
 					_ = wm.db.RemoveChannelWorkspace(wm.platform, channelID, e.Path)
 					continue
 				}

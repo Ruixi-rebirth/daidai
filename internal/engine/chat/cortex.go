@@ -82,6 +82,18 @@ func (c *Cortex) ModelList() string {
 	return res.Text
 }
 
+// ModelUsage 返回实时模型通道与配额用量详情
+func (c *Cortex) ModelUsage() string {
+	if c.hands == nil {
+		return c.MindStatus()
+	}
+	res, err := c.hands.Execute(context.Background(), "switch_model", json.RawMessage(`{"action":"usage"}`))
+	if err != nil || res == nil || res.Text == "" {
+		return c.ModelList()
+	}
+	return res.Text
+}
+
 // Think 对感知事件进行认知推理并一次性合成全息生命表达体 (Utterance)
 func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity.Utterance, error) {
 	// 注入角色设定、现实时空锚点与长期记忆沉淀

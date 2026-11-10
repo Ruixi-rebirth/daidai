@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -91,18 +90,7 @@ func main() {
 	if defaultWorkDir == "" && len(cfg.Agent.Runners) > 0 {
 		defaultWorkDir = cfg.Agent.Runners[0].DefaultDir
 	}
-	if defaultWorkDir == "" {
-		defaultWorkDir = "data/workspace/sandbox"
-	}
-	if strings.HasPrefix(defaultWorkDir, "~") {
-		if home, err := os.UserHomeDir(); err == nil && home != "" {
-			defaultWorkDir = filepath.Join(home, strings.TrimPrefix(defaultWorkDir, "~"))
-		}
-	} else if !filepath.IsAbs(defaultWorkDir) {
-		if abs, err := filepath.Abs(defaultWorkDir); err == nil {
-			defaultWorkDir = abs
-		}
-	}
+	defaultWorkDir = entity.ResolveSandboxDir(defaultWorkDir)
 	_ = os.MkdirAll(defaultWorkDir, 0755)
 
 	agyMind := llm.NewAGYMindProvider(llm.AGYMindConfig{

@@ -115,7 +115,9 @@ func (t *ModelSwitchTool) Execute(ctx context.Context, rawArgs json.RawMessage) 
 	switch action {
 	case "current":
 		return t.handleCurrent(), nil
-	case "list", "usage":
+	case "usage":
+		return t.handleUsage(ctx, channel), nil
+	case "list":
 		return t.handleList(channel), nil
 	case "switch":
 		if ev := entity.SensoryEventFromContext(ctx); ev != nil && t.immune != nil {
@@ -128,6 +130,38 @@ func (t *ModelSwitchTool) Execute(ctx context.Context, rawArgs json.RawMessage) 
 		return &core.ToolResult{
 			Text: fmt.Sprintf("未知操作 %q，支持的操作为 current, list, switch, usage", action),
 		}, nil
+	}
+}
+
+func (t *ModelSwitchTool) handleUsage(ctx context.Context, channelFilter string) *core.ToolResult {
+	filter := strings.ToUpper(strings.TrimSpace(channelFilter))
+
+	var sb strings.Builder
+	listRes := t.handleList(filter)
+	sb.WriteString(listRes.Text)
+
+	targetChan := filter
+	if targetChan == "" {
+		curr := t.router.CurrentMind()
+		if strings.EqualFold(curr.Channel, "AGY") {
+			targetChan = "AGY"
+		}
+	}
+
+	if targetChan != "" {
+		if usageText, err := t.router.QueryChannelUsage(ctx, targetChan); err == nil && usageText != "" {
+			sb.WriteString("\n\n---\n\n")
+			sb.WriteString(usageText)
+		}
+	} else {
+		if usageText, err := t.router.QueryChannelUsage(ctx, "AGY"); err == nil && usageText != "" {
+			sb.WriteString("\n\n---\n\n")
+			sb.WriteString(usageText)
+		}
+	}
+
+	return &core.ToolResult{
+		Text: strings.TrimSpace(sb.String()),
 	}
 }
 

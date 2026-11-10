@@ -123,3 +123,62 @@ func TestWorkspaceManager_AutoPrunePhysicallyDeletedWorkspace(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveSandboxDir(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	if home != "" {
+		home = filepath.Clean(home)
+		if res := ResolveSandboxDir(""); res != filepath.Join(home, "sandbox") {
+			t.Errorf("expected empty to resolve to home/sandbox, got: %s", res)
+		}
+		if res := ResolveSandboxDir("~"); res != filepath.Join(home, "sandbox") {
+			t.Errorf("expected ~ to resolve to home/sandbox, got: %s", res)
+		}
+		if res := ResolveSandboxDir(home); res != filepath.Join(home, "sandbox") {
+			t.Errorf("expected exact home to resolve to home/sandbox, got: %s", res)
+		}
+	}
+
+	custom := filepath.Join(t.TempDir(), "my-custom-box")
+	if res := ResolveSandboxDir(custom); res != custom {
+		t.Errorf("expected custom dir to be preserved, got: %s", res)
+	}
+}
+
+func TestCleanSandbox_SafeAndEffective(t *testing.T) {
+	tempBase := t.TempDir()
+	sandbox := filepath.Join(tempBase, "sandbox")
+	_ = os.MkdirAll(sandbox, 0755)
+
+	// 创建沙盒内文件与 .gitignore
+	_ = os.WriteFile(filepath.Join(sandbox, ".gitignore"), []byte("*\n"), 0644)
+	_ = os.WriteFile(filepath.Join(sandbox, "draft.py"), []byte("print('hello')\n"), 0644)
+	_ = os.MkdirAll(filepath.Join(sandbox, "sub_temp"), 0755)
+
+	wm := NewWorkspaceManager(sandbox, nil)
+
+	// 1. 清理沙盒
+	if err := wm.CleanSandbox(); err != nil {
+		t.Fatalf("CleanSandbox failed: %v", err)
+	}
+
+	// 2. 验证临时文件已清理，.gitignore 被保留
+	if _, err := os.Stat(filepath.Join(sandbox, "draft.py")); !os.IsNotExist(err) {
+		t.Errorf("expected draft.py to be removed")
+	}
+	if _, err := os.Stat(filepath.Join(sandbox, "sub_temp")); !os.IsNotExist(err) {
+		t.Errorf("expected sub_temp to be removed")
+	}
+	if _, err := os.Stat(filepath.Join(sandbox, ".gitignore")); err != nil {
+		t.Errorf("expected .gitignore to be preserved")
+	}
+
+	// 3. 验证当沙盒被意外置为根或家目录时拒绝清空
+	home, _ := os.UserHomeDir()
+	if home != "" {
+		wmBad := &WorkspaceManager{defaultDir: home}
+		if err := wmBad.CleanSandbox(); err == nil {
+			t.Errorf("expected error when cleaning home dir, got nil")
+		}
+	}
+}

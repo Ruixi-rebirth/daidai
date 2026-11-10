@@ -30,6 +30,11 @@ type ModelDiscoverer interface {
 	DiscoverModels(ctx context.Context) []ModelInfo
 }
 
+// UsageDiscoverer 支持查询通道配额与实时用量信息的驱动接口
+type UsageDiscoverer interface {
+	GetUsage(ctx context.Context) (string, error)
+}
+
 // ModelInfo 模型定义元数据 (由各通道运行时动态探测或注册生成)
 type ModelInfo struct {
 	ID               string   `json:"id"`
@@ -267,6 +272,29 @@ func (r *MindRouter) Channels() []string {
 	}
 	sort.Strings(channels)
 	return channels
+}
+
+// QueryChannelUsage 查询指定通道或当前激活通道的配额与实时用量
+func (r *MindRouter) QueryChannelUsage(ctx context.Context, channel string) (string, error) {
+	chKey := strings.ToUpper(strings.TrimSpace(channel))
+	if chKey == "" {
+		curr := r.CurrentMind()
+		chKey = curr.Channel
+	}
+
+	r.mu.RLock()
+	prov, exists := r.providers[chKey]
+	r.mu.RUnlock()
+
+	if !exists {
+		return "", fmt.Errorf("未找到通道 %s", chKey)
+	}
+
+	if ud, ok := prov.(UsageDiscoverer); ok {
+		return ud.GetUsage(ctx)
+	}
+
+	return "", fmt.Errorf("通道 %s 未提供动态用量探测接口", chKey)
 }
 
 // ResolveModelAndEffort 在已探测的模型池中智能解析模型名与思考强度

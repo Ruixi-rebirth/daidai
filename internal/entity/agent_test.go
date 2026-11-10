@@ -35,6 +35,10 @@ func (m *mockCognition) ModelList() string {
 	return "【实时探测可用心智模型池】\n### API 通道\n- `mock-model` *(当前激活)*"
 }
 
+func (m *mockCognition) ModelUsage() string {
+	return "【实时探测可用心智模型池】\n### API 通道\n- `mock-model` *(当前激活)*\n\n---\n\n### AGY 实时配额与剩余使用量 (Quota Pools)\n- 5-Hour Limit: 100%"
+}
+
 func (m *mockCognition) Think(ctx context.Context, event *SensoryEvent) (*Utterance, error) {
 	if m.delay > 0 {
 		select {

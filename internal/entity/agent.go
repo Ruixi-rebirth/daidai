@@ -220,7 +220,13 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			a.replyText(ctx, event, strings.Join(sections, "\n\n"))
 			return
 
-		case "/model", "/models", "/usage":
+		case "/usage":
+			if a.Cognition != nil {
+				a.replyText(ctx, event, a.Cognition.ModelUsage())
+				return
+			}
+
+		case "/model", "/models":
 			if a.Cognition != nil {
 				a.replyText(ctx, event, a.Cognition.ModelList())
 				return
