@@ -347,21 +347,40 @@ func runOCIScheduler(ctx context.Context, ociCfg config.OCIConfig, partnerID str
 				})
 			}
 
-			// 每小时防扣费安全巡检
+			// 每小时防扣费多维安全巡检 (实时监测新增扣费、闲置预留 IP 与存储超额)
 			hourKey := now.Format("2006-01-02-15")
 			if lastHourlyCheck != hourKey {
 				lastHourlyCheck = hourKey
 				report, err := tool.FetchBillReport(ctx, client, loc)
-				if err == nil && report.TodayCost > 0.0001 && report.TodayCost > alertedCost+0.0001 {
-					alertedCost = report.TodayCost
-					slog.Warn("oci_scheduler: 检测到新增扣费，立即推送预警", "todayCost", report.TodayCost)
-					alertMsg := fmt.Sprintf("[OCI 异常扣费预警]\n检测到今日产生新增费用: %.4f %s！\n\n%s", report.TodayCost, report.Currency, report.Markdown)
-					_ = channels.Transmit(ctx, &entity.Utterance{
-						Platform:  "qq",
-						IsGroup:   false,
-						ChannelID: partnerID,
-						Text:      alertMsg,
-					})
+				if err == nil {
+					var alertReasons []string
+
+					// 1. 突发新增费用告警
+					if report.TodayCost > 0.0001 && report.TodayCost > alertedCost+0.0001 {
+						alertedCost = report.TodayCost
+						alertReasons = append(alertReasons, fmt.Sprintf("今日产生新增扣费: %.4f %s", report.TodayCost, report.Currency))
+					}
+
+					// 2. 闲置未绑定预留 IP 告警 (闲置 IP 在 OCI 会按小时计费)
+					if len(report.UnboundIPs) > 0 {
+						alertReasons = append(alertReasons, fmt.Sprintf("发现 %d 个闲置未绑定的预留公网 IP (%s)，存在闲置扣费风险，建议及时释放", len(report.UnboundIPs), strings.Join(report.UnboundIPs, ", ")))
+					}
+
+					// 3. 存储容量超额告警 (超过 200 GB 免费额度)
+					if report.StorageGB > 200 {
+						alertReasons = append(alertReasons, fmt.Sprintf("总存储占用已达 %d GB，超出 200 GB 免费额度，存在超额计费风险", report.StorageGB))
+					}
+
+					if len(alertReasons) > 0 {
+						slog.Warn("oci_scheduler: 触发防扣费巡检预警", "reasons", alertReasons)
+						alertMsg := fmt.Sprintf("[OCI 资源防扣费安全预警]\n巡检发现以下异常项：\n- %s\n\n%s", strings.Join(alertReasons, "\n- "), report.Markdown)
+						_ = channels.Transmit(ctx, &entity.Utterance{
+							Platform:  "qq",
+							IsGroup:   false,
+							ChannelID: partnerID,
+							Text:      alertMsg,
+						})
+					}
 				}
 			}
 		}

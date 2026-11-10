@@ -25,7 +25,7 @@ in
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
-      path = [ config.environment.systemPath ];
+      path = [ config.system.path ];
       serviceConfig = {
         StateDirectory = "daidai";
         WorkingDirectory = "/var/lib/daidai";
