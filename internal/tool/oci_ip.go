@@ -33,7 +33,7 @@ func (t *OCIIPTool) Name() string {
 }
 
 func (t *OCIIPTool) Description() string {
-	return "Oracle Cloud (OCI) 预留公网 IP 管理与换绑工具。支持查看当前公网与预留 IP 列表 (status)、一键释放闲置预留 IP (cleanup)、按纯净度与欺诈分筛选刷取候选优质 IP (roll)、检测指定 IP 质量 (check) 以及将优质 IP 无损绑定至服务器 (bind)。换绑与清理等高危操作仅限核心搭档。"
+	return "Oracle Cloud (OCI) 预留公网 IP 管理与换绑工具。支持查看当前公网与预留 IP 列表 (status)、一键释放/删除闲置预留 IP (cleanup)、按纯净度与欺诈分筛选刷取候选优质 IP (roll)、检测指定 IP 质量 (check) 以及将优质 IP 无损绑定至服务器 (bind)。当用户要求查看、刷取、换绑、释放或删除预留 IP 时，必须实际调用本工具执行，绝对禁止在未调用工具的情况下虚构回复已操作完成。"
 }
 
 func (t *OCIIPTool) Parameters() map[string]any {

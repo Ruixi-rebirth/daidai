@@ -306,6 +306,7 @@ func runOCIScheduler(ctx context.Context, ociCfg config.OCIConfig, partnerID str
 
 	var lastDailyPush string
 	var lastHourlyCheck string
+	var lastAlertedDay string
 	var alertedCost float64
 
 	for {
@@ -315,6 +316,12 @@ func runOCIScheduler(ctx context.Context, ociCfg config.OCIConfig, partnerID str
 		case <-ticker.C:
 			now := time.Now().In(loc)
 			todayStr := now.Format("2006-01-02")
+
+			// 跨日重置当天已预警扣费水位
+			if todayStr != lastAlertedDay {
+				lastAlertedDay = todayStr
+				alertedCost = 0
+			}
 
 			// 每日定时账单播报
 			if now.Hour() == pushHour && now.Minute() >= pushMin && lastDailyPush != todayStr {
@@ -348,7 +355,7 @@ func runOCIScheduler(ctx context.Context, ociCfg config.OCIConfig, partnerID str
 				if err == nil && report.TodayCost > 0.0001 && report.TodayCost > alertedCost+0.0001 {
 					alertedCost = report.TodayCost
 					slog.Warn("oci_scheduler: 检测到新增扣费，立即推送预警", "todayCost", report.TodayCost)
-					alertMsg := fmt.Sprintf("⚠️ [OCI 异常扣费预警]\n检测到今日产生新增费用: %.4f %s！\n\n%s", report.TodayCost, report.Currency, report.Markdown)
+					alertMsg := fmt.Sprintf("[OCI 异常扣费预警]\n检测到今日产生新增费用: %.4f %s！\n\n%s", report.TodayCost, report.Currency, report.Markdown)
 					_ = channels.Transmit(ctx, &entity.Utterance{
 						Platform:  "qq",
 						IsGroup:   false,
