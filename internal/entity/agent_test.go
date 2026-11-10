@@ -31,6 +31,10 @@ func (m *mockCognition) MindStatus() string {
 	return "【当前心智运行状态】\n- 激活模型：mock-model"
 }
 
+func (m *mockCognition) ModelList() string {
+	return "【实时探测可用心智模型池】\n### API 通道\n- `mock-model` *(当前激活)*"
+}
+
 func (m *mockCognition) Think(ctx context.Context, event *SensoryEvent) (*Utterance, error) {
 	if m.delay > 0 {
 		select {

@@ -220,10 +220,41 @@ func (r *MindRouter) FormatCurrentStatus() string {
 // ListModels 列出所有已探测/注册的可用模型定义
 func (r *MindRouter) ListModels() []ModelInfo {
 	r.mu.RLock()
+	needRefresh := len(r.models) == 0
+	r.mu.RUnlock()
+
+	if needRefresh {
+		r.RefreshModels(context.Background())
+	}
+
+	r.mu.RLock()
 	defer r.mu.RUnlock()
 	result := make([]ModelInfo, len(r.models))
 	copy(result, r.models)
 	return result
+}
+
+// RefreshModels 重新触发所有已挂载通道的模型探测并刷新模型池
+func (r *MindRouter) RefreshModels(ctx context.Context) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var newModels []ModelInfo
+	for chKey, prov := range r.providers {
+		if disc, ok := prov.(ModelDiscoverer); ok {
+			probed := disc.DiscoverModels(ctx)
+			for _, m := range probed {
+				m.Channel = chKey
+				if m.Name == "" {
+					m.Name = m.ID
+				}
+				newModels = append(newModels, m)
+			}
+		}
+	}
+	if len(newModels) > 0 {
+		r.models = newModels
+	}
 }
 
 // Channels 列出当前已挂载的所有通道标识

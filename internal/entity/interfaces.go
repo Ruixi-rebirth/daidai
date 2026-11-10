@@ -40,4 +40,5 @@ type Memory interface {
 type Cognition interface {
 	Think(ctx context.Context, event *SensoryEvent) (*Utterance, error)
 	MindStatus() string
+	ModelList() string
 }

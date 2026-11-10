@@ -214,6 +214,12 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			a.replyText(ctx, event, strings.Join(sections, "\n\n"))
 			return
 
+		case "/model", "/models", "/usage":
+			if a.Cognition != nil {
+				a.replyText(ctx, event, a.Cognition.ModelList())
+				return
+			}
+
 		case "/stop":
 			if a.Immune != nil {
 				if err := a.Immune.VerifyDelegationPerm(event.Role); err != nil {
@@ -325,6 +331,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 		case "/help":
 			helpText := fmt.Sprintf(`【%s · 控制指令指引】
 - /status   : 查看生命体运行指标与活跃工单
+- /models   : 查看实时心智模型池、各通道状态与用量说明
 - /stop     : 紧急中断正在运行的思考与后台工单
 - /reset    : 重开当前会话 (清空当前项目 agy 会话与近期上下文)
 - /pwd      : 查看当前所在工作空间与运行模式

@@ -86,4 +86,19 @@ func TestModelSwitchTool_Flow(t *testing.T) {
 	if !strings.Contains(currRes2.Text, "Claude Sonnet") || !strings.Contains(currRes2.Text, "思考强度：medium") {
 		t.Fatalf("current output after switch unexpected: %s", currRes2.Text)
 	}
+
+	// 6. 指定查询 AGY 通道模型与 usage 动作
+	agyUsageRes, err := switchTool.Execute(context.Background(), json.RawMessage(`{"action":"usage","channel":"AGY"}`))
+	if err != nil {
+		t.Fatalf("failed to query agy usage: %v", err)
+	}
+	if !strings.Contains(agyUsageRes.Text, "AGY 通道") || !strings.Contains(agyUsageRes.Text, "Google Antigravity") {
+		t.Fatalf("agy usage output unexpected: %s", agyUsageRes.Text)
+	}
+
+	// 7. 查询不存在的通道，预期友好的挂载通道指引
+	unknownChanRes, _ := switchTool.Execute(context.Background(), json.RawMessage(`{"action":"list","channel":"FOO"}`))
+	if !strings.Contains(unknownChanRes.Text, "未探测到 FOO 通道模型") {
+		t.Fatalf("expected unknown channel hint, got: %s", unknownChanRes.Text)
+	}
 }

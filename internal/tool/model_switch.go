@@ -30,14 +30,14 @@ func (t *ModelSwitchTool) Name() string {
 }
 
 func (t *ModelSwitchTool) Description() string {
-	return "查看或切换当前机器人的心智模型及思考强度 (effort)。支持在所有已挂载通道之间无缝热切换，支持调整思考强度 (low, medium, high, xhigh, max)，支持查询当前模型与列出所有动态发现的可用模型。"
+	return "查看、列出或切换心智模型与思考强度 (effort)，查询各通道模型池与用量配额状态 (usage)。当用户询问当前模型、有哪些可用模型、AGY 状态/模型/用量/配额 (usage)、API 通道模型或请求切换模型时，必须调用本工具获取最新权威数据，严禁凭空臆造。支持 action: 'list' (列出所有或指定通道可用模型与配额说明)、'current' (查看当前激活模型)、'switch' (热切换模型或调整思考强度)、'usage' (查询模型通道状态与用量计费说明)。"
 }
 
 func (t *ModelSwitchTool) Parameters() map[string]any {
 	channels := t.router.Channels()
-	channelDesc := "可选指定通道类型"
+	channelDesc := "可选指定通道类型，如 'AGY' 或 'API'"
 	if len(channels) > 0 {
-		channelDesc = fmt.Sprintf("可选指定通道类型，当前已挂载通道: [%s]", strings.Join(channels, ", "))
+		channelDesc = fmt.Sprintf("可选指定通道类型，如 'AGY' 或 'API'，当前已挂载通道: [%s]", strings.Join(channels, ", "))
 	}
 	channelProp := map[string]any{
 		"type":        "string",
@@ -67,8 +67,8 @@ func (t *ModelSwitchTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"action": map[string]any{
 				"type":        "string",
-				"enum":        []string{"current", "list", "switch"},
-				"description": "执行动作：'current' 查看当前模型与思考强度，'list' 列出所有可用模型，'switch' 切换模型或调整思考强度",
+				"enum":        []string{"current", "list", "switch", "usage"},
+				"description": "执行动作：'list' 列出所有通道或指定通道可用模型与配额状态，'current' 查看当前激活模型与思考强度，'switch' 切换模型或调整思考强度，'usage' 查询各通道模型用量与计费配额说明",
 			},
 			"model": map[string]any{
 				"type":        "string",
@@ -105,6 +105,8 @@ func (t *ModelSwitchTool) Execute(ctx context.Context, rawArgs json.RawMessage) 
 	if action == "" {
 		if model != "" || effort != "" {
 			action = "switch"
+		} else if channel != "" {
+			action = "list"
 		} else {
 			action = "current"
 		}
@@ -113,8 +115,8 @@ func (t *ModelSwitchTool) Execute(ctx context.Context, rawArgs json.RawMessage) 
 	switch action {
 	case "current":
 		return t.handleCurrent(), nil
-	case "list":
-		return t.handleList(), nil
+	case "list", "usage":
+		return t.handleList(channel), nil
 	case "switch":
 		if ev := entity.SensoryEventFromContext(ctx); ev != nil && t.immune != nil {
 			if err := t.immune.VerifyDelegationPerm(ev.Role); err != nil {
@@ -124,7 +126,7 @@ func (t *ModelSwitchTool) Execute(ctx context.Context, rawArgs json.RawMessage) 
 		return t.handleSwitch(model, channel, effort), nil
 	default:
 		return &core.ToolResult{
-			Text: fmt.Sprintf("未知操作 %q，支持的操作为 current, list, switch", action),
+			Text: fmt.Sprintf("未知操作 %q，支持的操作为 current, list, switch, usage", action),
 		}, nil
 	}
 }
@@ -135,7 +137,7 @@ func (t *ModelSwitchTool) handleCurrent() *core.ToolResult {
 	}
 }
 
-func (t *ModelSwitchTool) handleList() *core.ToolResult {
+func (t *ModelSwitchTool) handleList(channelFilter string) *core.ToolResult {
 	models := t.router.ListModels()
 	curr := t.router.CurrentMind()
 
@@ -150,12 +152,47 @@ func (t *ModelSwitchTool) handleList() *core.ToolResult {
 		channelsMap[ch] = append(channelsMap[ch], m)
 	}
 
+	filter := strings.ToUpper(strings.TrimSpace(channelFilter))
+	if filter != "" {
+		if _, exists := channelsMap[filter]; !exists {
+			t.router.RefreshModels(context.Background())
+			models = t.router.ListModels()
+			channelsMap = make(map[string][]llm.ModelInfo)
+			channelOrder = nil
+			for _, m := range models {
+				ch := m.Channel
+				if _, exists := channelsMap[ch]; !exists {
+					channelOrder = append(channelOrder, ch)
+				}
+				channelsMap[ch] = append(channelsMap[ch], m)
+			}
+		}
+
+		if _, exists := channelsMap[filter]; !exists {
+			allChans := t.router.Channels()
+			return &core.ToolResult{
+				Text: fmt.Sprintf("【未探测到 %s 通道模型】\n当前系统挂载的通道为: [%s]。", filter, strings.Join(allChans, ", ")),
+			}
+		}
+		channelOrder = []string{filter}
+	}
+
 	var sb strings.Builder
-	sb.WriteString("【实时探测可用心智模型池】\n\n")
+	if filter != "" {
+		sb.WriteString(fmt.Sprintf("【实时探测可用心智模型池 · %s 通道】\n\n", filter))
+	} else {
+		sb.WriteString("【实时探测可用心智模型池】\n\n")
+	}
 
 	for _, ch := range channelOrder {
 		chModels := channelsMap[ch]
 		sb.WriteString(fmt.Sprintf("### %s 通道\n", ch))
+		switch ch {
+		case "AGY":
+			sb.WriteString("- 通道属性：Google Antigravity 自驱智能体沙箱（走本地官方授权配额，0 额外 Token 计费开销）\n")
+		case "API":
+			sb.WriteString("- 通道属性：OpenAI 兼容协议高可用端点（按 Token 计费）\n")
+		}
 		for _, m := range chModels {
 			activeTag := ""
 			if strings.EqualFold(curr.Channel, ch) && curr.Model == m.ID {
@@ -181,6 +218,8 @@ func (t *ModelSwitchTool) handleList() *core.ToolResult {
 		}
 		sb.WriteString("\n")
 	}
+
+	sb.WriteString("说明：可通过 switch_model(model=\"...\", effort=\"...\") 无缝热切换心智或调整思考强度。")
 
 	return &core.ToolResult{
 		Text: strings.TrimSpace(sb.String()),

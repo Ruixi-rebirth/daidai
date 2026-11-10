@@ -70,6 +70,18 @@ func (c *Cortex) MindStatus() string {
 	return fmt.Sprintf("【当前心智运行状态】\n- 激活模型：%s", c.llm.Name())
 }
 
+// ModelList 返回实时心智模型池与各通道列表
+func (c *Cortex) ModelList() string {
+	if c.hands == nil {
+		return c.MindStatus()
+	}
+	res, err := c.hands.Execute(context.Background(), "switch_model", json.RawMessage(`{"action":"list"}`))
+	if err != nil || res == nil || res.Text == "" {
+		return c.MindStatus()
+	}
+	return res.Text
+}
+
 // Think 对感知事件进行认知推理并一次性合成全息生命表达体 (Utterance)
 func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity.Utterance, error) {
 	// 注入角色设定、现实时空锚点与长期记忆沉淀
@@ -77,6 +89,10 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 	weekdayCn := [...]string{"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"}[now.Weekday()]
 	timeContext := fmt.Sprintf("\n【当前客观物理时空】：%s %s (本地时区: %s)\n",
 		now.Format("2006-01-02 15:04:05"), weekdayCn, now.Location().String())
+
+	if mindStatus := c.MindStatus(); mindStatus != "" {
+		timeContext += mindStatus + "\n"
+	}
 
 	if c.workspaces != nil && event != nil && event.Role != entity.RoleGuest {
 		wsPath, wsName := c.workspaces.GetCurrent(event.ChannelID)
