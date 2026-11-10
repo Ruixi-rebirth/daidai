@@ -204,11 +204,39 @@ func (m *AGYAuthManager) SubmitCode(ctx context.Context, code string) (string, e
 		return "", fmt.Errorf("写入授权码失败: %w", err)
 	}
 
-	// 等待最多 10 秒检测凭证更新
-	deadline := time.Now().Add(10 * time.Second)
+	// 等待最多 15 秒检测凭证更新，同时异步监听 PTY 输出捕获 Google OAuth 错误
+	deadline := time.Now().Add(15 * time.Second)
 	var finalEmail string
+	var ptyOut strings.Builder
+	readBuf := make([]byte, 1024)
+
 	for time.Now().Before(deadline) {
-		time.Sleep(500 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
+
+		_ = sess.master.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		if n, _ := sess.master.Read(readBuf); n > 0 {
+			ptyOut.Write(readBuf[:n])
+			str := ptyOut.String()
+			if strings.Contains(str, "Got an error:") || strings.Contains(str, "token exchange failed") {
+				m.mu.Lock()
+				m.cancelLocked()
+				m.mu.Unlock()
+
+				clean := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`).ReplaceAllString(str, "")
+				for _, line := range strings.Split(clean, "\n") {
+					line = strings.TrimSpace(line)
+					if strings.Contains(line, "Got an error:") || strings.Contains(line, "token exchange failed") {
+						return "", fmt.Errorf("%s (请确认授权码来自最近一次 /agy login 链接且未过期)", line)
+					}
+				}
+				return "", fmt.Errorf("授权交换失败: %s", strings.TrimSpace(clean))
+			}
+		}
+
 		st := m.GetStatus()
 		if st.IsLoggedIn && st.Email != "" {
 			finalEmail = st.Email
