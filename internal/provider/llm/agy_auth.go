@@ -225,6 +225,22 @@ func (m *AGYAuthManager) Cancel() {
 	m.cancelLocked()
 }
 
+// Logout 注销当前 Google 账号，安全清除本地 OAuth 凭据文件并终止在途登录会话
+func (m *AGYAuthManager) Logout() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.cancelLocked()
+
+	if m.tokenPath != "" {
+		if err := os.Remove(m.tokenPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("清除凭据文件失败: %w", err)
+		}
+	}
+
+	return nil
+}
+
 func (m *AGYAuthManager) cancelLocked() {
 	if m.timer != nil {
 		m.timer.Stop()

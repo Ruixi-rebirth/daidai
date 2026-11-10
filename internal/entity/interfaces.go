@@ -58,4 +58,5 @@ type AGYAuthenticator interface {
 	StartLogin(ctx context.Context) (string, error)
 	SubmitCode(ctx context.Context, code string) (string, error)
 	Cancel()
+	Logout() error
 }

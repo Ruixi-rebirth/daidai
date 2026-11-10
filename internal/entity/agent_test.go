@@ -194,6 +194,12 @@ func (m *mockAGYAuth) SubmitCode(ctx context.Context, code string) (string, erro
 
 func (m *mockAGYAuth) Cancel() {}
 
+func (m *mockAGYAuth) Logout() error {
+	m.status.IsLoggedIn = false
+	m.status.Email = ""
+	return nil
+}
+
 func TestSuperAgent_AGYAuthCommands(t *testing.T) {
 	mockChan := &mockChannel{name: "qq"}
 	channelRegistry := NewChannelRegistry()
@@ -258,5 +264,20 @@ func TestSuperAgent_AGYAuthCommands(t *testing.T) {
 	})
 	if mockChan.sentUtter == nil || !strings.Contains(mockChan.sentUtter.Text, "已登录在线") {
 		t.Fatalf("expected online status, got: %+v", mockChan.sentUtter)
+	}
+
+	// 5. 验证注销
+	superAgent.Process(context.Background(), &SensoryEvent{
+		Platform:  "qq",
+		ChannelID: "10001",
+		SenderID:  "10001",
+		Role:      RolePartner,
+		Content:   "/agy logout",
+	})
+	if mockChan.sentUtter == nil || !strings.Contains(mockChan.sentUtter.Text, "账号已注销") {
+		t.Fatalf("expected logout success utterance, got: %+v", mockChan.sentUtter)
+	}
+	if mockAuth.status.IsLoggedIn {
+		t.Fatalf("expected logged out state in mockAuth")
 	}
 }

@@ -271,6 +271,33 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			a.replyText(ctx, event, reply)
 			return
 
+		case "/agy logout":
+			if a.Immune != nil {
+				if err := a.Immune.VerifyDelegationPerm(event.Role); err != nil {
+					a.replyText(ctx, event, err.Error())
+					return
+				}
+			}
+			if a.AGYAuth == nil {
+				a.replyText(ctx, event, "AGY 认证管理器未挂载。")
+				return
+			}
+			st := a.AGYAuth.GetStatus()
+			if !st.IsLoggedIn {
+				a.replyText(ctx, event, "【AGY 认证状态】\n当前尚未登录，无需注销。")
+				return
+			}
+			if err := a.AGYAuth.Logout(); err != nil {
+				a.replyText(ctx, event, fmt.Sprintf("注销失败: %v", err))
+				return
+			}
+			emailHint := ""
+			if st.Email != "" {
+				emailHint = fmt.Sprintf(" (%s)", st.Email)
+			}
+			a.replyText(ctx, event, fmt.Sprintf("【AGY 账号已注销】\n已安全清除 Google 账号凭据%s。如需再次使用可发送 `/agy login` 重新认证。", emailHint))
+			return
+
 		case "/stop":
 			if a.Immune != nil {
 				if err := a.Immune.VerifyDelegationPerm(event.Role); err != nil {
@@ -383,9 +410,10 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			helpText := fmt.Sprintf(`【%s · 控制指令指引】
 - /status   : 查看生命体运行指标与活跃工单
 - /models   : 查看实时心智模型池、各通道状态与用量说明
-- /agy login: 发起 Google 账号认证并获取授权网页链接
-- /agy code : 提交授权码完成登录 (例: /agy code 4/0A...)
+- /agy login : 发起 Google 账号认证并获取授权网页链接
+- /agy code  : 提交授权码完成登录 (例: /agy code 4/0A...)
 - /agy status: 查看当前 AGY 的 Google 账号认证状态
+- /agy logout: 注销当前 Google 账号并清除本地凭据
 - /stop     : 紧急中断正在运行的思考与后台工单
 - /reset    : 重开当前会话 (清空当前项目 agy 会话与近期上下文)
 - /pwd      : 查看当前所在工作空间与运行模式

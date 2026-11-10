@@ -134,35 +134,7 @@ func (t *ModelSwitchTool) Execute(ctx context.Context, rawArgs json.RawMessage) 
 }
 
 func (t *ModelSwitchTool) handleUsage(ctx context.Context, channelFilter string) *core.ToolResult {
-	filter := strings.ToUpper(strings.TrimSpace(channelFilter))
-
-	var sb strings.Builder
-	listRes := t.handleList(filter)
-	sb.WriteString(listRes.Text)
-
-	targetChan := filter
-	if targetChan == "" {
-		curr := t.router.CurrentMind()
-		if strings.EqualFold(curr.Channel, "AGY") {
-			targetChan = "AGY"
-		}
-	}
-
-	if targetChan != "" {
-		if usageText, err := t.router.QueryChannelUsage(ctx, targetChan); err == nil && usageText != "" {
-			sb.WriteString("\n\n---\n\n")
-			sb.WriteString(usageText)
-		}
-	} else {
-		if usageText, err := t.router.QueryChannelUsage(ctx, "AGY"); err == nil && usageText != "" {
-			sb.WriteString("\n\n---\n\n")
-			sb.WriteString(usageText)
-		}
-	}
-
-	return &core.ToolResult{
-		Text: strings.TrimSpace(sb.String()),
-	}
+	return t.handleList(channelFilter)
 }
 
 func (t *ModelSwitchTool) handleCurrent() *core.ToolResult {
@@ -227,6 +199,12 @@ func (t *ModelSwitchTool) handleList(channelFilter string) *core.ToolResult {
 		case "API":
 			sb.WriteString("- 通道属性：OpenAI 兼容协议高可用端点（按 Token 计费）\n")
 		}
+
+		if usageText, err := t.router.QueryChannelUsage(context.Background(), ch); err == nil && usageText != "" {
+			sb.WriteString("\n" + usageText + "\n\n")
+		}
+
+		sb.WriteString("可用模型列表：\n")
 		for _, m := range chModels {
 			activeTag := ""
 			if strings.EqualFold(curr.Channel, ch) && curr.Model == m.ID {

@@ -67,4 +67,16 @@ func TestFormatAuthStatus(t *testing.T) {
 	if !st2.IsLoggedIn || !strings.Contains(st2.Email, "testuser") {
 		t.Fatalf("unexpected logged in state: %+v", st2)
 	}
+
+	// 验证注销
+	if err := mgr.Logout(); err != nil {
+		t.Fatalf("logout failed: %v", err)
+	}
+	st3 := mgr.GetStatus()
+	if st3.IsLoggedIn {
+		t.Fatalf("expected logged out after Logout(), got logged in: %+v", st3)
+	}
+	if _, err := os.Stat(tokenFile); !os.IsNotExist(err) {
+		t.Fatalf("expected token file to be deleted")
+	}
 }
