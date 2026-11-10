@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -582,13 +583,22 @@ func (t *OCIIPTool) handleBind(ctx context.Context, targetIP string, deleteOld b
 		_, _, _ = t.client.Do(ctx, http.MethodDelete, delURL, nil)
 	}
 
+	bindMsg := fmt.Sprintf("### OCI IP 热换绑成功\n- **新公网 IP**: `%s` (已生效并接入主网卡)\n- **旧公网 IP**: `%s`%s",
+		targetObj.IPAddress, oldPubIP, func() string {
+			if deleteOld && oldPubID != "" {
+				return " (已自动释放删除)"
+			}
+			return ""
+		}())
+
+	// 若系统部署了 singbox-links，换绑成功后自动生成并附带新节点的代理配置
+	if _, lookErr := exec.LookPath("singbox-links"); lookErr == nil {
+		if out, err := exec.CommandContext(ctx, "singbox-links", targetObj.IPAddress).CombinedOutput(); err == nil && len(out) > 0 {
+			bindMsg += "\n\n" + FormatSingboxLinks(string(out))
+		}
+	}
+
 	return &core.ToolResult{
-		Text: fmt.Sprintf("### OCI IP 热换绑成功\n- **新公网 IP**: `%s` (已生效并接入主网卡)\n- **旧公网 IP**: `%s`%s",
-			targetObj.IPAddress, oldPubIP, func() string {
-				if deleteOld && oldPubID != "" {
-					return " (已自动释放删除)"
-				}
-				return ""
-			}()),
+		Text: bindMsg,
 	}, nil
 }

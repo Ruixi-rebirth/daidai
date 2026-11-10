@@ -41,6 +41,7 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 	h.Register(NewWebSearchTool(cfg.Router))
 	h.Register(NewReadLinkTool())
 	h.Register(NewScreenshotTool())
+	h.Register(NewSingboxLinksTool(cfg.Immune))
 	if cfg.Workspaces != nil {
 		h.Register(NewWorkspaceTool(cfg.Workspaces, cfg.Immune))
 	}
