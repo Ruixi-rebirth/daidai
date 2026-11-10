@@ -39,7 +39,7 @@ func (t *DelegateTool) Name() string {
 }
 
 func (t *DelegateTool) Description() string {
-	return "签发后台工程工单交由智能体（agy）执行代码仓库分析修改、深度工程任务或终端命令（普通实时网页检索请优先使用 search_web 工具）。"
+	return "在当前项目工作空间中执行终端命令（如 ls、cat、git、编译运行等）、文件/目录查看与深度工程代码任务。当需要查看当前目录文件、检查工程状态、执行 shell 终端或编写修改代码时，直接签发本工单执行（普通实时网页检索请优先使用 search_web 工具）。"
 }
 
 func (t *DelegateTool) Parameters() map[string]any {
