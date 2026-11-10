@@ -91,6 +91,8 @@ type SuperAgent struct {
 	Delegates      *Delegates
 	Channels       *ChannelRegistry
 	Workspaces     *WorkspaceManager
+	AGYAuth        AGYAuthenticator
+	OnAuthSuccess  func(ctx context.Context)
 	sessionLocks   sync.Map // key: sessionKey -> *sync.Mutex，保证同会话认知严格有序
 	sessionCancels sync.Map // key: sessionKey -> context.CancelFunc，支持 /stop 即时打断在途思考
 }
@@ -109,13 +111,15 @@ func (a *SuperAgent) lockSession(event *SensoryEvent) func() {
 
 // Config 生命体初始化依赖
 type Config struct {
-	PartnerID  string
-	Persona    *Persona
-	Immune     *ImmuneSystem
-	Cognition  Cognition
-	Delegates  *Delegates
-	Channels   *ChannelRegistry
-	Workspaces *WorkspaceManager
+	PartnerID     string
+	Persona       *Persona
+	Immune        *ImmuneSystem
+	Cognition     Cognition
+	Delegates     *Delegates
+	Channels      *ChannelRegistry
+	Workspaces    *WorkspaceManager
+	AGYAuth       AGYAuthenticator
+	OnAuthSuccess func(ctx context.Context)
 }
 
 // NewSuperAgent 组装生命体核心聚合根
@@ -134,12 +138,14 @@ func NewSuperAgent(cfg Config) *SuperAgent {
 	}
 
 	return &SuperAgent{
-		Persona:    persona,
-		Immune:     immune,
-		Cognition:  cfg.Cognition,
-		Delegates:  cfg.Delegates,
-		Channels:   channels,
-		Workspaces: cfg.Workspaces,
+		Persona:       persona,
+		Immune:        immune,
+		Cognition:     cfg.Cognition,
+		Delegates:     cfg.Delegates,
+		Channels:      channels,
+		Workspaces:    cfg.Workspaces,
+		AGYAuth:       cfg.AGYAuth,
+		OnAuthSuccess: cfg.OnAuthSuccess,
 	}
 }
 
@@ -219,6 +225,45 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 				a.replyText(ctx, event, a.Cognition.ModelList())
 				return
 			}
+
+		case "/agy login", "/agy auth":
+			if a.Immune != nil {
+				if err := a.Immune.VerifyDelegationPerm(event.Role); err != nil {
+					a.replyText(ctx, event, err.Error())
+					return
+				}
+			}
+			if a.AGYAuth == nil {
+				a.replyText(ctx, event, "AGY 认证管理器未挂载。")
+				return
+			}
+			a.replyText(ctx, event, "正在发起 Google 账号认证，请稍候获取授权链接...")
+			authURL, err := a.AGYAuth.StartLogin(ctx)
+			if err != nil {
+				a.replyText(ctx, event, fmt.Sprintf("发起登录失败: %v", err))
+				return
+			}
+			reply := fmt.Sprintf("【Google Antigravity 登录授权】\n请在浏览器或手机中打开以下链接，登录 Google 账号并完成授权：\n\n%s\n\n授权成功后，页面会显示一串授权码 (Authorization Code)。\n请直接回复：\n`/agy code <授权码>`\n（授权会话 5 分钟内有效）", authURL)
+			a.replyText(ctx, event, reply)
+			return
+
+		case "/agy status":
+			if a.AGYAuth == nil {
+				a.replyText(ctx, event, "AGY 认证管理器未挂载。")
+				return
+			}
+			st := a.AGYAuth.GetStatus()
+			if !st.IsLoggedIn {
+				a.replyText(ctx, event, "【AGY 认证状态】\n当前尚未登录 Google 账号或凭证已失效。可发送 `/agy login` 发起登录。")
+				return
+			}
+			expiryStr := "长期有效"
+			if !st.Expiry.IsZero() {
+				expiryStr = st.Expiry.Local().Format("2006-01-02 15:04:05")
+			}
+			reply := fmt.Sprintf("【AGY 认证状态】\n- 状态：已登录在线\n- 账号：%s\n- Token 有效期至：%s", st.Email, expiryStr)
+			a.replyText(ctx, event, reply)
+			return
 
 		case "/stop":
 			if a.Immune != nil {
@@ -332,6 +377,9 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			helpText := fmt.Sprintf(`【%s · 控制指令指引】
 - /status   : 查看生命体运行指标与活跃工单
 - /models   : 查看实时心智模型池、各通道状态与用量说明
+- /agy login: 发起 Google 账号认证并获取授权网页链接
+- /agy code : 提交授权码完成登录 (例: /agy code 4/0A...)
+- /agy status: 查看当前 AGY 的 Google 账号认证状态
 - /stop     : 紧急中断正在运行的思考与后台工单
 - /reset    : 重开当前会话 (清空当前项目 agy 会话与近期上下文)
 - /pwd      : 查看当前所在工作空间与运行模式
@@ -343,6 +391,33 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			return
 
 		default:
+			if strings.HasPrefix(content, "/agy code ") || strings.HasPrefix(content, "/agy auth ") {
+				if a.Immune != nil {
+					if err := a.Immune.VerifyDelegationPerm(event.Role); err != nil {
+						a.replyText(ctx, event, err.Error())
+						return
+					}
+				}
+				if a.AGYAuth == nil {
+					a.replyText(ctx, event, "AGY 认证管理器未挂载。")
+					return
+				}
+				code := strings.TrimSpace(strings.TrimPrefix(content, "/agy code "))
+				if strings.HasPrefix(content, "/agy auth ") {
+					code = strings.TrimSpace(strings.TrimPrefix(content, "/agy auth "))
+				}
+				a.replyText(ctx, event, "正在验证并换取凭证，请稍候...")
+				email, err := a.AGYAuth.SubmitCode(ctx, code)
+				if err != nil {
+					a.replyText(ctx, event, fmt.Sprintf("认证失败: %v", err))
+					return
+				}
+				if a.OnAuthSuccess != nil {
+					a.OnAuthSuccess(ctx)
+				}
+				a.replyText(ctx, event, fmt.Sprintf("【AGY 登录成功】\n已成功绑定 Google 账号：%s！\n心智模型池已自动刷新就绪。", email))
+				return
+			}
 			if strings.HasPrefix(content, "/ws rm ") || strings.HasPrefix(content, "/workspaces rm ") {
 				unlock := a.lockSession(event)
 				defer unlock()

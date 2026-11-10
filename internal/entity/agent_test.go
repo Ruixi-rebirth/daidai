@@ -166,3 +166,93 @@ func TestSuperAgent_StopInterruptsInFlightThinking(t *testing.T) {
 		t.Fatalf("expected /stop confirmation utterance, got %+v", mockChan.sentUtter)
 	}
 }
+
+type mockAGYAuth struct {
+	status AGYAuthStatusInfo
+	url    string
+	code   string
+}
+
+func (m *mockAGYAuth) GetStatus() AGYAuthStatusInfo {
+	return m.status
+}
+
+func (m *mockAGYAuth) StartLogin(ctx context.Context) (string, error) {
+	return m.url, nil
+}
+
+func (m *mockAGYAuth) SubmitCode(ctx context.Context, code string) (string, error) {
+	m.code = code
+	m.status.IsLoggedIn = true
+	m.status.Email = "testuser@gmail.com"
+	return m.status.Email, nil
+}
+
+func (m *mockAGYAuth) Cancel() {}
+
+func TestSuperAgent_AGYAuthCommands(t *testing.T) {
+	mockChan := &mockChannel{name: "qq"}
+	channelRegistry := NewChannelRegistry()
+	channelRegistry.Register(mockChan)
+
+	mockAuth := &mockAGYAuth{
+		url: "https://accounts.google.com/o/oauth2/auth?test=1",
+	}
+
+	superAgent := NewSuperAgent(Config{
+		PartnerID: "10001",
+		Channels:  channelRegistry,
+		AGYAuth:   mockAuth,
+	})
+
+	// 1. 未登录状态查询
+	superAgent.Process(context.Background(), &SensoryEvent{
+		Platform:  "qq",
+		ChannelID: "10001",
+		SenderID:  "10001",
+		Role:      RolePartner,
+		Content:   "/agy status",
+	})
+	if mockChan.sentUtter == nil || !strings.Contains(mockChan.sentUtter.Text, "尚未登录") {
+		t.Fatalf("expected not logged in status, got: %+v", mockChan.sentUtter)
+	}
+
+	// 2. 发起登录
+	superAgent.Process(context.Background(), &SensoryEvent{
+		Platform:  "qq",
+		ChannelID: "10001",
+		SenderID:  "10001",
+		Role:      RolePartner,
+		Content:   "/agy login",
+	})
+	if mockChan.sentUtter == nil || !strings.Contains(mockChan.sentUtter.Text, "https://accounts.google.com") {
+		t.Fatalf("expected login URL in utterance, got: %+v", mockChan.sentUtter)
+	}
+
+	// 3. 提交授权码
+	superAgent.Process(context.Background(), &SensoryEvent{
+		Platform:  "qq",
+		ChannelID: "10001",
+		SenderID:  "10001",
+		Role:      RolePartner,
+		Content:   "/agy code 4/0Atestcode123",
+	})
+	if mockChan.sentUtter == nil || !strings.Contains(mockChan.sentUtter.Text, "testuser@gmail.com") {
+		t.Fatalf("expected success with email in utterance, got: %+v", mockChan.sentUtter)
+	}
+	if mockAuth.code != "4/0Atestcode123" {
+		t.Fatalf("expected code passed to auth, got: %s", mockAuth.code)
+	}
+
+	// 4. 再次查询状态，已是在线
+	superAgent.Process(context.Background(), &SensoryEvent{
+		Platform:  "qq",
+		ChannelID: "10001",
+		SenderID:  "10001",
+		Role:      RolePartner,
+		Content:   "/agy status",
+	})
+	if mockChan.sentUtter == nil || !strings.Contains(mockChan.sentUtter.Text, "已登录在线") {
+		t.Fatalf("expected online status, got: %+v", mockChan.sentUtter)
+	}
+}

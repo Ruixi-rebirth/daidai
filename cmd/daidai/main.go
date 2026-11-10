@@ -224,14 +224,19 @@ func main() {
 	}
 
 	// 依赖注入组装生命体核心聚合根
+	agyAuth := llm.NewAGYAuthManager(agyCommand, "")
 	superAgent := entity.NewSuperAgent(entity.Config{
-		PartnerID:  ownerOpenID,
-		Persona:    persona,
-		Immune:     immune,
-		Cognition:  cortex,
-		Delegates:  delegates,
-		Channels:   channelRegistry,
-		Workspaces: workspaceMgr,
+		PartnerID:     ownerOpenID,
+		Persona:       persona,
+		Immune:        immune,
+		Cognition:     cortex,
+		Delegates:     delegates,
+		Channels:      channelRegistry,
+		Workspaces:    workspaceMgr,
+		AGYAuth:       agyAuth,
+		OnAuthSuccess: func(ctx context.Context) {
+			mindRouter.RefreshModels(ctx)
+		},
 	})
 
 	if err := superAgent.Start(rootCtx); err != nil {

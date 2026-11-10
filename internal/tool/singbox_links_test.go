@@ -35,7 +35,7 @@ func TestSingboxLinksTool_Permissions(t *testing.T) {
 	}
 	groupCtx := entity.WithSensoryEvent(context.Background(), groupEv)
 	res, err := tool.Execute(groupCtx, nil)
-	if err != nil || !strings.Contains(res.Text, "禁止在群聊中发送") {
+	if err != nil || !strings.Contains(res.Text, "群聊中不便展示") {
 		t.Fatalf("expected group rejection, got %v, res=%+v", err, res)
 	}
 

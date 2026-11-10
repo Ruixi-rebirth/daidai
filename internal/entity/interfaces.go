@@ -3,6 +3,7 @@ package entity
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"daidai/internal/core"
 )
@@ -41,4 +42,19 @@ type Cognition interface {
 	Think(ctx context.Context, event *SensoryEvent) (*Utterance, error)
 	MindStatus() string
 	ModelList() string
+}
+
+// AGYAuthStatusInfo AGY 认证凭据摘要
+type AGYAuthStatusInfo struct {
+	IsLoggedIn bool
+	Email      string
+	Expiry     time.Time
+}
+
+// AGYAuthenticator AGY 命令行 Google OAuth 交互式认证管理接口
+type AGYAuthenticator interface {
+	GetStatus() AGYAuthStatusInfo
+	StartLogin(ctx context.Context) (string, error)
+	SubmitCode(ctx context.Context, code string) (string, error)
+	Cancel()
 }

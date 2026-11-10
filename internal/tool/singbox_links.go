@@ -50,7 +50,7 @@ func (t *SingboxLinksTool) Execute(ctx context.Context, rawArgs json.RawMessage)
 	event := entity.SensoryEventFromContext(ctx)
 	if event != nil {
 		if event.IsGroup {
-			return &core.ToolResult{Text: "安全拦截：代理节点链接包含敏感连接凭证，禁止在群聊中发送，请通过私聊发起查询。"}, nil
+			return &core.ToolResult{Text: "Sing-box 节点链接包含密钥凭证，群聊中不便展示。请直接在私聊窗口向我发送'查看singbox节点'，我会在私聊中发给你。"}, nil
 		}
 		if t.immune != nil && event.Role != entity.RolePartner {
 			return &core.ToolResult{Text: "权限拦截：Sing-box 代理节点链接仅限核心搭档查询。"}, nil
