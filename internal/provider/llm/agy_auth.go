@@ -1,7 +1,6 @@
 package llm
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -102,12 +101,13 @@ func (m *AGYAuthManager) StartLogin(ctx context.Context) (string, error) {
 	// 清理旧会话
 	m.cancelLocked()
 
-	master, slave, err := openPTY()
+	master, slave, err := openPTY(4096, 200)
 	if err != nil {
 		return "", fmt.Errorf("创建伪终端失败: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, m.command)
+	// 独立于请求上下文启动子进程，避免请求返回后进程被提前终止
+	cmd := exec.Command(m.command)
 	cmd.Stdin = slave
 	cmd.Stdout = slave
 	cmd.Stderr = slave
@@ -137,30 +137,45 @@ func (m *AGYAuthManager) StartLogin(ctx context.Context) (string, error) {
 		}
 	})
 
-	// 稍候发送回车确认选择首选登录方式（1. Google OAuth）
-	go func() {
-		time.Sleep(1 * time.Second)
-		m.mu.Lock()
-		curr := m.active
-		m.mu.Unlock()
-		if curr == sess && sess.master != nil {
-			_, _ = sess.master.Write([]byte("\r\n"))
-		}
-	}()
-
-	urlRegex := regexp.MustCompile(`https://accounts\.google\.com/o/oauth2/auth\?[^\s\x1b\x00]+`)
-	var outBuf bytes.Buffer
-	buf := make([]byte, 1024)
+	urlRegex := regexp.MustCompile(`https://accounts\.google\.com/o/oauth2/auth\?[^\s\x1b\x00\x07\"\'<>]+`)
+	var fullOutput strings.Builder
+	buf := make([]byte, 4096)
+	sentEnter := false
 
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		_ = master.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-		n, _ := master.Read(buf)
+		select {
+		case <-ctx.Done():
+			m.cancelLocked()
+			return "", ctx.Err()
+		default:
+		}
+
+		_ = master.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		n, err := master.Read(buf)
 		if n > 0 {
-			outBuf.Write(buf[:n])
-			if match := urlRegex.FindString(outBuf.String()); match != "" {
+			fullOutput.Write(buf[:n])
+			str := fullOutput.String()
+
+			// 自动确认默认选项（1. Google OAuth）
+			if !sentEnter && strings.Contains(str, "Select login method") {
+				_, _ = master.Write([]byte("\r\n"))
+				sentEnter = true
+			}
+
+			if match := urlRegex.FindString(str); match != "" {
 				return match, nil
 			}
+		}
+
+		// 兜底：如果运行超过 2 秒仍未检测到提示词，也尝试发送回车
+		if !sentEnter && time.Since(sess.startedAt) >= 2*time.Second {
+			_, _ = master.Write([]byte("\r\n"))
+			sentEnter = true
+		}
+
+		if err != nil {
+			time.Sleep(50 * time.Millisecond)
 		}
 	}
 
@@ -252,13 +267,14 @@ func (m *AGYAuthManager) cancelLocked() {
 		}
 		if m.active.cmd != nil && m.active.cmd.Process != nil {
 			_ = m.active.cmd.Process.Kill()
+			_ = m.active.cmd.Wait()
 		}
 		m.active = nil
 	}
 }
 
-// openPTY 使用 Linux 原生系统调用分配虚拟伪终端
-func openPTY() (master, slave *os.File, err error) {
+// openPTY 使用 Linux 原生系统调用分配虚拟伪终端并设置超宽终端和非阻塞模式
+func openPTY(cols, rows uint16) (master, slave *os.File, err error) {
 	mFd, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open /dev/ptmx failed: %w", err)
@@ -282,6 +298,12 @@ func openPTY() (master, slave *os.File, err error) {
 		unix.Close(mFd)
 		return nil, nil, fmt.Errorf("open slave %s failed: %w", slavePath, err)
 	}
+
+	if cols > 0 && rows > 0 {
+		ws := unix.Winsize{Row: rows, Col: cols}
+		_ = unix.IoctlSetWinsize(sFd, unix.TIOCSWINSZ, &ws)
+	}
+	_ = unix.SetNonblock(mFd, true)
 
 	return os.NewFile(uintptr(mFd), "/dev/ptmx"), os.NewFile(uintptr(sFd), slavePath), nil
 }

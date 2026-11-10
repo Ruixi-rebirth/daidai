@@ -232,7 +232,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 				return
 			}
 
-		case "/agy login", "/agy auth":
+		case "/agy login", "/agy auth", "/agy login force", "/agy login --force":
 			if a.Immune != nil {
 				if err := a.Immune.VerifyDelegationPerm(event.Role); err != nil {
 					a.replyText(ctx, event, err.Error())
@@ -242,6 +242,15 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			if a.AGYAuth == nil {
 				a.replyText(ctx, event, "AGY 认证管理器未挂载。")
 				return
+			}
+			isForce := strings.HasSuffix(content, "force")
+			if !isForce {
+				if st := a.AGYAuth.GetStatus(); st.IsLoggedIn {
+					a.replyText(ctx, event, fmt.Sprintf("当前已登录 Google 账号 (%s)。如需重新登录或切换账号，请发送 `/agy logout` 注销后再登录，或发送 `/agy login force` 强制重新认证。", st.Email))
+					return
+				}
+			} else {
+				_ = a.AGYAuth.Logout()
 			}
 			a.replyText(ctx, event, "正在发起 Google 账号认证，请稍候获取授权链接...")
 			authURL, err := a.AGYAuth.StartLogin(ctx)
@@ -440,6 +449,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 				if strings.HasPrefix(content, "/agy auth ") {
 					code = strings.TrimSpace(strings.TrimPrefix(content, "/agy auth "))
 				}
+				code = strings.Trim(code, "`'\"")
 				a.replyText(ctx, event, "正在验证并换取凭证，请稍候...")
 				email, err := a.AGYAuth.SubmitCode(ctx, code)
 				if err != nil {
