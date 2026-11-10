@@ -1,7 +1,5 @@
 # 呆呆机器人配置文件示例
 
-partner_id: "YOUR_PARTNER_OPENID"
-
 server:
   port: 8080
 
@@ -9,6 +7,8 @@ qq:
   enabled: true
   app_id: "YOUR_QQ_APP_ID"
   secret: "YOUR_QQ_APP_SECRET"
+  owner_openid: "YOUR_QQ_OPENID"
+  collaborators: []
 
 llm:
   base_url: "https://api.deepseek.com/v1"
@@ -29,11 +29,6 @@ agent:
     - name: "agy"
       description: "Google Antigravity 自驱智能体沙箱，具备完整的代码库检索、文件编辑、终端执行与自省反思能力"
       command: "agy"
-      default_dir: "data/workspace/sandbox"
-    - name: "local"
-      description: "本地 Shell 脚本命令执行器（goal 必须为具体可执行的 Shell 命令，如 pwd 或 ls -la，不可传中文自然语言描述）"
-      command: "bash"
-      args: ["-c", "{{GOAL}}"]
       default_dir: "data/workspace/sandbox"
 
 plugins:

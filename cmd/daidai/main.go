@@ -166,14 +166,14 @@ func main() {
 	})
 
 	// 初始化认知、记忆、工具与执行单元
-	partnerID := cfg.PartnerID
+	ownerOpenID := cfg.QQ.OwnerOpenID
 	for _, arg := range os.Args[1:] {
-		if arg == "--reset" && partnerID != "" {
-			_ = db.DefaultManager().ResetSessionHistory("qq", partnerID)
-			slog.Info("已按 --reset 参数重置会话短期上下文游标", "partnerID", partnerID)
+		if arg == "--reset" && ownerOpenID != "" {
+			_ = db.DefaultManager().ResetSessionHistory("qq", ownerOpenID)
+			slog.Info("已按 --reset 参数重置会话短期上下文游标", "ownerOpenID", ownerOpenID)
 		}
 	}
-	immune := entity.NewImmuneSystem(partnerID, cfg.Collaborators...)
+	immune := entity.NewImmuneSystem(ownerOpenID, cfg.QQ.Collaborators...)
 	persona := entity.NewDefaultPersona()
 
 	// 按配置挂载多沙箱工作者与工单调度中枢 (全局最大并发限制)
@@ -225,7 +225,7 @@ func main() {
 
 	// 依赖注入组装生命体核心聚合根
 	superAgent := entity.NewSuperAgent(entity.Config{
-		PartnerID:  partnerID,
+		PartnerID:  ownerOpenID,
 		Persona:    persona,
 		Immune:     immune,
 		Cognition:  cortex,
@@ -239,8 +239,8 @@ func main() {
 		return
 	}
 
-	if cfg.OCI.Enabled && partnerID != "" {
-		go runOCIScheduler(rootCtx, cfg.OCI, partnerID, channelRegistry)
+	if cfg.OCI.Enabled && ownerOpenID != "" {
+		go runOCIScheduler(rootCtx, cfg.OCI, ownerOpenID, channelRegistry)
 	}
 
 	// 启动健康检查与单实例锁监听服务

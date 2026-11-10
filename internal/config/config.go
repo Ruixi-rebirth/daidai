@@ -8,17 +8,16 @@ import (
 )
 
 type Config struct {
-	PartnerID     string   `yaml:"partner_id"`
-	Collaborators []string `yaml:"collaborators"`
-
 	Server struct {
 		Port int `yaml:"port"`
 	} `yaml:"server"`
 
 	QQ struct {
-		Enabled bool   `yaml:"enabled"`
-		AppID   string `yaml:"app_id"`
-		Secret  string `yaml:"secret"`
+		Enabled       bool     `yaml:"enabled"`
+		AppID         string   `yaml:"app_id"`
+		Secret        string   `yaml:"secret"`
+		OwnerOpenID   string   `yaml:"owner_openid"`
+		Collaborators []string `yaml:"collaborators"`
 	} `yaml:"qq"`
 
 	LLM struct {
