@@ -2,6 +2,7 @@ package entity
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -179,6 +180,13 @@ type mockAGYAuth struct {
 
 func (m *mockAGYAuth) GetStatus() AGYAuthStatusInfo {
 	return m.status
+}
+
+func (m *mockAGYAuth) CheckAuth() error {
+	if !m.status.IsLoggedIn {
+		return errors.New("not logged in")
+	}
+	return nil
 }
 
 func (m *mockAGYAuth) StartLogin(ctx context.Context) (string, error) {

@@ -105,6 +105,14 @@ func (t *WebSearchTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*
 		query,
 	)
 
+	if strings.Contains(t.command, "agy") {
+		if err := llm.CheckAGYAuth(); err != nil {
+			return &core.ToolResult{
+				Text: fmt.Sprintf("联网检索失败：%v", err),
+			}, nil
+		}
+	}
+
 	execCtx, cancel := context.WithTimeout(ctx, t.timeout)
 	defer cancel()
 

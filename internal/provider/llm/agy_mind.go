@@ -186,6 +186,12 @@ func (p *AGYMindProvider) GetUsage(ctx context.Context) (string, error) {
 	cwd := p.workingDir
 	p.mu.RUnlock()
 
+	if strings.Contains(command, "agy") {
+		if err := CheckAGYAuth(); err != nil {
+			return "", err
+		}
+	}
+
 	usageCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
@@ -365,6 +371,12 @@ func (p *AGYMindProvider) ChatWithTools(
 	cwd := p.workingDir
 	timeout := p.timeout
 	p.mu.RUnlock()
+
+	if strings.Contains(command, "agy") {
+		if err := CheckAGYAuth(); err != nil {
+			return nil, err
+		}
+	}
 
 	readOnly := opts != nil && opts.ReadOnly
 	prompt := p.assemblePrompt(messages, tools, readOnly)

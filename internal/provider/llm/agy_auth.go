@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -19,8 +20,70 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// ErrAGYNotLoggedIn 当 AGY 尚未登录或凭据损坏时返回的统一前置哨兵错误
+var ErrAGYNotLoggedIn = errors.New("Google Antigravity 尚未登录或认证凭据已失效，请先在对话中输入 /agy login 完成登录")
+
 // AGYAuthStatus AGY 认证凭据状态
 type AGYAuthStatus = entity.AGYAuthStatusInfo
+
+// DefaultAGYTokenPath 返回系统标准 AGY OAuth 凭据文件路径 (~/.gemini/antigravity-cli/antigravity-oauth-token)
+func DefaultAGYTokenPath() string {
+	home, err := os.UserHomeDir()
+	if err == nil && home != "" {
+		return filepath.Join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token")
+	}
+	return ""
+}
+
+// InspectAGYToken 从指定或默认路径读取并解析 AGY 凭据状态
+func InspectAGYToken(customTokenPath ...string) AGYAuthStatus {
+	p := ""
+	if len(customTokenPath) > 0 && customTokenPath[0] != "" {
+		p = customTokenPath[0]
+	} else {
+		p = DefaultAGYTokenPath()
+	}
+
+	var status AGYAuthStatus
+	if p == "" {
+		return status
+	}
+
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return status
+	}
+
+	var parsed struct {
+		IDTokenEmail string `json:"id_token_email"`
+		Token        struct {
+			AccessToken  string    `json:"access_token"`
+			RefreshToken string    `json:"refresh_token"`
+			Expiry       time.Time `json:"expiry"`
+		} `json:"token"`
+	}
+
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return status
+	}
+
+	if parsed.IDTokenEmail != "" {
+		status.IsLoggedIn = true
+		status.Email = parsed.IDTokenEmail
+		status.Expiry = parsed.Token.Expiry
+	}
+
+	return status
+}
+
+// CheckAGYAuth 统一前置校验 AGY 认证状态。若未登录则立即 fail-fast 返回 ErrAGYNotLoggedIn，避免死等超时
+func CheckAGYAuth(customTokenPath ...string) error {
+	status := InspectAGYToken(customTokenPath...)
+	if !status.IsLoggedIn {
+		return ErrAGYNotLoggedIn
+	}
+	return nil
+}
 
 type authSession struct {
 	cmd       *exec.Cmd
@@ -44,10 +107,7 @@ func NewAGYAuthManager(command, customTokenPath string) *AGYAuthManager {
 	}
 	tPath := customTokenPath
 	if tPath == "" {
-		home, err := os.UserHomeDir()
-		if err == nil && home != "" {
-			tPath = filepath.Join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token")
-		}
+		tPath = DefaultAGYTokenPath()
 	}
 	return &AGYAuthManager{
 		command:   command,
@@ -60,37 +120,15 @@ func (m *AGYAuthManager) GetStatus() AGYAuthStatus {
 	m.mu.Lock()
 	p := m.tokenPath
 	m.mu.Unlock()
+	return InspectAGYToken(p)
+}
 
-	var status AGYAuthStatus
-
-	if p == "" {
-		return status
-	}
-
-	data, err := os.ReadFile(p)
-	if err != nil {
-		return status
-	}
-
-	var parsed struct {
-		IDTokenEmail string `json:"id_token_email"`
-		Token        struct {
-			AccessToken string    `json:"access_token"`
-			Expiry      time.Time `json:"expiry"`
-		} `json:"token"`
-	}
-
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		return status
-	}
-
-	if parsed.IDTokenEmail != "" {
-		status.IsLoggedIn = true
-		status.Email = parsed.IDTokenEmail
-		status.Expiry = parsed.Token.Expiry
-	}
-
-	return status
+// CheckAuth 检查当前凭据是否有效可用
+func (m *AGYAuthManager) CheckAuth() error {
+	m.mu.Lock()
+	p := m.tokenPath
+	m.mu.Unlock()
+	return CheckAGYAuth(p)
 }
 
 // StartLogin 发起 AGY Google OAuth 登录，返回授权网址

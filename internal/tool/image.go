@@ -15,10 +15,15 @@ import (
 
 	"daidai/internal/core"
 	"daidai/internal/entity"
+	"daidai/internal/provider/llm"
 )
 
 // runStatelessImageGen 无状态调用一次 agy 执行生图子任务（不占用工程工单槽位，不累积幽灵会话上下文）
 func runStatelessImageGen(ctx context.Context, goal, workDir string) (string, error) {
+	if err := llm.CheckAGYAuth(); err != nil {
+		return "", err
+	}
+
 	execCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 

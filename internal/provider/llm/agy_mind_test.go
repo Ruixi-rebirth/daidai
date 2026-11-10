@@ -2,6 +2,8 @@ package llm
 
 import (
 	"context"
+	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -140,5 +142,28 @@ func TestMindRouter_QueryChannelUsage(t *testing.T) {
 	_, errMissing := router.QueryChannelUsage(context.Background(), "NONEXISTENT")
 	if errMissing == nil {
 		t.Fatalf("expected error for nonexistent channel")
+	}
+}
+
+func TestAGYMindProvider_NotLoggedIn_FailFast(t *testing.T) {
+	tmpHome := t.TempDir()
+	origHome := os.Getenv("HOME")
+	t.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	provider := NewAGYMindProvider(AGYMindConfig{
+		Command: "agy",
+	})
+
+	// 1. ChatWithTools 快速失败
+	_, err := provider.ChatWithTools(context.Background(), []core.ChatMessage{{Role: "user", Content: "hi"}}, nil, nil)
+	if !errors.Is(err, ErrAGYNotLoggedIn) {
+		t.Fatalf("expected ErrAGYNotLoggedIn on ChatWithTools, got: %v", err)
+	}
+
+	// 2. GetUsage 快速失败
+	_, errUsage := provider.GetUsage(context.Background())
+	if !errors.Is(errUsage, ErrAGYNotLoggedIn) {
+		t.Fatalf("expected ErrAGYNotLoggedIn on GetUsage, got: %v", errUsage)
 	}
 }

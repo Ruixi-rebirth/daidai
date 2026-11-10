@@ -212,6 +212,12 @@ func (w *AGYWorker) resolveModelAndEffort(ticketModel string) (string, string) {
 
 // ExecuteTicket 执行指定的独立沙箱工单 (实现 entity.Worker)
 func (w *AGYWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (string, error) {
+	if strings.Contains(w.command, "agy") {
+		if err := llm.CheckAGYAuth(); err != nil {
+			return "", err
+		}
+	}
+
 	cwd, err := w.resolveWorkDir(t.Workspace)
 	if err != nil {
 		return "", err

@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"daidai/internal/entity"
 )
 
 func TestFaceTool_HitCache(t *testing.T) {
@@ -44,5 +47,26 @@ func TestFaceTool_MissingDelegates(t *testing.T) {
 
 	if len(res.ImageData) > 0 {
 		t.Errorf("expected no image data when cache missed and no delegates")
+	}
+}
+
+func TestFaceTool_NotLoggedIn_FailFast(t *testing.T) {
+	tmpHome := t.TempDir()
+	origHome := os.Getenv("HOME")
+	t.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	tmpDir := t.TempDir()
+	delegates := entity.NewDelegates(&dummyWorker{})
+	tool := NewFaceToolWithDir(delegates, tmpDir)
+
+	rawArgs, _ := json.Marshal(map[string]any{"emotion": "难过"})
+	res, err := tool.Execute(context.Background(), rawArgs)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+
+	if !strings.Contains(res.Text, "尚未登录") || !strings.Contains(res.Text, "/agy login") {
+		t.Fatalf("expected fail-fast prompt about login, got: %s", res.Text)
 	}
 }

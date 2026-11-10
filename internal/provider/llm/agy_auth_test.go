@@ -19,6 +19,12 @@ func TestAGYAuthManager_Status(t *testing.T) {
 	if s1.IsLoggedIn {
 		t.Fatalf("expected not logged in, got: %+v", s1)
 	}
+	if err := mgr.CheckAuth(); err == nil {
+		t.Fatalf("expected error on checkAuth when not logged in")
+	}
+	if err := CheckAGYAuth(tokenFile); err == nil {
+		t.Fatalf("expected error on CheckAGYAuth when not logged in")
+	}
 
 	// 2. 模拟写入有效凭据
 	mockData := `{"token":{"access_token":"ya29.test","expiry":"2026-12-01T10:00:00Z"},"id_token_email":"user@example.com"}`
@@ -29,6 +35,12 @@ func TestAGYAuthManager_Status(t *testing.T) {
 	s2 := mgr.GetStatus()
 	if !s2.IsLoggedIn || s2.Email != "user@example.com" {
 		t.Fatalf("expected logged in with email, got: %+v", s2)
+	}
+	if err := mgr.CheckAuth(); err != nil {
+		t.Fatalf("unexpected checkAuth err: %v", err)
+	}
+	if err := CheckAGYAuth(tokenFile); err != nil {
+		t.Fatalf("unexpected CheckAGYAuth err: %v", err)
 	}
 	expectedTime, _ := time.Parse(time.RFC3339, "2026-12-01T10:00:00Z")
 	if !s2.Expiry.Equal(expectedTime) {

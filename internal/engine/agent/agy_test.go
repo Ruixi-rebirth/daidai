@@ -1,9 +1,14 @@
 package agent
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"daidai/internal/entity"
+	"daidai/internal/provider/llm"
 )
 
 func TestAGYWorker_MultiWorkspaceSessionIsolation(t *testing.T) {
@@ -80,5 +85,22 @@ func TestAGYWorker_ResolveWorkDir(t *testing.T) {
 	_, errInvalid := worker.resolveWorkDir("/nonexistent_path_for_test_123456")
 	if errInvalid == nil {
 		t.Fatalf("expected error for nonexistent workspace, got nil")
+	}
+}
+
+func TestAGYWorker_NotLoggedIn_FailFast(t *testing.T) {
+	tmpHome := t.TempDir()
+	origHome := os.Getenv("HOME")
+	t.Setenv("HOME", tmpHome)
+	defer os.Setenv("HOME", origHome)
+
+	worker := NewAGYWorker(tmpHome, nil)
+	ticket := &entity.Ticket{
+		Goal: "test task",
+	}
+
+	_, err := worker.ExecuteTicket(context.Background(), ticket)
+	if !errors.Is(err, llm.ErrAGYNotLoggedIn) {
+		t.Fatalf("expected ErrAGYNotLoggedIn, got %v", err)
 	}
 }

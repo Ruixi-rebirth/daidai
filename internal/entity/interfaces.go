@@ -55,6 +55,7 @@ type AGYAuthStatusInfo struct {
 // AGYAuthenticator AGY 命令行 Google OAuth 交互式认证管理接口
 type AGYAuthenticator interface {
 	GetStatus() AGYAuthStatusInfo
+	CheckAuth() error
 	StartLogin(ctx context.Context) (string, error)
 	SubmitCode(ctx context.Context, code string) (string, error)
 	Cancel()
