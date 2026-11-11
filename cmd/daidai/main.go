@@ -21,7 +21,6 @@ import (
 	"daidai/internal/engine/agent"
 	"daidai/internal/engine/chat"
 	"daidai/internal/engine/memory"
-	"daidai/internal/engine/render"
 	"daidai/internal/engine/vision"
 	"daidai/internal/entity"
 	"daidai/internal/provider/llm"
@@ -278,14 +277,8 @@ func run() int {
 		return 1
 	}
 
-	var ociSchedulerDone <-chan struct{}
 	if cfg.OCI.Enabled && ownerOpenID != "" {
-		done := make(chan struct{})
-		ociSchedulerDone = done
-		go func() {
-			defer close(done)
-			runOCIScheduler(rootCtx, cfg.OCI, ownerOpenID, channelRegistry, ociClient)
-		}()
+		slog.Warn("OCI 定时账单和告警未启动：当前 QQ 通道只支持被动回复，无法投递主动通知；旧版 oci.daily_report_hour、oci.daily_report_minute 和 oci.timezone 配置仅为兼容而忽略，可继续按需调用 OCI 工具查询")
 	}
 
 	// 启动健康检查与单实例锁监听服务
@@ -337,13 +330,6 @@ func run() int {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
 	defer shutdownCancel()
 
-	if ociSchedulerDone != nil {
-		select {
-		case <-ociSchedulerDone:
-		case <-shutdownCtx.Done():
-			slog.Warn("OCI 定时巡检未能在停机期限内完全收敛", "err", shutdownCtx.Err())
-		}
-	}
 	if err := superAgent.Stop(shutdownCtx); err != nil {
 		slog.Warn("通道未能在停机期限内完全收敛", "err", err)
 	}
@@ -359,131 +345,4 @@ func run() int {
 		return 1
 	}
 	return 0
-}
-
-func runOCIScheduler(ctx context.Context, ociCfg config.OCIConfig, partnerID string, channels *entity.ChannelRegistry, client *tool.OCIClient) {
-	loc, err := time.LoadLocation(ociCfg.Timezone)
-	if err != nil {
-		loc = time.FixedZone("SGT", 8*3600)
-	}
-
-	pushHour, pushMin := 8, 30
-	if ociCfg.DailyReportHour != nil {
-		pushHour = *ociCfg.DailyReportHour
-	}
-	if ociCfg.DailyReportMinute != nil {
-		pushMin = *ociCfg.DailyReportMinute
-	}
-
-	if client == nil {
-		slog.Warn("oci_scheduler: 缺少已验证的 OCI 客户端，后台定时巡检未启动")
-		return
-	}
-
-	slog.Warn("oci_scheduler: OCI 定时巡检已装载；QQ 已停用主动推送，定时报告和告警无法投递", "pushTime", fmt.Sprintf("%02d:%02d", pushHour, pushMin), "timezone", loc.String())
-
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	var lastDailyPush string
-	var lastDailyAttemptDay string
-	var lastDailyAttempt time.Time
-	var lastHourlySuccess string
-	var lastHourlyAttemptKey string
-	var lastHourlyAttempt time.Time
-	var lastAlertedUTCDate string
-	var alertedCost float64
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			now := time.Now().In(loc)
-			todayStr := now.Format("2006-01-02")
-			usageDateUTC := now.UTC().Format("2006-01-02")
-
-			// OCI Usage API 按 UTC 日统计，告警水位也按 UTC 日重置。
-			if usageDateUTC != lastAlertedUTCDate {
-				lastAlertedUTCDate = usageDateUTC
-				alertedCost = 0
-			}
-
-			// 每日定时账单播报
-			dailyDue := now.Hour() > pushHour || (now.Hour() == pushHour && now.Minute() >= pushMin)
-			dailyRetryReady := lastDailyAttemptDay != todayStr || now.Sub(lastDailyAttempt) >= 5*time.Minute
-			if dailyDue && lastDailyPush != todayStr && dailyRetryReady {
-				slog.Info("oci_scheduler: 触发每日定时 OCI 账单播报", "date", todayStr)
-				lastDailyAttemptDay = todayStr
-				lastDailyAttempt = now
-				report, err := tool.FetchBillReport(ctx, client, loc)
-				if err != nil {
-					slog.Error("oci_scheduler: 获取账单失败", "err", err)
-					continue
-				}
-				// 数据成功获取后当天只进行一次发送尝试；当前 QQ 主动推送受限，
-				// 避免发送失败时每隔数分钟重复查询并生成同一份日报。
-				lastDailyPush = todayStr
-
-				var cardData []byte
-				if png, err := render.RenderCard(ctx, report.Markdown); err == nil {
-					cardData = png
-				}
-
-				if err := channels.Transmit(ctx, &entity.Utterance{
-					Platform:  "qq",
-					IsGroup:   false,
-					ChannelID: partnerID,
-					Text:      report.Markdown,
-					CardData:  cardData,
-				}); err != nil {
-					slog.Error("oci_scheduler: 每日账单播报发送失败", "err", err)
-				}
-			}
-
-			// 每小时防扣费多维安全巡检 (实时监测新增扣费、闲置预留 IP 与存储超额)
-			// Use UTC hour keys so daylight-saving transitions cannot repeat or skip a scan window.
-			hourKey := now.UTC().Format("2006-01-02-15")
-			if lastHourlySuccess != hourKey && (lastHourlyAttemptKey != hourKey || now.Sub(lastHourlyAttempt) >= 5*time.Minute) {
-				lastHourlyAttemptKey = hourKey
-				lastHourlyAttempt = now
-				report, err := tool.FetchBillReport(ctx, client, loc)
-				if err != nil {
-					slog.Warn("oci_scheduler: 每小时防扣费巡检失败", "err", err)
-				} else {
-					lastHourlySuccess = hourKey
-					var alertReasons []string
-
-					// 1. 突发新增费用告警
-					if report.TodayCost > 0.0001 && report.TodayCost > alertedCost+0.0001 {
-						alertedCost = report.TodayCost
-						alertReasons = append(alertReasons, fmt.Sprintf("截至当前 UTC %s 当日累计费用: %.4f %s", usageDateUTC, report.TodayCost, report.Currency))
-					}
-
-					// 2. 闲置未绑定预留 IP 告警 (闲置 IP 在 OCI 会按小时计费)
-					if len(report.UnboundIPs) > 0 {
-						alertReasons = append(alertReasons, fmt.Sprintf("发现 %d 个闲置未绑定的预留公网 IP (%s)，存在闲置扣费风险，建议及时释放", len(report.UnboundIPs), strings.Join(report.UnboundIPs, ", ")))
-					}
-
-					// 3. 存储容量超额告警 (超过 200 GB 免费额度)
-					if report.StorageGB > 200 {
-						alertReasons = append(alertReasons, fmt.Sprintf("总存储占用已达 %d GB，超出 200 GB 免费额度，存在超额计费风险", report.StorageGB))
-					}
-
-					if len(alertReasons) > 0 {
-						slog.Warn("oci_scheduler: 触发防扣费巡检预警", "reasons", alertReasons)
-						alertMsg := fmt.Sprintf("[OCI 资源防扣费安全预警]\n巡检发现以下异常项：\n- %s\n\n%s", strings.Join(alertReasons, "\n- "), report.Markdown)
-						if err := channels.Transmit(ctx, &entity.Utterance{
-							Platform:  "qq",
-							IsGroup:   false,
-							ChannelID: partnerID,
-							Text:      alertMsg,
-						}); err != nil {
-							slog.Error("oci_scheduler: 防扣费预警发送失败", "err", err)
-						}
-					}
-				}
-			}
-		}
-	}
 }

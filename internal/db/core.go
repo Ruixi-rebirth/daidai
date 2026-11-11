@@ -721,7 +721,7 @@ func (m *Manager) ListActiveFacts(ctx context.Context, platform, userID string) 
 	return m.listFacts(ctx, platform, userID, "", "")
 }
 
-// ListVisibleFacts 私聊只返回全局事实；群聊只返回本群事实，避免个人记忆进入群聊上下文。
+// ListVisibleFacts 私聊只返回当前用户的全局事实；群聊只返回当前用户在本群记录的个人事实，避免成员画像互相泄漏。
 func (m *Manager) ListVisibleFacts(ctx context.Context, platform, userID, groupID string, isGroup bool) ([]*core.Fact, error) {
 	if isGroup {
 		if groupID == "" {

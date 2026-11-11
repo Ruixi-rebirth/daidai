@@ -31,7 +31,7 @@ func (t *MemoryTool) Name() string {
 }
 
 func (t *MemoryTool) Description() string {
-	return "管理当前会话可见的长期记忆：私聊维护全局事实，群聊维护本群事实，并可检索或列出当前可见事实。"
+	return "管理当前用户可见的长期记忆：私聊维护个人全局事实，群聊维护当前用户在本群记录的个人事实，并可检索或列出当前可见事实。群聊事实不会与其他成员共享。"
 }
 
 func (t *MemoryTool) Parameters() map[string]any {
@@ -41,7 +41,7 @@ func (t *MemoryTool) Parameters() map[string]any {
 			"action": map[string]any{
 				"type":        "string",
 				"enum":        []string{"add", "update", "delete", "search", "list"},
-				"description": "操作类型：add（新增当前范围事实）、update（按 fact_id 更新当前范围事实）、delete（按 fact_id 删除当前范围事实）、search（检索当前可见事实和会话历史）、list（列出当前会话可见事实）",
+				"description": "操作类型：add（新增当前用户范围事实）、update（按 fact_id 更新当前用户范围事实）、delete（按 fact_id 删除当前用户范围事实）、search（检索当前用户可见事实和会话历史）、list（列出当前用户可见事实）",
 			},
 			"fact": map[string]any{
 				"type":        "string",
@@ -137,7 +137,7 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 			return nil, err
 		}
 		if !factMatchesScope(target, scopeType, scopeID) {
-			return &core.ToolResult{Text: "群聊中只能更新本群记忆；全局记忆请在私聊中操作。"}, nil
+			return &core.ToolResult{Text: "群聊中只能更新当前用户在本群记录的个人记忆；全局记忆请在私聊中操作。"}, nil
 		}
 		factVec := memory.EmbedText(ctx, factText)
 		err = t.db.ApplyFactMutations(ctx, event.Platform, event.SenderID, []db.FactMutation{
@@ -157,7 +157,7 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 			return nil, err
 		}
 		if !factMatchesScope(target, scopeType, scopeID) {
-			return &core.ToolResult{Text: "群聊中只能删除本群记忆；全局记忆请在私聊中操作。"}, nil
+			return &core.ToolResult{Text: "群聊中只能删除当前用户在本群记录的个人记忆；全局记忆请在私聊中操作。"}, nil
 		}
 		err = t.db.ApplyFactMutations(ctx, event.Platform, event.SenderID, []db.FactMutation{
 			{Action: "DELETE", FactID: args.FactID, ExpectedFact: target.Content, ScopeType: target.ScopeType, ScopeID: target.ScopeID, Quote: event.Content},
@@ -180,7 +180,7 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 		for _, f := range facts {
 			label := "全局"
 			if f.ScopeType == "group" {
-				label = "本群"
+				label = "本群个人"
 			}
 			factLines = append(factLines, fmt.Sprintf("- [ID: %d][%s] %s", f.ID, label, f.Content))
 		}

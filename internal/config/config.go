@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -65,17 +64,20 @@ type Config struct {
 	OCI OCIConfig `yaml:"oci"`
 }
 
-// OCIConfig Oracle Cloud (OCI) 账单巡检与 IP 调度配置
+// OCIConfig Oracle Cloud 账单、资源巡检与 IP 管理配置
 type OCIConfig struct {
-	Enabled           bool   `yaml:"enabled"`
-	PrivateKey        string `yaml:"private_key"`
-	UserOCID          string `yaml:"user_ocid"`
-	TenancyOCID       string `yaml:"tenancy_ocid"`
-	Region            string `yaml:"region"`
-	CompartmentID     string `yaml:"compartment_id"`
-	DailyReportHour   *int   `yaml:"daily_report_hour"`
-	DailyReportMinute *int   `yaml:"daily_report_minute"`
-	Timezone          string `yaml:"timezone"`
+	Enabled       bool   `yaml:"enabled"`
+	PrivateKey    string `yaml:"private_key"`
+	UserOCID      string `yaml:"user_ocid"`
+	TenancyOCID   string `yaml:"tenancy_ocid"`
+	Region        string `yaml:"region"`
+	CompartmentID string `yaml:"compartment_id"`
+	// Deprecated: retained so existing strict YAML files continue to load; QQ cannot deliver scheduled notifications.
+	DailyReportHour *int `yaml:"daily_report_hour"`
+	// Deprecated: retained so existing strict YAML files continue to load; QQ cannot deliver scheduled notifications.
+	DailyReportMinute *int `yaml:"daily_report_minute"`
+	// Deprecated: retained so existing strict YAML files continue to load; no scheduled OCI job uses this timezone.
+	Timezone string `yaml:"timezone"`
 }
 
 // LoadConfig 从指定路径加载 yaml 配置
@@ -157,18 +159,6 @@ func LoadConfig(path string) (*Config, error) {
 		}
 		if len(missing) > 0 {
 			return nil, fmt.Errorf("oci.enabled requires %s", strings.Join(missing, ", "))
-		}
-		if cfg.OCI.DailyReportHour != nil && (*cfg.OCI.DailyReportHour < 0 || *cfg.OCI.DailyReportHour > 23) {
-			return nil, fmt.Errorf("oci.daily_report_hour must be between 0 and 23")
-		}
-		if cfg.OCI.DailyReportMinute != nil && (*cfg.OCI.DailyReportMinute < 0 || *cfg.OCI.DailyReportMinute > 59) {
-			return nil, fmt.Errorf("oci.daily_report_minute must be between 0 and 59")
-		}
-		if timezone := strings.TrimSpace(cfg.OCI.Timezone); timezone != "" {
-			cfg.OCI.Timezone = timezone
-			if _, err := time.LoadLocation(timezone); err != nil {
-				return nil, fmt.Errorf("oci.timezone is invalid: %w", err)
-			}
 		}
 	}
 	return &cfg, nil

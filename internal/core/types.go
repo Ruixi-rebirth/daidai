@@ -13,12 +13,12 @@ var appStartTime = time.Now()
 // MaxImageBytes is the shared image payload limit for rendered, generated, and uploaded media.
 const MaxImageBytes = 10 << 20
 
-// FormatSystemStatus 格式化宿主机实时硬件与运行时指标（默认按非敏感脱敏模式输出）
+// FormatSystemStatus 格式化主机标识与 Go 进程运行时指标（默认按非敏感模式输出）
 func FormatSystemStatus() string {
 	return FormatSystemStatusWithPerm(false)
 }
 
-// FormatSystemStatusWithPerm 格式化宿主机实时硬件与运行时指标（allowSensitive 为 true 时向私聊伙伴展示真实公网 IP 与启动目录）
+// FormatSystemStatusWithPerm 格式化主机标识与 Go 进程运行时指标（allowSensitive 为 true 时向私聊伙伴展示真实公网 IP 与启动目录）
 func FormatSystemStatusWithPerm(allowSensitive bool) string {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
@@ -35,17 +35,21 @@ func FormatSystemStatusWithPerm(allowSensitive bool) string {
 		if ips := GetSensitiveIPs(); len(ips) > 0 {
 			ipLine = strings.Join(ips, ", ")
 		}
-		return fmt.Sprintf(`程序启动目录: %s
-宿主节点: %s (%s/%s)
-本机公网 IP: %s
-WARP 出站隧道: %s
-运行时间: %s
-Go 运行时: %s
-活跃协程: %d
-进程内存占用: %.2f MB (系统保留: %.2f MB)
-CPU 核心数: %d`,
-			pwd,
+		return fmt.Sprintf(`### 宿主机
+- 节点：%s (%s/%s)
+- 程序启动目录：%s
+- 公网 IP：%s
+- WARP 出站：%s
+
+### 运行状态
+- 进程运行时间：%s
+- Go 版本：%s
+- Goroutine：%d
+- Go 堆当前分配：%.2f MiB
+- Go 运行时从系统申请：%.2f MiB
+- 可用逻辑 CPU：%d`,
 			hostname, runtime.GOOS, runtime.GOARCH,
+			pwd,
 			ipLine,
 			WarpStatus(),
 			uptime,
@@ -56,13 +60,17 @@ CPU 核心数: %d`,
 		)
 	}
 
-	return RedactSensitiveIPs(fmt.Sprintf(`宿主节点: %s (%s/%s)
-WARP 出站隧道: %s
-运行时间: %s
-Go 运行时: %s
-活跃协程: %d
-进程内存占用: %.2f MB (系统保留: %.2f MB)
-CPU 核心数: %d`,
+	return RedactSensitiveIPs(fmt.Sprintf(`### 宿主机
+- 节点：%s (%s/%s)
+- WARP 出站：%s
+
+### 运行状态
+- 进程运行时间：%s
+- Go 版本：%s
+- Goroutine：%d
+- Go 堆当前分配：%.2f MiB
+- Go 运行时从系统申请：%.2f MiB
+- 可用逻辑 CPU：%d`,
 		hostname, runtime.GOOS, runtime.GOARCH,
 		WarpStatus(),
 		uptime,

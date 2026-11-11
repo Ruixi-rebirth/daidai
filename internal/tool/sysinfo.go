@@ -19,7 +19,7 @@ func (t *SysInfoTool) Name() string {
 }
 
 func (t *SysInfoTool) Description() string {
-	return "获取呆呆机器人宿主机实时硬件与系统运行状态（系统运行时间、内存占用、协程数、CPU 核心、宿主机节点）。当用户询问机器硬件状态、运行健康度或服务器负载时调用此工具（查询项目工作空间请使用 switch_workspace 工具）。"
+	return "获取呆呆的主机标识和机器人进程状态，包括进程运行时间、Go 堆已分配内存、Go 运行时向系统申请的内存、Goroutine 数、可用逻辑 CPU、系统与架构；搭档私聊还会看到启动目录和公网 IP。当用户询问机器人运行状态时调用此工具；它不提供主机总内存或系统开机时长。查询项目工作空间请使用 switch_workspace 工具。"
 }
 
 func (t *SysInfoTool) Parameters() map[string]any {
