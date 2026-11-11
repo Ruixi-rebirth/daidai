@@ -38,8 +38,8 @@ in
         StateDirectory = "daidai";
         StateDirectoryMode = "0700";
         WorkingDirectory = "/var/lib/daidai";
-        User = "daidai";
-        Group = "daidai";
+        User = lib.mkDefault "daidai";
+        Group = lib.mkDefault "daidai";
         UMask = "0077";
         ExecStart = "${cfg.package}/bin/daidai -config ${cfg.configFile}";
         Restart = "always";
