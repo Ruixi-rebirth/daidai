@@ -31,7 +31,8 @@ func (t *SysInfoTool) Parameters() map[string]any {
 
 func (t *SysInfoTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.ToolResult, error) {
 	event := entity.SensoryEventFromContext(ctx)
+	allowSensitive := event != nil && event.IsPartnerPrivate()
 	return &core.ToolResult{
-		Text: core.FormatSystemStatusWithPerm(event.IsPartnerPrivate()),
+		Text: core.FormatSystemStatusWithPerm(allowSensitive),
 	}, nil
 }

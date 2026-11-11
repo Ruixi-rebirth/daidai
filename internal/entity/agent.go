@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -14,8 +15,9 @@ import (
 
 // ChannelRegistry 全双工通道管理器
 type ChannelRegistry struct {
-	mu       sync.RWMutex
-	channels map[string]Channel
+	mu          sync.RWMutex
+	lifecycleMu sync.Mutex
+	channels    map[string]Channel
 }
 
 func NewChannelRegistry() *ChannelRegistry {
@@ -38,12 +40,34 @@ func (r *ChannelRegistry) Get(name string) (Channel, bool) {
 }
 
 func (r *ChannelRegistry) StartAll(ctx context.Context, onSensory func(event *SensoryEvent)) error {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
 
-	for name, ch := range r.channels {
+	r.mu.RLock()
+	names := make([]string, 0, len(r.channels))
+	for name := range r.channels {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	channels := make([]Channel, len(names))
+	for i, name := range names {
+		channels[i] = r.channels[name]
+	}
+	r.mu.RUnlock()
+
+	started := make([]Channel, 0, len(names))
+	for i, name := range names {
+		ch := channels[i]
 		slog.Info("channel: 正在启动物理通道", "name", name)
+		started = append(started, ch)
 		if err := ch.Start(ctx, onSensory); err != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			for i := len(started) - 1; i >= 0; i-- {
+				if stopErr := started[i].Stop(cleanupCtx); stopErr != nil {
+					slog.Warn("channel: 启动失败后的回滚停止未完全成功", "name", started[i].Name(), "err", stopErr)
+				}
+			}
+			cancel()
 			return fmt.Errorf("failed to start channel %s: %w", name, err)
 		}
 	}
@@ -51,11 +75,23 @@ func (r *ChannelRegistry) StartAll(ctx context.Context, onSensory func(event *Se
 }
 
 func (r *ChannelRegistry) StopAll(ctx context.Context) error {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
 
+	r.mu.RLock()
 	var firstErr error
-	for _, ch := range r.channels {
+	names := make([]string, 0, len(r.channels))
+	for name := range r.channels {
+		names = append(names, name)
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+	channels := make([]Channel, len(names))
+	for i, name := range names {
+		channels[i] = r.channels[name]
+	}
+	r.mu.RUnlock()
+	for i := range names {
+		ch := channels[i]
 		if err := ch.Stop(ctx); err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -93,8 +129,14 @@ type SuperAgent struct {
 	Workspaces     *WorkspaceManager
 	AGYAuth        AGYAuthenticator
 	OnAuthSuccess  func(ctx context.Context)
-	sessionLocks   sync.Map // key: sessionKey -> *sync.Mutex，保证同会话认知严格有序
-	sessionCancels sync.Map // key: sessionKey -> context.CancelFunc，支持 /stop 即时打断在途思考
+	sessionLocksMu sync.Mutex
+	sessionLocks   map[string]*sessionLockEntry // 引用计数覆盖持锁者和等待者，空闲后删除会话锁
+	sessionCancels sync.Map                     // key: sessionKey -> context.CancelFunc，支持 /stop 即时打断在途思考
+}
+
+type sessionLockEntry struct {
+	mu   sync.Mutex
+	refs int
 }
 
 func sessionKey(event *SensoryEvent) string {
@@ -103,10 +145,28 @@ func sessionKey(event *SensoryEvent) string {
 
 func (a *SuperAgent) lockSession(event *SensoryEvent) func() {
 	key := sessionKey(event)
-	val, _ := a.sessionLocks.LoadOrStore(key, &sync.Mutex{})
-	mu := val.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
+	a.sessionLocksMu.Lock()
+	if a.sessionLocks == nil {
+		a.sessionLocks = make(map[string]*sessionLockEntry)
+	}
+	entry := a.sessionLocks[key]
+	if entry == nil {
+		entry = &sessionLockEntry{}
+		a.sessionLocks[key] = entry
+	}
+	entry.refs++
+	a.sessionLocksMu.Unlock()
+
+	entry.mu.Lock()
+	return func() {
+		a.sessionLocksMu.Lock()
+		entry.mu.Unlock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(a.sessionLocks, key)
+		}
+		a.sessionLocksMu.Unlock()
+	}
 }
 
 // Config 生命体初始化依赖
@@ -151,7 +211,14 @@ func NewSuperAgent(cfg Config) *SuperAgent {
 
 // Start 唤醒生命体并启动所有物理通信通道
 func (a *SuperAgent) Start(ctx context.Context) error {
-	slog.Info("Daidai SuperAgent 正在苏醒...", "name", a.Persona.Name)
+	if a.Channels == nil {
+		return fmt.Errorf("channel registry is not configured")
+	}
+	name := ""
+	if a.Persona != nil {
+		name = a.Persona.Name
+	}
+	slog.Info("Daidai SuperAgent 正在苏醒...", "name", name)
 
 	return a.Channels.StartAll(ctx, func(event *SensoryEvent) {
 		procCtx, cancel := context.WithTimeout(ctx, 6*time.Minute)
@@ -163,20 +230,55 @@ func (a *SuperAgent) Start(ctx context.Context) error {
 // Stop 优雅休眠生命体
 func (a *SuperAgent) Stop(ctx context.Context) error {
 	slog.Info("Daidai SuperAgent 正在休眠...")
+	if a.AGYAuth != nil {
+		a.AGYAuth.Cancel()
+	}
+	if a.Channels == nil {
+		return nil
+	}
 	return a.Channels.StopAll(ctx)
 }
 
-func (a *SuperAgent) replyText(ctx context.Context, event *SensoryEvent, text string) {
+func (a *SuperAgent) transmitReplyText(ctx context.Context, event *SensoryEvent, text string) error {
+	if a.Channels == nil {
+		err := fmt.Errorf("channel registry is not configured")
+		slog.Warn("superagent: 文本回复发送失败", "platform", event.Platform, "channel", event.ChannelID, "err", err)
+		return err
+	}
 	if !event.IsPartnerPrivate() {
 		text = core.RedactSensitiveIPs(text)
 	}
-	_ = a.Channels.Transmit(ctx, &Utterance{
+	err := a.Channels.Transmit(ctx, &Utterance{
 		Platform:   event.Platform,
 		IsGroup:    event.IsGroup,
 		ChannelID:  event.ChannelID,
 		QuoteMsgID: event.RawMessageID,
 		Text:       text,
 	})
+	if err != nil {
+		slog.Warn("superagent: 文本回复发送失败", "platform", event.Platform, "channel", event.ChannelID, "err", err)
+	}
+	return err
+}
+
+func (a *SuperAgent) replyText(ctx context.Context, event *SensoryEvent, text string) {
+	_ = a.transmitReplyText(ctx, event, text)
+}
+
+func (a *SuperAgent) delegationPermissionError(role UserRole) error {
+	if a.Immune == nil {
+		return fmt.Errorf("权限校验未配置，拒绝执行此操作")
+	}
+	return a.Immune.VerifyDelegationPerm(role)
+}
+
+func parseAGYAuthCodeCommand(content string) (string, bool) {
+	parts := strings.Fields(strings.TrimSpace(content))
+	if len(parts) < 3 || !strings.EqualFold(parts[0], "/agy") ||
+		(!strings.EqualFold(parts[1], "code") && !strings.EqualFold(parts[1], "auth")) {
+		return "", false
+	}
+	return strings.Trim(strings.Join(parts[2:], " "), "`'\""), true
 }
 
 // Process 核心认知信息流：物理感知 -> 控制面快筛 -> 认知大脑 -> 物理通道发声
@@ -186,7 +288,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 	}
 
 	content := strings.TrimSpace(event.Content)
-	slog.Info("superagent: 感知事件流入大脑", "channel", event.ChannelID, "isGroup", event.IsGroup, "sender", event.SenderName, "role", event.Role, "content", content)
+	slog.Info("superagent: 感知事件流入大脑", "channel", event.ChannelID, "isGroup", event.IsGroup, "sender", event.SenderName, "role", event.Role, "contentBytes", len(content))
 
 	// 极速控制面 (0 Token 拦截通道)
 	if strings.HasPrefix(content, "/") {
@@ -207,37 +309,42 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 				if a.Delegates != nil {
 					active := a.Delegates.ActiveTickets()
 					if len(active) == 0 {
-						sections = append(sections, "后台沙箱工单: 当前空闲 (0 个运行中)")
+						sections = append(sections, "后台工程工单：当前空闲 (0 个活跃)")
 					} else {
 						var tLines []string
 						for _, t := range active {
-							tLines = append(tLines, fmt.Sprintf("- %s [%s]: %s (已运行 %s)", t.ID, t.Worker, t.Goal, time.Since(t.CreatedAt).Truncate(time.Second)))
+							tLines = append(tLines, fmt.Sprintf("- %s [%s · %s]: %s (已持续 %s)", t.ID, t.Worker, t.Status, t.Goal, time.Since(t.CreatedAt).Truncate(time.Second)))
 						}
-						sections = append(sections, fmt.Sprintf("后台沙箱工单 (%d 个运行中):\n%s", len(active), strings.Join(tLines, "\n")))
+						sections = append(sections, fmt.Sprintf("后台工程工单 (%d 个活跃):\n%s", len(active), strings.Join(tLines, "\n")))
 					}
 				}
 			}
 			a.replyText(ctx, event, strings.Join(sections, "\n\n"))
 			return
 
-		case "/usage":
-			if a.Cognition != nil {
+		case "/usage", "/model", "/models":
+			if err := a.delegationPermissionError(event.Role); err != nil {
+				a.replyText(ctx, event, err.Error())
+				return
+			}
+			if a.Cognition == nil {
+				return
+			}
+			if content == "/usage" {
 				a.replyText(ctx, event, a.Cognition.ModelUsage())
-				return
-			}
-
-		case "/model", "/models":
-			if a.Cognition != nil {
+			} else {
 				a.replyText(ctx, event, a.Cognition.ModelList())
-				return
 			}
+			return
 
 		case "/agy login", "/agy auth", "/agy login force", "/agy login --force":
-			if a.Immune != nil {
-				if err := a.Immune.VerifyDelegationPerm(event.Role); err != nil {
-					a.replyText(ctx, event, err.Error())
-					return
-				}
+			if event.IsGroup {
+				a.replyText(ctx, event, "AGY 认证链接包含账号授权信息，请在与呆呆的私聊中发起登录。")
+				return
+			}
+			if err := a.delegationPermissionError(event.Role); err != nil {
+				a.replyText(ctx, event, err.Error())
+				return
 			}
 			if a.AGYAuth == nil {
 				a.replyText(ctx, event, "AGY 认证管理器未挂载。")
@@ -250,7 +357,10 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 					return
 				}
 			} else {
-				_ = a.AGYAuth.Logout()
+				if err := a.AGYAuth.Logout(); err != nil {
+					a.replyText(ctx, event, fmt.Sprintf("清理现有 AGY 登录状态失败，已取消强制重新认证：%v", err))
+					return
+				}
 			}
 			a.replyText(ctx, event, "正在发起 Google 账号认证，请稍候获取授权链接...")
 			authURL, err := a.AGYAuth.StartLogin(ctx)
@@ -263,6 +373,14 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			return
 
 		case "/agy status":
+			if event.IsGroup {
+				a.replyText(ctx, event, "AGY 账号状态包含私人信息，请在与呆呆的私聊中查询。")
+				return
+			}
+			if err := a.delegationPermissionError(event.Role); err != nil {
+				a.replyText(ctx, event, err.Error())
+				return
+			}
 			if a.AGYAuth == nil {
 				a.replyText(ctx, event, "AGY 认证管理器未挂载。")
 				return
@@ -281,23 +399,25 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			return
 
 		case "/agy logout":
-			if a.Immune != nil {
-				if err := a.Immune.VerifyDelegationPerm(event.Role); err != nil {
-					a.replyText(ctx, event, err.Error())
-					return
-				}
+			if event.IsGroup {
+				a.replyText(ctx, event, "账号注销操作请在与呆呆的私聊中进行。")
+				return
+			}
+			if err := a.delegationPermissionError(event.Role); err != nil {
+				a.replyText(ctx, event, err.Error())
+				return
 			}
 			if a.AGYAuth == nil {
 				a.replyText(ctx, event, "AGY 认证管理器未挂载。")
 				return
 			}
 			st := a.AGYAuth.GetStatus()
-			if !st.IsLoggedIn {
-				a.replyText(ctx, event, "【AGY 认证状态】\n当前尚未登录，无需注销。")
-				return
-			}
 			if err := a.AGYAuth.Logout(); err != nil {
 				a.replyText(ctx, event, fmt.Sprintf("注销失败: %v", err))
+				return
+			}
+			if !st.IsLoggedIn {
+				a.replyText(ctx, event, "【AGY 登录已取消】\n当前没有已登录账号；等待中的登录会话已清理。如需使用可发送 `/agy login` 重新认证。")
 				return
 			}
 			emailHint := ""
@@ -308,18 +428,13 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			return
 
 		case "/stop":
-			if a.Immune != nil {
-				if err := a.Immune.VerifyDelegationPerm(event.Role); err != nil {
-					a.replyText(ctx, event, err.Error())
-					return
-				}
+			if err := a.delegationPermissionError(event.Role); err != nil {
+				a.replyText(ctx, event, err.Error())
+				return
 			}
 			aborted := 0
 			if a.Delegates != nil {
 				aborted = a.Delegates.AbortByChannel(event.ChannelID)
-				if aborted == 0 && event.Role == RolePartner {
-					aborted = a.Delegates.AbortAll()
-				}
 			}
 			stoppedThinking := false
 			if cancelVal, ok := a.sessionCancels.LoadAndDelete(sessionKey(event)); ok {
@@ -330,9 +445,9 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			}
 			msg := "当前没有正在运行中的思考任务或后台工单。"
 			if aborted > 0 && stoppedThinking {
-				msg = fmt.Sprintf("已紧急中断当前思考进程及 %d 个正在执行的后台工单。", aborted)
+				msg = fmt.Sprintf("已紧急中断当前思考进程，并向 %d 个后台工单发出停止请求（尚未启动的任务已取消；运行中任务退出后释放执行容量）。", aborted)
 			} else if aborted > 0 {
-				msg = fmt.Sprintf("已紧急中断 %d 个正在执行的后台工单。", aborted)
+				msg = fmt.Sprintf("已向 %d 个后台工单发出停止请求（尚未启动的任务已取消；运行中任务退出后释放执行容量）。", aborted)
 			} else if stoppedThinking {
 				msg = "已紧急中断当前正在进行的思考与工具调用。"
 			}
@@ -340,11 +455,9 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			return
 
 		case "/reset", "/new", "/clear", "/ws clear", "/ws reset":
-			if a.Immune != nil {
-				if err := a.Immune.VerifyDelegationPerm(event.Role); err != nil {
-					a.replyText(ctx, event, err.Error())
-					return
-				}
+			if err := a.delegationPermissionError(event.Role); err != nil {
+				a.replyText(ctx, event, err.Error())
+				return
 			}
 
 			// 先中断在途工单与正在持有会话锁的思考协程，防止 lockSession 陷入死等
@@ -363,13 +476,26 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			currWs := ""
 			wsName := ""
 			if a.Workspaces != nil {
-				currWs, wsName = a.Workspaces.GetCurrent(event.ChannelID)
+				var workspaceErr error
+				currWs, wsName, workspaceErr = a.Workspaces.GetCurrentChecked(event.ChannelID)
+				if workspaceErr != nil {
+					a.replyText(ctx, event, fmt.Sprintf("【会话重开失败】\n无法确认当前工作区，近期历史和 AGY 会话均未重置：%v", workspaceErr))
+					return
+				}
 			}
 
+			chatType := "private"
+			if event.IsGroup {
+				chatType = "group"
+			}
+			if err := db.DefaultManager().ResetSessionHistoryInChat(event.Platform, chatType, event.ChannelID); err != nil {
+				slog.Error("superagent: 重开会话时清理近期历史失败", "platform", event.Platform, "channelID", event.ChannelID, "err", err)
+				a.replyText(ctx, event, "【会话重开失败】\n近期对话历史未能清理，AGY 会话记录未清空；已中断的任务不会自动恢复。请稍后重试。")
+				return
+			}
 			if a.Delegates != nil {
 				a.Delegates.ResetSession(event.ChannelID, currWs)
 			}
-			_ = db.DefaultManager().ResetSessionHistory(event.Platform, event.ChannelID)
 
 			feedback := fmt.Sprintf("【当前会话已完成重开】\n已清空工作空间 `%s` (`%s`) 的 agy 会话与近期对话记忆，长期画像与项目文件完好保留。", wsName, currWs)
 			a.replyText(ctx, event, feedback)
@@ -382,7 +508,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 				a.replyText(ctx, event, "工作空间管理器未配置。")
 				return
 			}
-			a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "current", ""))
+			a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "current", "", a.Delegates))
 			return
 
 		case "/workspaces", "/ws":
@@ -392,7 +518,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 				a.replyText(ctx, event, "工作空间管理器未配置。")
 				return
 			}
-			a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "list", ""))
+			a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "list", "", a.Delegates))
 			return
 
 		case "/ws exit", "/workspaces exit":
@@ -402,7 +528,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 				a.replyText(ctx, event, "工作空间管理器未配置。")
 				return
 			}
-			a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "exit", ""))
+			a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "exit", "", a.Delegates))
 			return
 
 		case "/ws clean", "/clean":
@@ -412,7 +538,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 				a.replyText(ctx, event, "工作空间管理器未配置。")
 				return
 			}
-			a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "clean", ""))
+			a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "clean", "", a.Delegates))
 			return
 
 		case "/help":
@@ -428,28 +554,25 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 - /pwd      : 查看当前所在工作空间与运行模式
 - /cd <目标> : 切入指定生产工程
 - /ws       : 查看已纳管工作空间书签列表 (支持 /ws rm <项目名> 注销)
-- /ws exit  : 退出当前工程，退回隔离沙盒演练区
-- /ws clean : 清空沙盒里的临时草稿与测试文件`, a.Persona.Name)
+- /ws exit  : 退出当前工程，退回默认工作区
+- /ws clean : 清理默认工作区里的临时文件`, a.Persona.Name)
 			a.replyText(ctx, event, helpText)
 			return
 
 		default:
-			if strings.HasPrefix(content, "/agy code ") || strings.HasPrefix(content, "/agy auth ") {
-				if a.Immune != nil {
-					if err := a.Immune.VerifyDelegationPerm(event.Role); err != nil {
-						a.replyText(ctx, event, err.Error())
-						return
-					}
+			if code, isAuthCodeCommand := parseAGYAuthCodeCommand(content); isAuthCodeCommand {
+				if event.IsGroup {
+					a.replyText(ctx, event, "授权码属于私人凭据，请勿在群聊中发送。请在与呆呆的私聊中提交授权码。")
+					return
+				}
+				if err := a.delegationPermissionError(event.Role); err != nil {
+					a.replyText(ctx, event, err.Error())
+					return
 				}
 				if a.AGYAuth == nil {
 					a.replyText(ctx, event, "AGY 认证管理器未挂载。")
 					return
 				}
-				code := strings.TrimSpace(strings.TrimPrefix(content, "/agy code "))
-				if strings.HasPrefix(content, "/agy auth ") {
-					code = strings.TrimSpace(strings.TrimPrefix(content, "/agy auth "))
-				}
-				code = strings.Trim(code, "`'\"")
 				a.replyText(ctx, event, "正在验证并换取凭证，请稍候...")
 				email, err := a.AGYAuth.SubmitCode(ctx, code)
 				if err != nil {
@@ -473,7 +596,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 				if strings.HasPrefix(content, "/ws rm ") {
 					target = strings.TrimSpace(strings.TrimPrefix(content, "/ws rm "))
 				}
-				a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "remove", target))
+				a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "remove", target, a.Delegates))
 				return
 			}
 
@@ -488,7 +611,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 				if target == "" {
 					target = "~"
 				}
-				a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "switch", target))
+				a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "switch", target, a.Delegates))
 				return
 			}
 		}
@@ -500,10 +623,10 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 
 	if event.OnProgress == nil {
 		event.OnProgress = func(progressText string) {
-			if strings.TrimSpace(progressText) == "" {
+			if strings.TrimSpace(progressText) == "" || ctx.Err() != nil {
 				return
 			}
-			pCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			pCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 			defer cancel()
 			a.replyText(pCtx, event, progressText)
 		}
@@ -520,25 +643,54 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 
 		utterance, err := a.Cognition.Think(thinkCtx, event)
 		if err != nil {
-			if thinkCtx.Err() == context.Canceled {
-				slog.Info("superagent: 当前会话思考已被主动中断", "channel", event.ChannelID)
+			if thinkCtx.Err() != nil {
+				slog.Info("superagent: 当前会话思考上下文已结束", "channel", event.ChannelID, "err", thinkCtx.Err())
 				return
 			}
 			slog.Error("superagent: 思考过程发生异常", "err", err)
-			sendCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			errorReply := fmt.Sprintf("思考时神经回路有些紊乱：%v", err)
+			if !event.IsPartnerPrivate() {
+				errorReply = core.RedactSensitiveIPs(errorReply)
+			}
+			sendCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 			defer cancel()
-			a.replyText(sendCtx, event, fmt.Sprintf("思考时神经回路有些紊乱：%v", err))
+			if sendErr := a.transmitReplyText(sendCtx, event, errorReply); sendErr != nil {
+				return
+			}
+			if committer, ok := a.Cognition.(interface {
+				CommitDeliveredReply(context.Context, *SensoryEvent, string)
+			}); ok {
+				commitCtx, commitCancel := context.WithTimeout(ctx, 15*time.Second)
+				committer.CommitDeliveredReply(commitCtx, event, errorReply)
+				commitCancel()
+			}
 			return
 		}
 
 		if utterance != nil {
+			if thinkCtx.Err() != nil {
+				return
+			}
 			if !event.IsPartnerPrivate() {
 				utterance.Text = core.RedactSensitiveIPs(utterance.Text)
 			}
-			slog.Info("superagent: 认知合成完毕准备发声", "channel", utterance.ChannelID, "text", utterance.Text, "hasMedia", utterance.HasMedia())
-			sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			_ = a.Channels.Transmit(sendCtx, utterance)
+			slog.Info("superagent: 认知合成完毕准备发声", "channel", utterance.ChannelID, "textBytes", len(utterance.Text), "hasMedia", utterance.HasMedia())
+			sendCtx, cancel := context.WithTimeout(thinkCtx, 30*time.Second)
+			sendErr := a.Channels.Transmit(sendCtx, utterance)
+			cancel()
+
+			replyText := utterance.Text
+			if sendErr != nil {
+				slog.Error("superagent: 回复发送失败", "channel", utterance.ChannelID, "err", sendErr)
+				replyText = ""
+			}
+			if committer, ok := a.Cognition.(interface {
+				CommitDeliveredReply(context.Context, *SensoryEvent, string)
+			}); ok {
+				commitCtx, commitCancel := context.WithTimeout(ctx, 15*time.Second)
+				committer.CommitDeliveredReply(commitCtx, event, replyText)
+				commitCancel()
+			}
 		}
 	}
 }

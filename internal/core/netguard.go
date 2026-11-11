@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,8 +23,9 @@ import (
 )
 
 const (
-	WarpSocks5Addr = "127.0.0.1:40000"
-	WarpHTTPAddr   = "127.0.0.1:40001"
+	WarpSocks5Addr      = "127.0.0.1:40000"
+	WarpHTTPAddr        = "127.0.0.1:40001"
+	maxWarpProfileBytes = 1 << 20
 )
 
 var (
@@ -83,13 +86,112 @@ func RedactSensitiveIPs(text string) string {
 	copy(list, sortedIPList)
 	ipGuardMu.RUnlock()
 
-	out := text
+	sensitive := make(map[netip.Addr]struct{}, len(list))
 	for _, ipStr := range list {
-		if ipStr != "" && strings.Contains(out, ipStr) {
-			out = strings.ReplaceAll(out, ipStr, "[REDACTED_PUBLIC_IP]")
+		ip, err := netip.ParseAddr(ipStr)
+		if err == nil {
+			sensitive[ip.Unmap()] = struct{}{}
 		}
 	}
-	return out
+	if len(sensitive) == 0 {
+		return text
+	}
+
+	var out strings.Builder
+	out.Grow(len(text))
+	for i := 0; i < len(text); {
+		if !startsIPToken(text[i]) {
+			out.WriteByte(text[i])
+			i++
+			continue
+		}
+
+		end := i + 1
+		for end < len(text) && isIPTokenByte(text[end]) {
+			end++
+		}
+		candidate := text[i:end]
+		if start, tokenEnd, found := findSensitiveIPToken(candidate, sensitive); found {
+			out.WriteString(candidate[:start])
+			out.WriteString("[REDACTED_PUBLIC_IP]")
+			out.WriteString(candidate[tokenEnd:])
+			i = end
+			continue
+		}
+		out.WriteString(candidate)
+		i = end
+	}
+	return out.String()
+}
+
+func findSensitiveIPToken(candidate string, sensitive map[netip.Addr]struct{}) (int, int, bool) {
+	if addr, end, ok := parseIPTokenWithTrailingPunctuation(candidate); ok {
+		if _, found := sensitive[addr.Unmap()]; found {
+			return 0, end, true
+		}
+	}
+
+	// A label such as "v6:" can be consumed as part of the hex token. Retry
+	// only after a bounded number of colon separators to find an adjacent IP.
+	start := 0
+	for attempt := 0; attempt < 8; attempt++ {
+		separator := strings.IndexByte(candidate[start:], ':')
+		if separator < 0 {
+			break
+		}
+		start += separator + 1
+		if start >= len(candidate) {
+			break
+		}
+		addr, end, ok := parseIPTokenWithTrailingPunctuation(candidate[start:])
+		if ok {
+			if _, found := sensitive[addr.Unmap()]; found {
+				return start, start + end, true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+func parseIPTokenWithTrailingPunctuation(token string) (netip.Addr, int, bool) {
+	if addr, ok := parseIPToken(token); ok {
+		return addr, len(token), true
+	}
+	end := len(token)
+	for end > 0 && (token[end-1] == '.' || token[end-1] == ':') {
+		end--
+	}
+	if end < len(token) {
+		if addr, ok := parseIPToken(token[:end]); ok {
+			return addr, end, true
+		}
+	}
+	return netip.Addr{}, 0, false
+}
+
+func startsIPToken(b byte) bool {
+	return b == '[' || b >= '0' && b <= '9' || b >= 'a' && b <= 'f' || b >= 'A' && b <= 'F'
+}
+
+func isIPTokenByte(b byte) bool {
+	return b == '[' || b == ']' || b == ':' || b == '.' ||
+		b >= '0' && b <= '9' || b >= 'a' && b <= 'f' || b >= 'A' && b <= 'F'
+}
+
+func parseIPToken(token string) (netip.Addr, bool) {
+	if addrPort, err := netip.ParseAddrPort(token); err == nil {
+		return addrPort.Addr(), true
+	}
+	if addr, err := netip.ParseAddr(token); err == nil {
+		return addr, true
+	}
+	if strings.HasPrefix(token, "[") && strings.HasSuffix(token, "]") {
+		addr, err := netip.ParseAddr(token[1 : len(token)-1])
+		if err == nil {
+			return addr, true
+		}
+	}
+	return netip.Addr{}, false
 }
 
 // IsWarpReady 返回本地 Cloudflare WARP 隔离代理是否已就绪
@@ -137,22 +239,14 @@ func NewProtectedHTTPClient(timeout time.Duration) *http.Client {
 		KeepAlive: 30 * time.Second,
 	}
 	transport := &http.Transport{
-		Proxy: func(req *http.Request) (*url.URL, error) {
-			if warpReady.Load() {
-				return url.Parse("http://" + WarpHTTPAddr)
-			}
-			return http.ProxyFromEnvironment(req)
-		},
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			host, port, err := net.SplitHostPort(addr)
 			if err != nil {
 				return nil, err
 			}
-			// 若走本地 WARP 代理隧道，允许连接本地 WARP 端口
-			if host == "127.0.0.1" && (port == "40000" || port == "40001") {
-				return dialer.DialContext(ctx, network, addr)
-			}
-			// 直连情形：防 DNS Rebinding (TOCTOU)，在建立物理 socket 握手前再次解析校验真实目标 IP
+			// Resolve and validate at the final dial boundary. When WARP is active,
+			// send the selected IP (not the hostname) through SOCKS5 so wireproxy
+			// cannot perform a second, unchecked DNS lookup for a rebound address.
 			ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
 			if err != nil {
 				return nil, fmt.Errorf("safe dial resolve failed for host %s: %w", host, err)
@@ -165,8 +259,11 @@ func NewProtectedHTTPClient(timeout time.Duration) *http.Client {
 					return nil, fmt.Errorf("forbidden target IP %s for host %s", ip.String(), host)
 				}
 			}
-			// 挑选首个已严格校验安全的物理 IP 直连，杜绝连接时发生二次解析劫持
 			safeAddr := net.JoinHostPort(ips[0].String(), port)
+			if warpReady.Load() {
+				return dialSOCKS5Pinned(ctx, dialer, WarpSocks5Addr, safeAddr)
+			}
+			// 直连时也只连接刚刚校验过的 IP，杜绝连接时发生二次解析劫持。
 			return dialer.DialContext(ctx, network, safeAddr)
 		},
 		TLSHandshakeTimeout:   10 * time.Second,
@@ -182,6 +279,147 @@ func NewProtectedHTTPClient(timeout time.Duration) *http.Client {
 			return ValidateSafeExternalURL(req.Context(), req.URL.String())
 		},
 	}
+}
+
+func dialSOCKS5Pinned(ctx context.Context, dialer *net.Dialer, proxyAddr, targetAddr string) (net.Conn, error) {
+	conn, err := dialer.DialContext(ctx, "tcp", proxyAddr)
+	if err != nil {
+		return nil, fmt.Errorf("dial WARP SOCKS5 proxy: %w", err)
+	}
+	stopCancellation := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopCancellation()
+	keepConn := false
+	defer func() {
+		if !keepConn {
+			_ = conn.Close()
+		}
+	}()
+
+	deadline := time.Now().Add(10 * time.Second)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		return nil, fmt.Errorf("set WARP SOCKS5 deadline: %w", err)
+	}
+
+	if _, err := conn.Write([]byte{5, 1, 0}); err != nil {
+		return nil, fmt.Errorf("negotiate WARP SOCKS5 authentication: %w", err)
+	}
+	var greeting [2]byte
+	if _, err := io.ReadFull(conn, greeting[:]); err != nil {
+		return nil, fmt.Errorf("read WARP SOCKS5 greeting: %w", err)
+	}
+	if greeting != [2]byte{5, 0} {
+		return nil, fmt.Errorf("WARP SOCKS5 proxy rejected unauthenticated connection")
+	}
+
+	targetHost, targetPort, err := net.SplitHostPort(targetAddr)
+	if err != nil {
+		return nil, err
+	}
+	targetIP := net.ParseIP(targetHost)
+	if targetIP == nil {
+		return nil, fmt.Errorf("refusing to send an unpinned hostname to WARP SOCKS5")
+	}
+	portNumber, err := strconv.ParseUint(targetPort, 10, 16)
+	if err != nil {
+		return nil, fmt.Errorf("invalid target port %q: %w", targetPort, err)
+	}
+
+	request := []byte{5, 1, 0}
+	if ipv4 := targetIP.To4(); ipv4 != nil {
+		request = append(request, 1)
+		request = append(request, ipv4...)
+	} else {
+		request = append(request, 4)
+		request = append(request, targetIP.To16()...)
+	}
+	var portBytes [2]byte
+	binary.BigEndian.PutUint16(portBytes[:], uint16(portNumber))
+	request = append(request, portBytes[:]...)
+	if _, err := conn.Write(request); err != nil {
+		return nil, fmt.Errorf("send pinned WARP SOCKS5 CONNECT request: %w", err)
+	}
+
+	var reply [4]byte
+	if _, err := io.ReadFull(conn, reply[:]); err != nil {
+		return nil, fmt.Errorf("read WARP SOCKS5 CONNECT response: %w", err)
+	}
+	if reply[0] != 5 || reply[1] != 0 {
+		return nil, fmt.Errorf("WARP SOCKS5 CONNECT failed with reply code %d", reply[1])
+	}
+	var bindAddrLen int
+	switch reply[3] {
+	case 1:
+		bindAddrLen = net.IPv4len
+	case 4:
+		bindAddrLen = net.IPv6len
+	case 3:
+		var length [1]byte
+		if _, err := io.ReadFull(conn, length[:]); err != nil {
+			return nil, fmt.Errorf("read WARP SOCKS5 domain reply: %w", err)
+		}
+		bindAddrLen = int(length[0])
+	default:
+		return nil, fmt.Errorf("WARP SOCKS5 returned unknown address type %d", reply[3])
+	}
+	if _, err := io.CopyN(io.Discard, conn, int64(bindAddrLen+2)); err != nil {
+		return nil, fmt.Errorf("read WARP SOCKS5 bind address: %w", err)
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return nil, fmt.Errorf("clear WARP SOCKS5 deadline: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !stopCancellation() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, context.Canceled
+	}
+	keepConn = true
+	return conn, nil
+}
+
+// DialProtectedExternalTCP resolves and validates a public destination before
+// opening a TCP connection through the local WARP SOCKS5 proxy. The resolved IP
+// is sent to WARP so a second DNS lookup cannot bypass the validation.
+func DialProtectedExternalTCP(ctx context.Context, host, port string) (net.Conn, error) {
+	if !warpReady.Load() {
+		return nil, fmt.Errorf("WARP proxy is not ready")
+	}
+	if host == "" || strings.ContainsAny(host, "\x00\r\n") {
+		return nil, fmt.Errorf("invalid destination host")
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	if host == "localhost" || strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") || strings.HasSuffix(host, ".lan") {
+		return nil, fmt.Errorf("forbidden internal host %q", host)
+	}
+	portNumber, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || portNumber == 0 {
+		return nil, fmt.Errorf("invalid destination port %q", port)
+	}
+	var ips []net.IP
+	if ip := net.ParseIP(host); ip != nil {
+		ips = []net.IP{ip}
+	} else {
+		ips, err = net.DefaultResolver.LookupIP(ctx, "ip", host)
+		if err != nil {
+			return nil, fmt.Errorf("safe dial resolve failed for host %s: %w", host, err)
+		}
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("no IP resolved for host %s", host)
+	}
+	for _, ip := range ips {
+		if isForbiddenTargetIP(ip) {
+			return nil, fmt.Errorf("forbidden target IP %s for host %s", ip.String(), host)
+		}
+	}
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	return dialSOCKS5Pinned(ctx, dialer, WarpSocks5Addr, net.JoinHostPort(ips[0].String(), strconv.FormatUint(portNumber, 10)))
 }
 
 // InitPublicIPGuard 扫描本机公网地址、登记脱敏护栏，并在后台自动拉起 Cloudflare WARP 本地代理隧道 (wireproxy)
@@ -210,6 +448,9 @@ func InitPublicIPGuard(ctx context.Context) {
 		}
 		directClient := &http.Client{
 			Timeout: 5 * time.Second,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 			Transport: &http.Transport{
 				Proxy: nil, // 强制直连以准确获取本机真实公网出口 IP
 			},
@@ -227,7 +468,7 @@ func InitPublicIPGuard(ctx context.Context) {
 				continue
 			}
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 128))
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			cancel()
 
 			if ip := net.ParseIP(strings.TrimSpace(string(body))); ip != nil && !ip.IsPrivate() && !ip.IsLoopback() {
@@ -244,47 +485,109 @@ func ensureWireproxyConfig(ctx context.Context, warpDir string) (string, error) 
 	if err := os.MkdirAll(warpDir, 0700); err != nil {
 		return "", err
 	}
-	confPath := filepath.Join(warpDir, "wireproxy.conf")
-	if st, err := os.Stat(confPath); err == nil && st.Size() > 0 {
-		return confPath, nil
+	warpDirInfo, err := os.Lstat(warpDir)
+	if err != nil {
+		return "", err
+	}
+	if !warpDirInfo.IsDir() || warpDirInfo.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("WARP directory must be a real directory")
+	}
+	if err := os.Chmod(warpDir, 0700); err != nil {
+		return "", fmt.Errorf("secure WARP directory permissions: %w", err)
 	}
 
+	confPath := filepath.Join(warpDir, "wireproxy.conf")
 	profilePath := filepath.Join(warpDir, "wgcf-profile.conf")
+	acctPath := filepath.Join(warpDir, "wgcf-account.toml")
+	for _, path := range []string{confPath, profilePath, acctPath} {
+		if err := securePrivateFile(path); err != nil {
+			return "", fmt.Errorf("secure WARP credential file %s: %w", filepath.Base(path), err)
+		}
+	}
+	if st, err := os.Lstat(confPath); err == nil && st.Size() > 0 {
+		return confPath, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+
 	if _, err := os.Stat(profilePath); err != nil {
 		if _, lookErr := exec.LookPath("wgcf"); lookErr != nil {
 			return "", fmt.Errorf("wgcf not found in PATH")
 		}
-		acctPath := filepath.Join(warpDir, "wgcf-account.toml")
 		if _, aErr := os.Stat(acctPath); aErr != nil {
 			regCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 			regCmd := exec.CommandContext(regCtx, "wgcf", "register", "--accept-tos")
 			regCmd.Dir = warpDir
-			out, regErr := regCmd.CombinedOutput()
+			regCmd.WaitDelay = 2 * time.Second
+			regOutput := NewLimitedBuffer(256 << 10)
+			regCmd.Stdout = regOutput
+			regCmd.Stderr = regOutput
+			regErr := regCmd.Run()
 			cancel()
 			if regErr != nil {
-				return "", fmt.Errorf("wgcf register failed: %w (%s)", regErr, strings.TrimSpace(string(out)))
+				return "", fmt.Errorf("wgcf register failed: %w (%s)", regErr, strings.TrimSpace(regOutput.String()))
+			}
+			if regOutput.Truncated() {
+				return "", fmt.Errorf("wgcf register output exceeded 256 KiB limit")
 			}
 		}
 		genCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		genCmd := exec.CommandContext(genCtx, "wgcf", "generate")
 		genCmd.Dir = warpDir
-		out, genErr := genCmd.CombinedOutput()
+		genCmd.WaitDelay = 2 * time.Second
+		genOutput := NewLimitedBuffer(256 << 10)
+		genCmd.Stdout = genOutput
+		genCmd.Stderr = genOutput
+		genErr := genCmd.Run()
 		cancel()
 		if genErr != nil {
-			return "", fmt.Errorf("wgcf generate failed: %w (%s)", genErr, strings.TrimSpace(string(out)))
+			return "", fmt.Errorf("wgcf generate failed: %w (%s)", genErr, strings.TrimSpace(genOutput.String()))
+		}
+		if genOutput.Truncated() {
+			return "", fmt.Errorf("wgcf generate output exceeded 256 KiB limit")
 		}
 	}
 
-	rawProfile, err := os.ReadFile(profilePath)
+	for _, path := range []string{profilePath, acctPath} {
+		if err := securePrivateFile(path); err != nil {
+			return "", fmt.Errorf("secure generated WARP credential file %s: %w", filepath.Base(path), err)
+		}
+	}
+	profileFile, err := os.Open(profilePath)
 	if err != nil {
 		return "", err
+	}
+	rawProfile, readErr := ReadBounded(profileFile, maxWarpProfileBytes)
+	closeErr := profileFile.Close()
+	if readErr != nil {
+		return "", fmt.Errorf("read WARP profile: %w", readErr)
+	}
+	if closeErr != nil {
+		return "", closeErr
 	}
 
 	fullConf := strings.TrimSpace(string(rawProfile)) + fmt.Sprintf("\n\n[Socks5]\nBindAddress = %s\n\n[http]\nBindAddress = %s\n", WarpSocks5Addr, WarpHTTPAddr)
 	if err := os.WriteFile(confPath, []byte(fullConf), 0600); err != nil {
 		return "", err
 	}
+	if err := securePrivateFile(confPath); err != nil {
+		return "", fmt.Errorf("secure generated wireproxy configuration: %w", err)
+	}
 	return confPath, nil
+}
+
+func securePrivateFile(path string) error {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("must be a regular file")
+	}
+	return os.Chmod(path, 0600)
 }
 
 func startWarpProxySupervisor(ctx context.Context) {
@@ -306,7 +609,7 @@ func startWarpProxySupervisor(ctx context.Context) {
 		}
 
 		// 若端口已被外部或前序实例监听，直接探测验证
-		if checkPortOpen(WarpHTTPAddr) {
+		if checkPortOpen(WarpHTTPAddr) && checkPortOpen(WarpSocks5Addr) {
 			warpReady.Store(true)
 			probeWarpEgress(ctx)
 			select {
@@ -342,7 +645,7 @@ func startWarpProxySupervisor(ctx context.Context) {
 					return
 				}
 				time.Sleep(300 * time.Millisecond)
-				if checkPortOpen(WarpHTTPAddr) {
+				if checkPortOpen(WarpHTTPAddr) && checkPortOpen(WarpSocks5Addr) {
 					warpReady.Store(true)
 					probeWarpEgress(ctx)
 					slog.Info("netguard: Cloudflare WARP 本地代理隔离隧道已就绪", "socks5", WarpSocks5Addr, "http", WarpHTTPAddr)
@@ -378,6 +681,9 @@ func probeWarpEgress(ctx context.Context) {
 	}
 	cli := &http.Client{
 		Timeout: 8 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 		Transport: &http.Transport{
 			Proxy: http.ProxyURL(proxyURL),
 		},
@@ -393,7 +699,7 @@ func probeWarpEgress(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 
 	var ipVal, coloVal string
@@ -421,8 +727,12 @@ func ValidateTrustedMediaURL(rawURL string) error {
 	if err != nil {
 		return fmt.Errorf("invalid media url: %w", err)
 	}
+	u.Scheme = strings.ToLower(u.Scheme)
 	if u.Scheme != "https" && u.Scheme != "http" {
 		return fmt.Errorf("unsupported url scheme: %s", u.Scheme)
+	}
+	if u.User != nil {
+		return fmt.Errorf("media url cannot contain a username or password")
 	}
 
 	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
@@ -460,8 +770,12 @@ func ValidateSafeExternalURL(ctx context.Context, rawURL string) error {
 	if err != nil {
 		return fmt.Errorf("invalid url: %w", err)
 	}
+	u.Scheme = strings.ToLower(u.Scheme)
 	if u.Scheme != "https" && u.Scheme != "http" {
 		return fmt.Errorf("unsupported url scheme: %s", u.Scheme)
+	}
+	if u.User != nil {
+		return fmt.Errorf("url cannot contain a username or password")
 	}
 
 	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
@@ -479,8 +793,11 @@ func ValidateSafeExternalURL(ctx context.Context, rawURL string) error {
 	resolveCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
 	addrs, err := net.DefaultResolver.LookupIPAddr(resolveCtx, host)
-	if err != nil || len(addrs) == 0 {
+	if err != nil {
 		return fmt.Errorf("failed to resolve host %q: %w", host, err)
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("host %q resolved to no addresses", host)
 	}
 	for _, addr := range addrs {
 		if isForbiddenTargetIP(addr.IP) {
@@ -509,16 +826,25 @@ var forbiddenCIDRs = []netip.Prefix{
 	netip.MustParsePrefix("224.0.0.0/4"),     // 组播 Multicast
 	netip.MustParsePrefix("240.0.0.0/4"),     // 保留网段与广播 (含 255.255.255.255)
 
-	// IPv6 (RFC 4291, 6052, 6666, 3849, 4193)
-	netip.MustParsePrefix("::1/128"),         // 本地回环
-	netip.MustParsePrefix("::/128"),          // 未指定地址
-	netip.MustParsePrefix("64:ff9b::/96"),    // IPv4/IPv6 转换
-	netip.MustParsePrefix("100::/64"),        // 丢弃前缀 (Discard-Only)
-	netip.MustParsePrefix("2001:db8::/32"),   // 文档示例专用
-	netip.MustParsePrefix("fc00::/7"),        // 唯一本地私网 ULA
-	netip.MustParsePrefix("fe80::/10"),       // 链路本地
-	netip.MustParsePrefix("ff00::/8"),        // 组播 Multicast
+	// IPv6 (RFC 4291, 6052, 6666, 8215, 3056, 3849, 4193, 9602, 9637, 9780)
+	netip.MustParsePrefix("::1/128"),        // 本地回环
+	netip.MustParsePrefix("::/128"),         // 未指定地址
+	netip.MustParsePrefix("64:ff9b::/96"),   // IPv4/IPv6 转换
+	netip.MustParsePrefix("64:ff9b:1::/48"), // 本地 IPv4/IPv6 转换
+	netip.MustParsePrefix("100::/64"),       // 丢弃前缀 (Discard-Only)
+	netip.MustParsePrefix("100:0:0:1::/64"), // Dummy IPv6 Prefix，不可作为目标
+	netip.MustParsePrefix("2001::/23"),      // IETF 协议分配 (整体按特殊用途地址拒绝)
+	netip.MustParsePrefix("2001:2::/48"),    // 基准测试
+	netip.MustParsePrefix("2001:db8::/32"),  // 文档示例专用
+	netip.MustParsePrefix("2002::/16"),      // 6to4 转换前缀
+	netip.MustParsePrefix("3fff::/20"),      // 文档示例专用
+	netip.MustParsePrefix("5f00::/16"),      // SRv6 Segment Routing SID
+	netip.MustParsePrefix("fc00::/7"),       // 唯一本地私网 ULA
+	netip.MustParsePrefix("fe80::/10"),      // 链路本地
+	netip.MustParsePrefix("ff00::/8"),       // 组播 Multicast
 }
+
+var globalIPv6Unicast = netip.MustParsePrefix("2000::/3")
 
 func isForbiddenTargetIP(ip net.IP) bool {
 	if ip == nil {
@@ -530,6 +856,9 @@ func isForbiddenTargetIP(ip net.IP) bool {
 	}
 	// 自动将 IPv4-mapped IPv6 (如 ::ffff:127.0.0.1) 还原为标准 IPv4
 	addr = addr.Unmap()
+	if addr.Is6() && !globalIPv6Unicast.Contains(addr) {
+		return true
+	}
 	for _, prefix := range forbiddenCIDRs {
 		if prefix.Contains(addr) {
 			return true

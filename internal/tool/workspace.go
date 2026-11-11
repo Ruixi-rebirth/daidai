@@ -13,13 +13,19 @@ import (
 type WorkspaceTool struct {
 	workspaces *entity.WorkspaceManager
 	immune     *entity.ImmuneSystem
+	delegates  *entity.Delegates
 }
 
 // NewWorkspaceTool 实例化工作空间管理工具
-func NewWorkspaceTool(workspaces *entity.WorkspaceManager, immune *entity.ImmuneSystem) *WorkspaceTool {
+func NewWorkspaceTool(workspaces *entity.WorkspaceManager, immune *entity.ImmuneSystem, delegates ...*entity.Delegates) *WorkspaceTool {
+	var scheduler *entity.Delegates
+	if len(delegates) > 0 {
+		scheduler = delegates[0]
+	}
 	return &WorkspaceTool{
 		workspaces: workspaces,
 		immune:     immune,
+		delegates:  scheduler,
 	}
 }
 
@@ -38,7 +44,7 @@ func (t *WorkspaceTool) Parameters() map[string]any {
 			"action": map[string]any{
 				"type":        "string",
 				"enum":        []string{"current", "list", "switch", "remove", "clean", "exit"},
-				"description": "执行动作：'current' 查看当前工作空间与模式，'list' 列出纳管工程，'switch' 切入生产工程，'remove' 注销书签，'clean' 清空沙盒演练区，'exit' 退出工程切回沙盒",
+				"description": "执行动作：'current' 查看当前工作空间与模式，'list' 列出纳管工程，'switch' 切入生产工程，'remove' 注销书签，'clean' 清理专用默认工作区，'exit' 退出工程切回默认工作区",
 			},
 			"target": map[string]any{
 				"type":        "string",
@@ -72,6 +78,6 @@ func (t *WorkspaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*
 	}
 
 	return &core.ToolResult{
-		Text: t.workspaces.ExecuteAction(channelID, role, t.immune, args.Action, args.Target),
+		Text: t.workspaces.ExecuteAction(channelID, role, t.immune, args.Action, args.Target, t.delegates),
 	}, nil
 }

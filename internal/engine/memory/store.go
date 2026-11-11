@@ -28,43 +28,64 @@ const (
 	maxSingleDigestRunes = 160
 )
 
+func boundedFactContent(content string) string {
+	runes := []rune(content)
+	if len(runes) <= core.MaxFactContentRunes {
+		return content
+	}
+	return string(runes[:core.MaxFactContentRunes]) + "…"
+}
+
 var (
-	defaultEmbedderMu sync.RWMutex
-	defaultEmbedder   core.EmbeddingProvider
-	embedCacheMu      sync.RWMutex
-	embedCache        = make(map[string][]float32, 256)
+	defaultEmbedderMu      sync.RWMutex
+	defaultEmbedder        core.EmbeddingProvider
+	defaultEmbedderVersion uint64
+	embedCacheMu           sync.RWMutex
+	embedCache             = make(map[embedCacheKey][]float32, 256)
 )
+
+type embedCacheKey struct {
+	version uint64
+	text    string
+}
 
 // SetDefaultEmbedder 设置全局默认稠密向量编码器 (如 BAAI/bge-m3)
 func SetDefaultEmbedder(emb core.EmbeddingProvider) {
 	defaultEmbedderMu.Lock()
 	defaultEmbedder = emb
+	defaultEmbedderVersion++
 	defaultEmbedderMu.Unlock()
 
 	embedCacheMu.Lock()
-	embedCache = make(map[string][]float32, 256)
+	embedCache = make(map[embedCacheKey][]float32, 256)
 	embedCacheMu.Unlock()
 }
 
 // GetDefaultEmbedder 获取全局默认稠密向量编码器
 func GetDefaultEmbedder() core.EmbeddingProvider {
+	emb, _ := defaultEmbedderSnapshot()
+	return emb
+}
+
+func defaultEmbedderSnapshot() (core.EmbeddingProvider, uint64) {
 	defaultEmbedderMu.RLock()
 	defer defaultEmbedderMu.RUnlock()
-	return defaultEmbedder
+	return defaultEmbedder, defaultEmbedderVersion
 }
 
 // EmbedText 使用当前配置的向量模型编码文本（带内存缓存，未配置或超时时静默返回 nil）
 func EmbedText(ctx context.Context, text string) []float32 {
-	emb := GetDefaultEmbedder()
+	emb, version := defaultEmbedderSnapshot()
 	clean := strings.TrimSpace(text)
 	if emb == nil || clean == "" {
 		return nil
 	}
+	key := embedCacheKey{version: version, text: clean}
 
 	embedCacheMu.RLock()
-	if cached, ok := embedCache[clean]; ok {
+	if cached, ok := embedCache[key]; ok {
 		embedCacheMu.RUnlock()
-		return cached
+		return append([]float32(nil), cached...)
 	}
 	embedCacheMu.RUnlock()
 
@@ -80,18 +101,34 @@ func EmbedText(ctx context.Context, text string) []float32 {
 			break
 		}
 	}
-	embedCache[clean] = vec
+	embedCache[key] = append([]float32(nil), vec...)
 	embedCacheMu.Unlock()
-	return vec
+	return append([]float32(nil), vec...)
 }
 
 // MemoryEngine 长期事实记忆与会话历史引擎 (直接实现 entity.Memory，纯粹 SQLite 驱动)
 type MemoryEngine struct {
-	db        *db.Manager
-	llm       core.LLMProvider
-	embedder  core.EmbeddingProvider
-	mu        sync.RWMutex
-	userLocks sync.Map
+	db          *db.Manager
+	llm         core.LLMProvider
+	embedder    core.EmbeddingProvider
+	mu          sync.RWMutex
+	userLocksMu sync.Mutex
+	userLocks   map[userLockKey]*userLockEntry
+	asyncMu     sync.Mutex
+	asyncWG     sync.WaitGroup
+	asyncCtx    context.Context
+	asyncCancel context.CancelFunc
+	asyncClosed bool
+}
+
+type userLockKey struct {
+	platform string
+	userID   string
+}
+
+type userLockEntry struct {
+	mu   sync.Mutex
+	refs int
 }
 
 // NewMemoryEngine 实例化长期记忆引擎 (可选注入后台轻量 LLM 驱动实现全自动事实提炼与冲突消解)
@@ -104,10 +141,13 @@ func NewMemoryEngine(providers ...core.LLMProvider) *MemoryEngine {
 	if ep, ok := p.(core.EmbeddingProvider); ok {
 		emb = ep
 	}
+	asyncCtx, asyncCancel := context.WithCancel(context.Background())
 	return &MemoryEngine{
-		db:       db.DefaultManager(),
-		llm:      p,
-		embedder: emb,
+		db:          db.DefaultManager(),
+		llm:         p,
+		embedder:    emb,
+		asyncCtx:    asyncCtx,
+		asyncCancel: asyncCancel,
 	}
 }
 
@@ -129,10 +169,30 @@ func (m *MemoryEngine) getEmbedder() core.EmbeddingProvider {
 	return GetDefaultEmbedder()
 }
 
-func (m *MemoryEngine) getUserLock(platform, userID string) *sync.Mutex {
-	key := platform + ":" + userID
-	val, _ := m.userLocks.LoadOrStore(key, &sync.Mutex{})
-	return val.(*sync.Mutex)
+func (m *MemoryEngine) lockUser(platform, userID string) func() {
+	key := userLockKey{platform: db.NormPlatform(platform), userID: userID}
+	m.userLocksMu.Lock()
+	if m.userLocks == nil {
+		m.userLocks = make(map[userLockKey]*userLockEntry)
+	}
+	entry := m.userLocks[key]
+	if entry == nil {
+		entry = &userLockEntry{}
+		m.userLocks[key] = entry
+	}
+	entry.refs++
+	m.userLocksMu.Unlock()
+
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		m.userLocksMu.Lock()
+		entry.refs--
+		if entry.refs == 0 && m.userLocks[key] == entry {
+			delete(m.userLocks, key)
+		}
+		m.userLocksMu.Unlock()
+	}
 }
 
 // SetDBManager 设置自定义数据库管理器 (单测或特殊隔离环境使用)
@@ -193,6 +253,7 @@ func (m *MemoryEngine) WorkingContext(ctx context.Context, event *entity.Sensory
 			}
 			content = fmt.Sprintf("[%s]: %s", speaker, h.Text)
 		}
+		content = core.TruncateRunes(content, core.MaxUserMessageRunes, "\n[历史消息过长，后续内容已截断]")
 		cLen := utf8.RuneCountInString(content)
 		if len(selected) > 0 && totalChars+cLen > maxWorkingChars {
 			break
@@ -227,11 +288,15 @@ func (m *MemoryEngine) RecallEpisodic(ctx context.Context, event *entity.Sensory
 
 	var sections []string
 
-	facts, err := m.RecallProfile(ctx, event.Platform, event.SenderID, event.Content, defaultMaxFacts)
+	facts, err := m.RecallProfileForEvent(ctx, event, event.Content, defaultMaxFacts)
 	if err == nil && len(facts) > 0 {
 		var lines []string
 		for _, f := range facts {
-			lines = append(lines, fmt.Sprintf("- [ID: %d] %s", f.ID, f.Content))
+			label := "全局"
+			if f.ScopeType == "group" {
+				label = "本群"
+			}
+			lines = append(lines, fmt.Sprintf("- [ID: %d][%s] %s", f.ID, label, boundedFactContent(f.Content)))
 		}
 		if event.SenderName != "" {
 			sections = append(sections, fmt.Sprintf("【当前对话用户 (%s) 的特征与长期记忆】：\n%s", event.SenderName, strings.Join(lines, "\n")))
@@ -346,43 +411,77 @@ func (m *MemoryEngine) Commit(ctx context.Context, event *entity.SensoryEvent, r
 		chatType = "group"
 	}
 
-	userText := event.Content
-	if event.VisionSummary != "" {
+	userText := core.TruncateRunes(event.Content, core.MaxUserMessageRunes, "\n[消息过长，后续内容已截断]")
+	visionSummary := core.TruncateRunes(event.VisionSummary, core.MaxVisionSummaryRunes, "\n[视觉摘要过长，后续内容已截断]")
+	if entity.IsSensitiveAuthCommand(userText) {
+		userText = "[OAuth authorization code redacted]"
+	}
+	if visionSummary != "" {
 		if userText != "" {
-			userText += "\n[图片内容: " + event.VisionSummary + "]"
+			userText += "\n[图片内容: " + visionSummary + "]"
 		} else {
-			userText = "[图片内容: " + event.VisionSummary + "]"
+			userText = "[图片内容: " + visionSummary + "]"
 		}
 	}
+	userText = core.TruncateRunes(userText, core.MaxUserMessageRunes, "\n[消息过长，后续内容已截断]")
+	replyText = core.TruncateRunes(replyText, core.MaxUserMessageRunes, "\n[消息过长，后续内容已截断]")
 
 	var userMsgID, botMsgID int64
 	if userText != "" {
-		userMsgID, _ = dbMgr.LogMessage(ctx, event.Platform, chatType, event.ChannelID, event.SenderID, event.SenderName, userText, false, "")
+		var err error
+		userMsgID, err = dbMgr.LogMessage(ctx, event.Platform, chatType, event.ChannelID, event.SenderID, event.SenderName, userText, false, "")
+		if err != nil {
+			slog.Warn("memory: 保存用户消息失败", "platform", event.Platform, "channel", event.ChannelID, "err", err)
+		}
 	}
 
 	if replyText != "" {
-		botMsgID, _ = dbMgr.LogMessage(ctx, event.Platform, chatType, event.ChannelID, "daidai", "呆呆", replyText, true, event.SenderID)
+		var err error
+		botMsgID, err = dbMgr.LogMessage(ctx, event.Platform, chatType, event.ChannelID, "daidai", "呆呆", replyText, true, event.SenderID)
+		if err != nil {
+			slog.Warn("memory: 保存机器人回复失败", "platform", event.Platform, "channel", event.ChannelID, "err", err)
+		}
 	}
 
 	emb := m.getEmbedder()
 	needExtract := m.llm != nil && event.SenderID != "" && shouldExtractFacts(event)
 	if needExtract || emb != nil {
+		m.asyncMu.Lock()
+		if m.asyncClosed {
+			m.asyncMu.Unlock()
+			return
+		}
+		m.asyncWG.Add(1)
+		asyncCtx := m.asyncCtx
+		m.asyncMu.Unlock()
+
 		evCopy := *event
+		evCopy.Content = core.TruncateRunes(evCopy.Content, core.MaxUserMessageRunes, "\n[消息过长，后续内容已截断]")
+		evCopy.VisionSummary = visionSummary
+		if evCopy.ReplyContext != nil {
+			replyCopy := *evCopy.ReplyContext
+			replyCopy.Content = core.TruncateRunes(replyCopy.Content, core.MaxQuotedMessageRunes, "\n[引用消息过长，后续内容已截断]")
+			evCopy.ReplyContext = &replyCopy
+		}
 		go func(ev entity.SensoryEvent, uText, rText string, uID, bID int64) {
-			bgCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+			defer m.asyncWG.Done()
+			bgCtx, cancel := context.WithTimeout(asyncCtx, 25*time.Second)
 			defer cancel()
 
 			if emb != nil {
 				if uID > 0 && len([]rune(uText)) >= 4 {
-					if vec, err := emb.Embed(bgCtx, uText); err == nil && len(vec) > 0 {
+					if vec, err := emb.Embed(bgCtx, uText); err == nil && len(vec) > 0 && bgCtx.Err() == nil {
 						_ = dbMgr.UpdateMessageEmbedding(bgCtx, ev.Platform, uID, vec)
 					}
 				}
 				if bID > 0 && len([]rune(rText)) >= 6 {
-					if vec, err := emb.Embed(bgCtx, rText); err == nil && len(vec) > 0 {
+					if vec, err := emb.Embed(bgCtx, rText); err == nil && len(vec) > 0 && bgCtx.Err() == nil {
 						_ = dbMgr.UpdateMessageEmbedding(bgCtx, ev.Platform, bID, vec)
 					}
 				}
+			}
+			if bgCtx.Err() != nil {
+				return
 			}
 
 			if needExtract {
@@ -394,24 +493,51 @@ func (m *MemoryEngine) Commit(ctx context.Context, event *entity.SensoryEvent, r
 	}
 }
 
+// Shutdown 停止后台记忆任务，并等待其退出或达到调用方的停机期限。
+func (m *MemoryEngine) Shutdown(ctx context.Context) error {
+	m.asyncMu.Lock()
+	m.asyncClosed = true
+	if m.asyncCancel != nil {
+		m.asyncCancel()
+	}
+	m.asyncMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		m.asyncWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (m *MemoryEngine) backfillUserFactEmbeddings(ctx context.Context, platform, userID string) {
 	dbMgr := m.getDB()
 	emb := m.getEmbedder()
 	if dbMgr == nil || emb == nil || platform == "" || userID == "" {
 		return
 	}
-	lock := m.getUserLock(platform, userID)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock := m.lockUser(platform, userID)
+	defer unlock()
 
 	activeFacts, err := dbMgr.ListActiveFacts(ctx, platform, userID)
 	if err != nil {
 		return
 	}
 	for _, f := range activeFacts {
+		if ctx.Err() != nil {
+			return
+		}
 		if len(f.Embedding) == 0 && f.Content != "" {
 			if vec, err := emb.Embed(ctx, f.Content); err == nil && len(vec) > 0 {
-				_ = dbMgr.UpdateFactEmbedding(ctx, platform, f.ID, vec)
+				if ctx.Err() != nil {
+					return
+				}
+				_ = dbMgr.UpdateFactEmbedding(ctx, platform, f.ID, f.Content, vec)
 			}
 		}
 	}
@@ -438,17 +564,22 @@ type factExtractionResponse struct {
 	Mutations []db.FactMutation `json:"mutations"`
 }
 
+const (
+	maxFactMutationResponseBytes = 64 << 10
+	maxFactMutationsPerTurn      = 20
+	maxFactContentRunes          = 40
+)
+
 func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.SensoryEvent, replyText string) {
 	dbMgr := m.getDB()
 	if dbMgr == nil || m.llm == nil || event == nil || event.SenderID == "" {
 		return
 	}
 
-	lock := m.getUserLock(event.Platform, event.SenderID)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock := m.lockUser(event.Platform, event.SenderID)
+	defer unlock()
 
-	activeFacts, err := dbMgr.ListActiveFacts(ctx, event.Platform, event.SenderID)
+	activeFacts, err := dbMgr.ListVisibleFacts(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup)
 	if err != nil {
 		return
 	}
@@ -457,24 +588,34 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 	// 顺带为尚未生成向量的存量事实异步补齐向量
 	if emb != nil {
 		for _, f := range activeFacts {
+			if ctx.Err() != nil {
+				return
+			}
 			if len(f.Embedding) == 0 && f.Content != "" {
 				if vec, err := emb.Embed(ctx, f.Content); err == nil && len(vec) > 0 {
+					if ctx.Err() != nil {
+						return
+					}
 					f.Embedding = vec
-					_ = dbMgr.UpdateFactEmbedding(ctx, event.Platform, f.ID, vec)
+					_ = dbMgr.UpdateFactEmbedding(ctx, event.Platform, f.ID, f.Content, vec)
 				}
 			}
 		}
 	}
 
 	turnQuery := event.Content + " " + replyText
-	relevantFacts := RankFactsByBM25(turnQuery, activeFacts, 0)
+	relevantFacts := RankFactsByBM25(ctx, turnQuery, activeFacts, 0)
 	if len(relevantFacts) > 25 {
 		relevantFacts = relevantFacts[:25]
 	}
 
 	var existingLines []string
 	for _, f := range relevantFacts {
-		existingLines = append(existingLines, fmt.Sprintf("[ID: %d] %s", f.ID, f.Content))
+		label := "全局"
+		if f.ScopeType == "group" {
+			label = "本群"
+		}
+		existingLines = append(existingLines, fmt.Sprintf("[ID: %d][%s] %s", f.ID, label, boundedFactContent(f.Content)))
 	}
 	existingBlock := "（暂无已记录事实）"
 	if len(existingLines) > 0 {
@@ -483,7 +624,12 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 
 	var turnBuilder strings.Builder
 	if event.ReplyContext != nil && strings.TrimSpace(event.ReplyContext.Content) != "" {
-		turnBuilder.WriteString("引用前文: " + strings.TrimSpace(event.ReplyContext.Content) + "\n")
+		quotedContent := strings.TrimSpace(event.ReplyContext.Content)
+		if entity.IsSensitiveAuthCommand(quotedContent) {
+			quotedContent = "[OAuth authorization code redacted]"
+		}
+		quotedContent = core.TruncateRunes(quotedContent, core.MaxQuotedMessageRunes, "\n[引用消息过长，后续内容已截断]")
+		turnBuilder.WriteString("引用前文: " + quotedContent + "\n")
 	}
 	turnBuilder.WriteString("用户发言: " + strings.TrimSpace(event.Content))
 	if event.VisionSummary != "" {
@@ -502,8 +648,9 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 严格规则：
 1. 只提取关于【用户本人】的长期有效事实，绝不提取呆呆的特征、临时命令输出、一次性寒暄或代码报错细节。
 2. 对照【用户已知事实列表】：
-   - 若新信息与某条旧事实属同一维度且发生变更或补充，输出 UPDATE 并填写对应 fact_id 与合并后的完整精炼陈述；
-   - 若用户明确否定或废除某条旧事实，输出 DELETE 并填写对应 fact_id；
+   - 只能使用【用户已知事实列表】中当前会话可见的事实；群聊只会收到“本群”事实，只允许更新或删除这些事实，不得读取或修改私聊中的全局事实；
+   - 若新信息与当前可修改范围内的某条旧事实属同一维度且发生变更或补充，输出 UPDATE 并填写对应 fact_id 与合并后的完整精炼陈述；
+   - 若用户明确否定或废除当前可修改范围内的旧事实，输出 DELETE 并填写对应 fact_id；
    - 若是全新的个人事实且列表中未包含，输出 ADD；
    - 若本轮对话无任何值得沉淀的长期事实，返回空数组 {"mutations": []}。
 3. 每条 fact 陈述必须简明扼要（不超过 40 字），只输出合法 JSON 对象，格式如下：
@@ -522,6 +669,9 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 		slog.Debug("memory: 后台记忆提炼请求跳过", "err", err)
 		return
 	}
+	if ctx.Err() != nil {
+		return
+	}
 
 	mutations := parseFactMutations(rawResp)
 	if len(mutations) == 0 {
@@ -530,6 +680,8 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 
 	// 二阶段确定性冲突消解：若模型输出 ADD，但与既有事实词法重合 (>= 0.78) 或向量余弦相似 (>= 0.88)，自动转为原地 UPDATE
 	var normalized []db.FactMutation
+	scheduledFactIDs := make(map[int64]struct{})
+	scheduledNewFacts := make(map[string]struct{})
 	for _, mut := range mutations {
 		action := strings.ToUpper(strings.TrimSpace(mut.Action))
 		factText := strings.TrimSpace(mut.Fact)
@@ -538,63 +690,120 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 			if factText == "" {
 				continue
 			}
+			if _, exists := scheduledNewFacts[factText]; exists {
+				continue
+			}
 			var factVec []float32
 			if emb != nil {
 				factVec, _ = emb.Embed(ctx, factText)
+				if ctx.Err() != nil {
+					return
+				}
 			}
 			merged := false
 			for _, old := range activeFacts {
+				if !sameFactScope(old, event) {
+					continue
+				}
 				if old.Content == factText {
 					merged = true
 					break
 				}
+			}
+			for _, old := range activeFacts {
+				if merged {
+					break
+				}
+				if !sameFactScope(old, event) {
+					continue
+				}
 				if LexicalOverlap(factText, old.Content) >= 0.78 ||
 					(len(factVec) > 0 && len(old.Embedding) > 0 && CosineSimilarity(factVec, old.Embedding) >= 0.88) {
+					if _, exists := scheduledFactIDs[old.ID]; exists {
+						merged = true
+						break
+					}
 					normalized = append(normalized, db.FactMutation{
-						Action:    "UPDATE",
-						FactID:    old.ID,
-						Fact:      factText,
-						Quote:     event.Content,
-						Embedding: factVec,
+						Action:       "UPDATE",
+						FactID:       old.ID,
+						Fact:         factText,
+						ExpectedFact: old.Content,
+						ScopeType:    old.ScopeType,
+						ScopeID:      old.ScopeID,
+						Quote:        event.Content,
+						Embedding:    factVec,
 					})
+					scheduledFactIDs[old.ID] = struct{}{}
 					merged = true
 					break
 				}
 			}
 			if !merged {
+				scopeType, scopeID := factScope(event)
 				normalized = append(normalized, db.FactMutation{
 					Action:    "ADD",
 					Fact:      factText,
+					ScopeType: scopeType,
+					ScopeID:   scopeID,
 					Quote:     event.Content,
 					Embedding: factVec,
 				})
+				scheduledNewFacts[factText] = struct{}{}
 			}
 		case "UPDATE":
 			if mut.FactID > 0 && factText != "" {
+				if _, exists := scheduledFactIDs[mut.FactID]; exists {
+					continue
+				}
+				old := findFact(activeFacts, mut.FactID)
+				if old == nil || !sameFactScope(old, event) {
+					continue
+				}
 				var factVec []float32
 				if emb != nil {
 					factVec, _ = emb.Embed(ctx, factText)
+					if ctx.Err() != nil {
+						return
+					}
 				}
 				normalized = append(normalized, db.FactMutation{
-					Action:    "UPDATE",
-					FactID:    mut.FactID,
-					Fact:      factText,
-					Quote:     event.Content,
-					Embedding: factVec,
+					Action:       "UPDATE",
+					FactID:       mut.FactID,
+					Fact:         factText,
+					ExpectedFact: old.Content,
+					ScopeType:    old.ScopeType,
+					ScopeID:      old.ScopeID,
+					Quote:        event.Content,
+					Embedding:    factVec,
 				})
+				scheduledFactIDs[mut.FactID] = struct{}{}
 			}
 		case "DELETE":
 			if mut.FactID > 0 {
+				if _, exists := scheduledFactIDs[mut.FactID]; exists {
+					continue
+				}
+				old := findFact(activeFacts, mut.FactID)
+				if old == nil || !sameFactScope(old, event) {
+					continue
+				}
 				normalized = append(normalized, db.FactMutation{
-					Action: "DELETE",
-					FactID: mut.FactID,
-					Quote:  event.Content,
+					Action:       "DELETE",
+					FactID:       mut.FactID,
+					ExpectedFact: old.Content,
+					ScopeType:    old.ScopeType,
+					ScopeID:      old.ScopeID,
+					Quote:        event.Content,
 				})
+				scheduledFactIDs[mut.FactID] = struct{}{}
 			}
 		}
 	}
 
 	if len(normalized) > 0 {
+		if ctx.Err() != nil {
+			return
+		}
 		if err := dbMgr.ApplyFactMutations(ctx, event.Platform, event.SenderID, normalized); err != nil {
 			slog.Warn("memory: 后台应用事实演进失败", "err", err)
 		} else {
@@ -605,7 +814,7 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 
 func parseFactMutations(raw string) []db.FactMutation {
 	text := strings.TrimSpace(raw)
-	if text == "" {
+	if text == "" || len(text) > maxFactMutationResponseBytes {
 		return nil
 	}
 	start := strings.IndexByte(text, '{')
@@ -617,7 +826,42 @@ func parseFactMutations(raw string) []db.FactMutation {
 	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
 		return nil
 	}
-	return parsed.Mutations
+	if len(parsed.Mutations) > maxFactMutationsPerTurn {
+		return nil
+	}
+
+	valid := make([]db.FactMutation, 0, len(parsed.Mutations))
+	seenFactIDs := make(map[int64]struct{})
+	for _, mut := range parsed.Mutations {
+		mut.Action = strings.ToUpper(strings.TrimSpace(mut.Action))
+		mut.Fact = strings.TrimSpace(mut.Fact)
+		switch mut.Action {
+		case "ADD":
+			if mut.Fact == "" || utf8.RuneCountInString(mut.Fact) > maxFactContentRunes {
+				continue
+			}
+		case "UPDATE":
+			if mut.FactID <= 0 || mut.Fact == "" || utf8.RuneCountInString(mut.Fact) > maxFactContentRunes {
+				continue
+			}
+			if _, exists := seenFactIDs[mut.FactID]; exists {
+				continue
+			}
+			seenFactIDs[mut.FactID] = struct{}{}
+		case "DELETE":
+			if mut.FactID <= 0 {
+				continue
+			}
+			if _, exists := seenFactIDs[mut.FactID]; exists {
+				continue
+			}
+			seenFactIDs[mut.FactID] = struct{}{}
+		default:
+			continue
+		}
+		valid = append(valid, mut)
+	}
+	return valid
 }
 
 type scoredFact struct {
@@ -635,7 +879,7 @@ func ScoreFactRelevance(query, content string) float32 {
 }
 
 // RankFactsByBM25 对候选事实列表执行 BM25 稀疏检索 + BAAI/bge-m3 稠密向量 RRF 双路混合重排 + 时间衰减，并按阈值过滤
-func RankFactsByBM25(query string, facts []*core.Fact, minScore float32) []*core.Fact {
+func RankFactsByBM25(ctx context.Context, query string, facts []*core.Fact, minScore float32) []*core.Fact {
 	if len(facts) == 0 {
 		return nil
 	}
@@ -653,7 +897,7 @@ func RankFactsByBM25(query string, facts []*core.Fact, minScore float32) []*core
 	// 若全量事实本就少于常驻上限且无需过滤，直接本地 0ms 完成 BM25 + 时间衰减排序，避免主对话热路径发生不必要的网络等待
 	var vecScores []float32
 	if hasFactEmb && strings.TrimSpace(query) != "" && (minScore > 0 || len(facts) > defaultMaxFacts) {
-		if qVec := EmbedText(context.Background(), query); len(qVec) > 0 {
+		if qVec := EmbedText(ctx, query); len(qVec) > 0 {
 			vecScores = make([]float32, len(facts))
 			for i, f := range facts {
 				if len(f.Embedding) > 0 {
@@ -704,6 +948,15 @@ func RankFactsByBM25(query string, facts []*core.Fact, minScore float32) []*core
 
 // SearchMessagesByBM25 从 SQLite 执行 BM25 稀疏词元 + BAAI/bge-m3 稠密向量双路召回，经 RRF 融合精选 Top-K（最终按时间正序返回）
 func SearchMessagesByBM25(ctx context.Context, dbMgr *db.Manager, platform, convID, query string, limit int) ([]db.StoredMessage, error) {
+	return searchMessagesByBM25(ctx, dbMgr, platform, "", convID, query, limit)
+}
+
+// SearchMessagesInChatByBM25 keeps lexical and vector recall inside one chat type.
+func SearchMessagesInChatByBM25(ctx context.Context, dbMgr *db.Manager, platform, chatType, convID, query string, limit int) ([]db.StoredMessage, error) {
+	return searchMessagesByBM25(ctx, dbMgr, platform, chatType, convID, query, limit)
+}
+
+func searchMessagesByBM25(ctx context.Context, dbMgr *db.Manager, platform, chatType, convID, query string, limit int) ([]db.StoredMessage, error) {
 	if dbMgr == nil || convID == "" {
 		return nil, nil
 	}
@@ -716,7 +969,13 @@ func SearchMessagesByBM25(ctx context.Context, dbMgr *db.Manager, platform, conv
 	seenIDs := make(map[int64]struct{})
 
 	if len(terms) > 0 {
-		lexMsgs, err := dbMgr.SearchMessages(ctx, platform, convID, terms, limit*5)
+		var lexMsgs []db.StoredMessage
+		var err error
+		if chatType == "" {
+			lexMsgs, err = dbMgr.SearchMessages(ctx, platform, convID, terms, limit*5)
+		} else {
+			lexMsgs, err = dbMgr.SearchMessagesInChat(ctx, platform, chatType, convID, terms, limit*5)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -730,7 +989,14 @@ func SearchMessagesByBM25(ctx context.Context, dbMgr *db.Manager, platform, conv
 
 	qVec := EmbedText(ctx, query)
 	if len(qVec) > 0 {
-		if vecMsgs, err := dbMgr.RecentVectorMessages(ctx, platform, convID, 500); err == nil {
+		var vecMsgs []db.StoredMessage
+		var err error
+		if chatType == "" {
+			vecMsgs, err = dbMgr.RecentVectorMessages(ctx, platform, convID, 500)
+		} else {
+			vecMsgs, err = dbMgr.RecentVectorMessagesInChat(ctx, platform, chatType, convID, 500)
+		}
+		if err == nil {
 			for _, m := range vecMsgs {
 				if m.ID > 0 {
 					if _, exists := seenIDs[m.ID]; exists {
@@ -798,22 +1064,42 @@ func SearchMessagesByBM25(ctx context.Context, dbMgr *db.Manager, platform, conv
 
 // RecallProfile 获取用于对话背景注入的用户画像事实 (BM25 稀疏检索 + 时间衰减混合重排 + 核心基础事实保底)
 func (m *MemoryEngine) RecallProfile(ctx context.Context, platform, userID, query string, maxFacts int) ([]*core.Fact, error) {
-	if maxFacts <= 0 {
-		maxFacts = defaultMaxFacts
-	}
 	dbMgr := m.getDB()
 	if dbMgr == nil || platform == "" {
 		return nil, nil
 	}
 
-	activeFacts, err := dbMgr.ListActiveFacts(ctx, platform, userID)
+	activeFacts, err := dbMgr.ListVisibleFacts(ctx, platform, userID, "", false)
 	if err != nil || len(activeFacts) == 0 {
 		return nil, err
 	}
+	return rankProfileFacts(ctx, query, activeFacts, maxFacts), nil
+}
 
-	ranked := RankFactsByBM25(query, activeFacts, 0)
+// RecallProfileForEvent 只注入当前会话可见范围内的长期事实。
+func (m *MemoryEngine) RecallProfileForEvent(ctx context.Context, event *entity.SensoryEvent, query string, maxFacts int) ([]*core.Fact, error) {
+	if event == nil || event.Platform == "" || event.SenderID == "" {
+		return nil, nil
+	}
+	dbMgr := m.getDB()
+	if dbMgr == nil {
+		return nil, nil
+	}
+	facts, err := dbMgr.ListVisibleFacts(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup)
+	if err != nil || len(facts) == 0 {
+		return nil, err
+	}
+	return rankProfileFacts(ctx, query, facts, maxFacts), nil
+}
+
+func rankProfileFacts(ctx context.Context, query string, activeFacts []*core.Fact, maxFacts int) []*core.Fact {
+	if maxFacts <= 0 {
+		maxFacts = defaultMaxFacts
+	}
+
+	ranked := RankFactsByBM25(ctx, query, activeFacts, 0)
 	if len(ranked) <= maxFacts {
-		return ranked, nil
+		return ranked
 	}
 
 	// 当事实总数超出 maxFacts 时：优先选取 BM25 + 时间衰减最高的前 (maxFacts - coreKeep) 条，
@@ -848,5 +1134,36 @@ func (m *MemoryEngine) RecallProfile(ctx context.Context, platform, userID, quer
 			seen[f.ID] = struct{}{}
 		}
 	}
-	return selected, nil
+	return selected
+}
+
+func factScope(event *entity.SensoryEvent) (string, string) {
+	if event != nil && event.IsGroup {
+		return "group", strings.TrimSpace(event.ChannelID)
+	}
+	return "global", ""
+}
+
+func sameFactScope(fact *core.Fact, event *entity.SensoryEvent) bool {
+	if fact == nil {
+		return false
+	}
+	scopeType, scopeID := factScope(event)
+	if fact.ScopeType == "" {
+		return scopeType == "global"
+	}
+	factScopeID := fact.ScopeID
+	if factScopeID == "" {
+		factScopeID = fact.ConvID
+	}
+	return fact.ScopeType == scopeType && factScopeID == scopeID
+}
+
+func findFact(facts []*core.Fact, id int64) *core.Fact {
+	for _, fact := range facts {
+		if fact != nil && fact.ID == id {
+			return fact
+		}
+	}
+	return nil
 }

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"syscall"
+	"time"
 
 	"daidai/internal/core"
 	"daidai/internal/entity"
@@ -48,38 +50,66 @@ type singboxLinksArgs struct {
 
 func (t *SingboxLinksTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.ToolResult, error) {
 	event := entity.SensoryEventFromContext(ctx)
-	if event != nil {
-		if event.IsGroup {
-			return &core.ToolResult{Text: "Sing-box 节点链接包含密钥凭证，群聊中不便展示。请直接在私聊窗口向我发送'查看singbox节点'，我会在私聊中发给你。"}, nil
-		}
-		if t.immune != nil && event.Role != entity.RolePartner {
-			return &core.ToolResult{Text: "权限拦截：Sing-box 代理节点链接仅限核心搭档查询。"}, nil
-		}
+	if event == nil || t.immune == nil {
+		return &core.ToolResult{Text: "无法校验当前会话权限，拒绝读取 Sing-box 节点凭据。"}, nil
+	}
+	if event.IsGroup {
+		return &core.ToolResult{Text: "Sing-box 节点链接包含密钥凭证，群聊中不便展示。请直接在私聊窗口向我发送'查看singbox节点'，我会在私聊中发给你。"}, nil
+	}
+	if event.Role != entity.RolePartner {
+		return &core.ToolResult{Text: "权限拦截：Sing-box 代理节点链接仅限核心搭档查询。"}, nil
 	}
 
 	var args singboxLinksArgs
 	if len(rawArgs) > 0 {
-		_ = json.Unmarshal(rawArgs, &args)
+		if err := json.Unmarshal(rawArgs, &args); err != nil {
+			return nil, fmt.Errorf("invalid singbox_links args: %w", err)
+		}
 	}
 
-	targetIP := strings.TrimSpace(args.IP)
-	var cmd *exec.Cmd
-	if targetIP != "" {
-		cmd = exec.CommandContext(ctx, "singbox-links", targetIP)
-	} else {
-		cmd = exec.CommandContext(ctx, "singbox-links")
-	}
-
-	out, err := cmd.CombinedOutput()
+	output, err := runSingboxLinks(ctx, strings.TrimSpace(args.IP))
 	if err != nil {
-		return &core.ToolResult{
-			Text: fmt.Sprintf("获取 Sing-box 节点失败 (命令执行异常): %s (%v)", strings.TrimSpace(string(out)), err),
-		}, nil
+		return &core.ToolResult{Text: fmt.Sprintf("获取 Sing-box 节点失败：%v", err)}, nil
 	}
 
 	return &core.ToolResult{
-		Text: FormatSingboxLinks(string(out)),
+		Text: FormatSingboxLinks(output),
 	}, nil
+}
+
+func runSingboxLinks(ctx context.Context, targetIP string) (string, error) {
+	if ctx == nil {
+		return "", fmt.Errorf("singbox-links requires a context")
+	}
+	commandCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	args := []string{}
+	if targetIP != "" {
+		args = append(args, targetIP)
+	}
+	cmd := exec.CommandContext(commandCtx, "singbox-links", args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil && cmd.Process.Pid > 0 {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+	cmd.WaitDelay = 2 * time.Second
+	output := core.NewLimitedBuffer(1 << 20)
+	cmd.Stdout = output
+	cmd.Stderr = output
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("command failed: %w", err)
+	}
+	if output.Truncated() {
+		return "", fmt.Errorf("command output exceeded 1 MiB limit")
+	}
+	result := strings.TrimSpace(output.String())
+	if result == "" {
+		return "", fmt.Errorf("command returned no node links")
+	}
+	return result, nil
 }
 
 // FormatSingboxLinks 将 singbox-links 命令行原始输出格式化为优雅的 Markdown 代码块

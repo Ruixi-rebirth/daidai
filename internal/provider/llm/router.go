@@ -87,6 +87,8 @@ type MindRouter struct {
 	active          ActiveMindState
 	providers       map[string]core.LLMProvider
 	models          []ModelInfo
+	providerVersion uint64
+	refreshVersion  uint64
 }
 
 // MindRouterConfig 路由器初始化参数
@@ -131,11 +133,23 @@ func (r *MindRouter) RegisterChannel(reg ChannelRegistration) {
 			models = disc.DiscoverModels(context.Background())
 		}
 	}
+	models = cloneModelInfos(models)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.providers[channelKey] = reg.Provider
+	r.providerVersion++
+
+	// Re-registering a channel replaces its model pool instead of accumulating
+	// stale or duplicate entries from the previous provider instance.
+	keptModels := r.models[:0]
+	for _, existing := range r.models {
+		if !strings.EqualFold(existing.Channel, channelKey) {
+			keptModels = append(keptModels, existing)
+		}
+	}
+	r.models = keptModels
 
 	for _, m := range models {
 		m.Channel = channelKey
@@ -154,7 +168,7 @@ func (r *MindRouter) RegisterChannel(reg ChannelRegistration) {
 				Effort:    first.DefaultEffort,
 				UpdatedAt: time.Now().Format(time.RFC3339),
 			}
-			_ = r.saveState()
+			r.saveActiveStateLocked(channelKey)
 		}
 	}
 
@@ -173,16 +187,24 @@ func (r *MindRouter) RegisterChannel(reg ChannelRegistration) {
 				r.active.Model = first.ID
 				r.active.Effort = first.DefaultEffort
 				r.active.UpdatedAt = time.Now().Format(time.RFC3339)
-				_ = r.saveState()
+				r.saveActiveStateLocked(channelKey)
 			} else if !matched.SupportsEffort && r.active.Effort != "" {
 				r.active.Effort = ""
-				_ = r.saveState()
+				r.saveActiveStateLocked(channelKey)
 			} else if matched.SupportsEffort && r.active.Effort != "" && !isEffortAllowed(*matched, r.active.Effort) {
 				r.active.Effort = matched.DefaultEffort
-				_ = r.saveState()
+				r.saveActiveStateLocked(channelKey)
 			}
 		}
 		r.syncProviderLocked(channelKey, r.active.Model, r.active.Effort)
+	}
+}
+
+// saveActiveStateLocked persists a recovered active model. Keep the usable
+// in-memory state when persistence fails, and make the failure visible.
+func (r *MindRouter) saveActiveStateLocked(channel string) {
+	if err := r.saveState(); err != nil {
+		slog.Warn("活动心智状态已在内存更新，但未能持久化", "channel", channel, "model", r.active.Model, "err", err)
 	}
 }
 
@@ -214,51 +236,127 @@ func (r *MindRouter) FormatCurrentStatus() string {
 
 	var sb strings.Builder
 	sb.WriteString("【当前心智运行状态】\n")
-	sb.WriteString(fmt.Sprintf("- 激活模型：%s (`%s`)\n", modelName, curr.Model))
-	sb.WriteString(fmt.Sprintf("- 通信通道：%s 通道\n", curr.Channel))
+	fmt.Fprintf(&sb, "- 激活模型：%s (`%s`)\n", modelName, curr.Model)
+	fmt.Fprintf(&sb, "- 通信通道：%s 通道\n", curr.Channel)
 	if curr.Effort != "" {
-		sb.WriteString(fmt.Sprintf("- 思考强度：%s\n", curr.Effort))
+		fmt.Fprintf(&sb, "- 思考强度：%s\n", curr.Effort)
 	}
 	return strings.TrimSpace(sb.String())
 }
 
 // ListModels 列出所有已探测/注册的可用模型定义
 func (r *MindRouter) ListModels() []ModelInfo {
+	return r.ListModelsContext(context.Background())
+}
+
+// ListModelsContext 列出模型定义，并在需要时使用调用方的上下文刷新模型池。
+func (r *MindRouter) ListModelsContext(ctx context.Context) []ModelInfo {
 	r.mu.RLock()
 	needRefresh := len(r.models) == 0
 	r.mu.RUnlock()
 
 	if needRefresh {
-		r.RefreshModels(context.Background())
+		r.RefreshModels(ctx)
 	}
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	result := make([]ModelInfo, len(r.models))
-	copy(result, r.models)
-	return result
+	return cloneModelInfos(r.models)
+}
+
+func cloneModelInfos(models []ModelInfo) []ModelInfo {
+	cloned := make([]ModelInfo, len(models))
+	for i, model := range models {
+		cloned[i] = model
+		cloned[i].SupportedEfforts = append([]string(nil), model.SupportedEfforts...)
+	}
+	return cloned
 }
 
 // RefreshModels 重新触发所有已挂载通道的模型探测并刷新模型池
 func (r *MindRouter) RefreshModels(ctx context.Context) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	var newModels []ModelInfo
+	r.refreshVersion++
+	refreshVersion := r.refreshVersion
+	providerVersion := r.providerVersion
+	type registeredProvider struct {
+		channel  string
+		provider core.LLMProvider
+	}
+	providers := make([]registeredProvider, 0, len(r.providers))
 	for chKey, prov := range r.providers {
-		if disc, ok := prov.(ModelDiscoverer); ok {
-			probed := disc.DiscoverModels(ctx)
-			for _, m := range probed {
-				m.Channel = chKey
-				if m.Name == "" {
-					m.Name = m.ID
-				}
-				newModels = append(newModels, m)
+		providers = append(providers, registeredProvider{channel: chKey, provider: prov})
+	}
+	r.mu.Unlock()
+	sort.Slice(providers, func(i, j int) bool {
+		return providers[i].channel < providers[j].channel
+	})
+
+	refreshedModels := make(map[string][]ModelInfo)
+	for _, entry := range providers {
+		if ctx.Err() != nil {
+			return
+		}
+		disc, ok := entry.provider.(ModelDiscoverer)
+		if !ok {
+			continue
+		}
+		for _, m := range disc.DiscoverModels(ctx) {
+			m.Channel = entry.channel
+			if m.Name == "" {
+				m.Name = m.ID
 			}
+			m.SupportedEfforts = append([]string(nil), m.SupportedEfforts...)
+			refreshedModels[entry.channel] = append(refreshedModels[entry.channel], m)
 		}
 	}
-	if len(newModels) > 0 {
-		r.models = newModels
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// A newer refresh or channel registration has made this snapshot stale.
+	if refreshVersion != r.refreshVersion || providerVersion != r.providerVersion {
+		return
+	}
+	if len(refreshedModels) == 0 {
+		return
+	}
+
+	// Replace only channels that returned a non-empty model list. This preserves
+	// explicit model pools for non-discovering providers and transient failures.
+	var updatedModels []ModelInfo
+	for _, existing := range r.models {
+		if _, refreshed := refreshedModels[existing.Channel]; !refreshed {
+			updatedModels = append(updatedModels, existing)
+		}
+	}
+	for _, entry := range providers {
+		updatedModels = append(updatedModels, refreshedModels[entry.channel]...)
+	}
+	r.models = updatedModels
+
+	if activeModels := refreshedModels[r.active.Channel]; len(activeModels) > 0 {
+		var matched *ModelInfo
+		for i := range activeModels {
+			if strings.EqualFold(activeModels[i].ID, r.active.Model) {
+				matched = &activeModels[i]
+				break
+			}
+		}
+		previous := r.active
+		if matched == nil {
+			matched = &activeModels[0]
+			r.active.Model = matched.ID
+			r.active.Effort = matched.DefaultEffort
+		} else if !matched.SupportsEffort {
+			r.active.Effort = ""
+		} else if r.active.Effort != "" && !isEffortAllowed(*matched, r.active.Effort) {
+			r.active.Effort = matched.DefaultEffort
+		}
+		if r.active.Model != previous.Model || r.active.Effort != previous.Effort {
+			r.active.UpdatedAt = time.Now().Format(time.RFC3339)
+			r.saveActiveStateLocked(r.active.Channel)
+			r.syncProviderLocked(r.active.Channel, r.active.Model, r.active.Effort)
+		}
 	}
 }
 
@@ -314,19 +412,81 @@ func (r *MindRouter) ResolveModelAndEffort(rawModel, fallbackModel, fallbackEffo
 		if !m.SupportsEffort {
 			return m.ID, ""
 		}
-		if extractedEffort != "" {
+		if isEffortAllowed(m, extractedEffort) {
 			return m.ID, extractedEffort
 		}
-		if fallbackEffort != "" {
+		if isEffortAllowed(m, fallbackEffort) {
 			return m.ID, fallbackEffort
 		}
-		return m.ID, m.DefaultEffort
+		if m.DefaultEffort != "" {
+			return m.ID, m.DefaultEffort
+		}
+		if len(m.SupportedEfforts) > 0 {
+			return m.ID, m.SupportedEfforts[0]
+		}
+		return m.ID, ""
 	}
 
 	if extractedEffort != "" {
 		return cleanTarget, extractedEffort
 	}
 	return cleanTarget, fallbackEffort
+}
+
+// ResolveModelAndEffortForChannel resolves a task model only against the
+// requested execution channel, preventing a model from another provider from
+// being passed to a CLI that cannot run it.
+func (r *MindRouter) ResolveModelAndEffortForChannel(rawModel, fallbackModel, fallbackEffort, channel string) (string, string, error) {
+	if strings.TrimSpace(rawModel) == "" {
+		return fallbackModel, fallbackEffort, nil
+	}
+
+	channel = strings.ToUpper(strings.TrimSpace(channel))
+	if channel == "" {
+		return "", "", fmt.Errorf("model execution channel cannot be empty")
+	}
+	cleanTarget, requestedEffort := SplitModelAndEffort(rawModel)
+	r.mu.RLock()
+	candidates := r.findCandidatesLocked(cleanTarget, channel)
+	allCandidates := candidates
+	if len(candidates) == 0 {
+		allCandidates = r.findCandidatesLocked(cleanTarget, "")
+	}
+	r.mu.RUnlock()
+
+	if len(candidates) > 1 {
+		return "", "", fmt.Errorf("模型 %q 在 %s 通道中匹配到多个候选项，请指定完整模型 ID", cleanTarget, channel)
+	}
+	if len(candidates) == 0 {
+		if len(allCandidates) > 0 {
+			return "", "", fmt.Errorf("模型 %q 不属于 %s 通道，不能用于该执行器", cleanTarget, channel)
+		}
+		if requestedEffort != "" {
+			return cleanTarget, requestedEffort, nil
+		}
+		return cleanTarget, fallbackEffort, nil
+	}
+
+	model := candidates[0]
+	if !model.SupportsEffort {
+		if requestedEffort != "" {
+			return "", "", fmt.Errorf("模型 %s 不支持思考强度调节", model.ID)
+		}
+		return model.ID, "", nil
+	}
+
+	effort := model.DefaultEffort
+	if requestedEffort != "" {
+		if !isEffortAllowed(model, requestedEffort) {
+			return "", "", fmt.Errorf("模型 %s 不支持思考强度 %q，支持的档位为: [%s]", model.ID, requestedEffort, strings.Join(model.SupportedEfforts, ", "))
+		}
+		effort = requestedEffort
+	} else if isEffortAllowed(model, fallbackEffort) {
+		effort = fallbackEffort
+	} else if effort == "" && len(model.SupportedEfforts) > 0 {
+		effort = model.SupportedEfforts[0]
+	}
+	return model.ID, effort, nil
 }
 
 func isEffortAllowed(m ModelInfo, effort string) bool {
@@ -355,6 +515,12 @@ func (r *MindRouter) SwitchMind(req SwitchRequest) (*SwitchResult, error) {
 
 	// 若未指定目标模型，仅要求调整思考强度
 	if targetRaw == "" && effortReq != "" {
+		if channelReq != "" && !strings.EqualFold(channelReq, r.active.Channel) {
+			return &SwitchResult{
+				Status:  "error",
+				Message: fmt.Sprintf("当前激活通道为 %s；若要切换到 %s 并调整思考强度，请同时指定该通道的目标模型。", r.active.Channel, channelReq),
+			}, nil
+		}
 		activeProvider := r.providers[r.active.Channel]
 		if _, ok := activeProvider.(EffortConfigurable); !ok {
 			return &SwitchResult{
@@ -363,8 +529,10 @@ func (r *MindRouter) SwitchMind(req SwitchRequest) (*SwitchResult, error) {
 			}, nil
 		}
 
+		activeModelFound := false
 		for _, m := range r.models {
-			if strings.EqualFold(m.Channel, r.active.Channel) && m.ID == r.active.Model {
+			if strings.EqualFold(m.Channel, r.active.Channel) && strings.EqualFold(m.ID, r.active.Model) {
+				activeModelFound = true
 				if !m.SupportsEffort {
 					return &SwitchResult{
 						Status:  "error",
@@ -380,10 +548,20 @@ func (r *MindRouter) SwitchMind(req SwitchRequest) (*SwitchResult, error) {
 				break
 			}
 		}
+		if !activeModelFound {
+			return &SwitchResult{
+				Status:  "error",
+				Message: fmt.Sprintf("当前模型 %s 不在已探测的可用模型池中，无法验证思考强度。", r.active.Model),
+			}, nil
+		}
 
+		previous := r.active
 		r.active.Effort = effortReq
 		r.active.UpdatedAt = time.Now().Format(time.RFC3339)
-		_ = r.saveState()
+		if err := r.saveState(); err != nil {
+			r.active = previous
+			return &SwitchResult{Status: "error", Message: fmt.Sprintf("保存模型设置失败，未应用更改: %v", err)}, nil
+		}
 		r.syncProviderLocked(r.active.Channel, r.active.Model, r.active.Effort)
 
 		return &SwitchResult{
@@ -428,7 +606,7 @@ func (r *MindRouter) SwitchMind(req SwitchRequest) (*SwitchResult, error) {
 
 		return &SwitchResult{
 			Status:     "ambiguous",
-			Candidates: candidates,
+			Candidates: cloneModelInfos(candidates),
 			Message: fmt.Sprintf("在 %s 均检测到匹配的候选心智（共 %d 个选项），请指定完整的模型 ID 或通道。",
 				strings.Join(channelNames, "、"), len(candidates)),
 		}, nil
@@ -453,6 +631,7 @@ func (r *MindRouter) SwitchMind(req SwitchRequest) (*SwitchResult, error) {
 		}
 	}
 
+	previous := r.active
 	r.active = ActiveMindState{
 		Channel:   targetModel.Channel,
 		Model:     targetModel.ID,
@@ -460,7 +639,10 @@ func (r *MindRouter) SwitchMind(req SwitchRequest) (*SwitchResult, error) {
 		UpdatedAt: time.Now().Format(time.RFC3339),
 	}
 
-	_ = r.saveState()
+	if err := r.saveState(); err != nil {
+		r.active = previous
+		return &SwitchResult{Status: "error", Message: fmt.Sprintf("保存模型设置失败，未应用更改: %v", err)}, nil
+	}
 	r.syncProviderLocked(targetModel.Channel, targetModel.ID, finalEffort)
 
 	return &SwitchResult{
@@ -569,11 +751,28 @@ func (r *MindRouter) saveState() error {
 	if err != nil {
 		return err
 	}
-	tmpFile := fmt.Sprintf("%s.tmp.%d", r.statePath, time.Now().UnixNano())
-	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+	tmp, err := os.CreateTemp(dir, filepath.Base(r.statePath)+".tmp-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmpFile, r.statePath)
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if err := tmp.Chmod(0644); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, r.statePath)
 }
 
 // Name 识别当前路由器描述
@@ -592,6 +791,9 @@ func (r *MindRouter) Chat(ctx context.Context, messages []core.ChatMessage, opts
 	if err != nil {
 		return "", err
 	}
+	if resp == nil {
+		return "", fmt.Errorf("心智通道返回空响应")
+	}
 	return resp.Content, nil
 }
 
@@ -609,16 +811,40 @@ func (r *MindRouter) ChatWithTools(
 	fallbackProvider := r.providers[r.fallbackChannel]
 	r.mu.RUnlock()
 
-	if activeProvider == nil {
-		return nil, fmt.Errorf("当前激活的心智通道 %q 未挂载任何可用驱动", channel)
+	// 访客请求不进入 AGY 全能智能体通道；兜底通道不可用时也必须失败关闭。
+	if opts != nil && opts.ReadOnly && !strings.EqualFold(channel, r.fallbackChannel) {
+		if fallbackProvider == nil {
+			return nil, fmt.Errorf("访客请求无法路由：受限兜底通道 %q 未挂载", r.fallbackChannel)
+		}
+		resp, err := fallbackProvider.ChatWithTools(ctx, messages, tools, opts)
+		if err == nil && isEmptyChatResponse(resp) {
+			return nil, fmt.Errorf("受限兜底通道 %q 返回空响应", r.fallbackChannel)
+		}
+		return resp, err
 	}
-
-	// 普通访客 (ReadOnly / RoleGuest) 严禁直接接入 AGY 全能智能体通道，强制路由至受控 API 通道配合只读工具处理
-	if opts != nil && opts.ReadOnly && fallbackProvider != nil && !strings.EqualFold(channel, r.fallbackChannel) {
-		return fallbackProvider.ChatWithTools(ctx, messages, tools, opts)
+	if activeProvider == nil {
+		if fallbackProvider == nil || strings.EqualFold(channel, r.fallbackChannel) {
+			return nil, fmt.Errorf("当前激活的心智通道 %q 未挂载任何可用驱动", channel)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		slog.Warn("当前激活的心智通道未挂载，降级至兜底通道",
+			"channel", channel, "fallbackChannel", r.fallbackChannel)
+		resp, err := fallbackProvider.ChatWithTools(ctx, messages, tools, opts)
+		if err == nil && isEmptyChatResponse(resp) {
+			err = fmt.Errorf("兜底通道 %q 返回空响应", r.fallbackChannel)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("当前激活通道 %q 未挂载，且兜底通道执行失败: %w", channel, err)
+		}
+		return resp, nil
 	}
 
 	resp, err := activeProvider.ChatWithTools(ctx, messages, tools, opts)
+	if err == nil && isEmptyChatResponse(resp) {
+		err = fmt.Errorf("%s 通道返回空响应", channel)
+	}
 	if err == nil {
 		return resp, nil
 	}
@@ -632,10 +858,17 @@ func (r *MindRouter) ChatWithTools(
 			"channel", channel, "model", model, "fallbackChannel", r.fallbackChannel, "err", err)
 
 		fbResp, fbErr := fallbackProvider.ChatWithTools(ctx, messages, tools, opts)
+		if fbErr == nil && isEmptyChatResponse(fbResp) {
+			fbErr = fmt.Errorf("兜底通道 %q 返回空响应", r.fallbackChannel)
+		}
 		if fbErr == nil {
 			return fbResp, nil
 		}
 	}
 
 	return nil, fmt.Errorf("%s 通道心智驱动执行失败: %w", channel, err)
+}
+
+func isEmptyChatResponse(resp *core.ChatResponse) bool {
+	return resp == nil || (len(resp.ToolCalls) == 0 && strings.TrimSpace(resp.Content) == "")
 }

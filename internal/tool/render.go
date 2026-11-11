@@ -51,7 +51,7 @@ func (t *RenderTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 	}
 
 	content := strings.TrimSpace(args.Content)
-	if event := entity.SensoryEventFromContext(ctx); !event.IsPartnerPrivate() {
+	if event := entity.SensoryEventFromContext(ctx); event == nil || !event.IsPartnerPrivate() {
 		content = core.RedactSensitiveIPs(content)
 	}
 	if content == "" {

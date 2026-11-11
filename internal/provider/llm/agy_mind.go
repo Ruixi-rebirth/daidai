@@ -85,14 +85,22 @@ func (p *AGYMindProvider) DiscoverModels(ctx context.Context) []ModelInfo {
 		}
 		return nil
 	}
+	cmd.WaitDelay = 2 * time.Second
 
-	out, err := cmd.Output()
-	if err != nil {
+	outBuf := core.NewLimitedBuffer(1 << 20)
+	errBuf := core.NewLimitedBuffer(256 << 10)
+	cmd.Stdout = outBuf
+	cmd.Stderr = errBuf
+	if err := cmd.Run(); err != nil {
 		slog.Warn("agy_mind: 动态执行 models 探测失败", "command", command, "err", err)
 		return nil
 	}
+	if outBuf.Truncated() {
+		slog.Warn("agy_mind: models 探测输出超过 1 MiB 上限", "command", command)
+		return nil
+	}
 
-	models := ParseCLIModelsOutput(string(out), channel)
+	models := ParseCLIModelsOutput(outBuf.String(), channel)
 	if len(models) > 0 {
 		p.mu.Lock()
 		if p.model == "" {
@@ -153,9 +161,9 @@ func FormatAGYUsageOutput(raw []byte) (string, error) {
 	sb.WriteString("### AGY 实时配额与剩余使用量 (Quota Pools)\n\n")
 
 	for i, g := range groups {
-		sb.WriteString(fmt.Sprintf("#### %d. %s\n", i+1, g.Name))
+		fmt.Fprintf(&sb, "#### %d. %s\n", i+1, g.Name)
 		if g.Description != "" {
-			sb.WriteString(fmt.Sprintf("- 说明：%s\n", g.Description))
+			fmt.Fprintf(&sb, "- 说明：%s\n", g.Description)
 		}
 		for _, b := range g.Buckets {
 			remPct := b.RemainingFraction * 100
@@ -171,7 +179,7 @@ func FormatAGYUsageOutput(raw []byte) (string, error) {
 			if b.Description != "" {
 				hint = fmt.Sprintf(" (%s)", b.Description)
 			}
-			sb.WriteString(fmt.Sprintf("- **%s**：剩余 **%.1f%%**%s%s\n", b.Name, remPct, resetDesc, hint))
+			fmt.Fprintf(&sb, "- **%s**：剩余 **%.1f%%**%s%s\n", b.Name, remPct, resetDesc, hint)
 		}
 		sb.WriteString("\n")
 	}
@@ -186,10 +194,8 @@ func (p *AGYMindProvider) GetUsage(ctx context.Context) (string, error) {
 	cwd := p.workingDir
 	p.mu.RUnlock()
 
-	if strings.Contains(command, "agy") {
-		if err := CheckAGYAuth(); err != nil {
-			return "", err
-		}
+	if err := CheckAGYAuth(); err != nil {
+		return "", err
 	}
 
 	usageCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -209,13 +215,20 @@ func (p *AGYMindProvider) GetUsage(ctx context.Context) (string, error) {
 		}
 		return nil
 	}
+	cmd.WaitDelay = 2 * time.Second
 
-	out, err := cmd.Output()
-	if err != nil {
+	outBuf := core.NewLimitedBuffer(256 << 10)
+	errBuf := core.NewLimitedBuffer(256 << 10)
+	cmd.Stdout = outBuf
+	cmd.Stderr = errBuf
+	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("执行 %s -p /usage 失败: %w", command, err)
 	}
+	if outBuf.Truncated() {
+		return "", fmt.Errorf("执行 %s -p /usage 失败：输出超过 256 KiB 上限", command)
+	}
 
-	return FormatAGYUsageOutput(out)
+	return FormatAGYUsageOutput(outBuf.Bytes())
 }
 
 // ParseCLIModelsOutput 解析 `agy models` 标准输出，自动聚合模型 ID、展示名称与支持的思考强度列表
@@ -372,10 +385,8 @@ func (p *AGYMindProvider) ChatWithTools(
 	timeout := p.timeout
 	p.mu.RUnlock()
 
-	if strings.Contains(command, "agy") {
-		if err := CheckAGYAuth(); err != nil {
-			return nil, err
-		}
+	if err := CheckAGYAuth(); err != nil {
+		return nil, err
 	}
 
 	readOnly := opts != nil && opts.ReadOnly
@@ -413,10 +424,12 @@ func (p *AGYMindProvider) ChatWithTools(
 		}
 		return nil
 	}
+	cmd.WaitDelay = 2 * time.Second
 
-	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
+	stdoutBuf := core.NewLimitedBuffer(2 << 20)
+	stderrBuf := core.NewLimitedBuffer(2 << 20)
+	cmd.Stdout = stdoutBuf
+	cmd.Stderr = stderrBuf
 
 	if err := cmd.Run(); err != nil {
 		if execCtx.Err() == context.Canceled {
@@ -431,11 +444,20 @@ func (p *AGYMindProvider) ChatWithTools(
 			errDetail = strings.TrimSpace(stdoutBuf.String())
 		}
 		if errDetail != "" {
+			if runes := []rune(errDetail); len(runes) > 8000 {
+				errDetail = string(runes[:8000]) + "..."
+			}
+			if stdoutBuf.Truncated() || stderrBuf.Truncated() {
+				errDetail += " (子进程输出已截断)"
+			}
 			return nil, fmt.Errorf("%s 执行异常: %s", channelName, errDetail)
 		}
 		return nil, fmt.Errorf("%s 进程执行失败: %w", channelName, err)
 	}
 
+	if stdoutBuf.Truncated() {
+		return nil, fmt.Errorf("%s 输出超过 2 MiB 上限，结果不完整", channelName)
+	}
 	rawOut := stdoutBuf.Bytes()
 	var parsed cliRawResult
 	if jErr := json.Unmarshal(rawOut, &parsed); jErr != nil {
@@ -446,8 +468,16 @@ func (p *AGYMindProvider) ChatWithTools(
 		}
 	}
 
-	if parsed.Status == "ERROR" && parsed.Error != "" {
-		return nil, fmt.Errorf("%s 返回错误: %s", channelName, parsed.Error)
+	status := strings.ToUpper(strings.TrimSpace(parsed.Status))
+	if status != "" && status != "SUCCESS" {
+		detail := strings.TrimSpace(parsed.Error)
+		if detail == "" {
+			detail = status
+		}
+		if runes := []rune(detail); len(runes) > 4000 {
+			detail = string(runes[:4000]) + "…"
+		}
+		return nil, fmt.Errorf("%s 返回非成功状态 %q: %s", channelName, status, detail)
 	}
 
 	respText := strings.TrimSpace(parsed.Response)
@@ -476,7 +506,7 @@ func (p *AGYMindProvider) assemblePrompt(messages []core.ChatMessage, tools []co
 
 	var systemInstructions []string
 	if readOnly {
-		systemInstructions = append(systemInstructions, "【安全沙箱限制：当前发言人为外部访客 (RoleGuest)，处于严格只读隔离模式。严禁读取、探测或透露宿主机代码仓库、配置文件与敏感环境信息，严禁执行任何文件修改或命令操作，仅限纯文本日常交流。】")
+		systemInstructions = append(systemInstructions, "【访客行为限制：当前发言人为外部访客 (RoleGuest)。仅进行日常交流，不主动读取、探测或透露宿主机代码仓库、配置文件与敏感环境信息，也不执行文件修改或命令操作。这是行为指引；具体工具权限由应用执行层控制。】")
 	}
 	var historyLines []string
 	var toolResults []string
@@ -590,11 +620,21 @@ func (p *AGYMindProvider) extractToolCalls(text string) []core.ToolCall {
 
 	// 若未在代码块中，尝试扫描裸 JSON 对象（兼容换行与缩进格式）
 	if len(jsonBlocks) == 0 {
-		if tcIdx := strings.Index(text, `"tool_calls"`); tcIdx != -1 {
-			start := strings.LastIndex(text[:tcIdx], "{")
-			end := strings.LastIndex(text, "}")
-			if start != -1 && end > tcIdx {
-				jsonBlocks = append(jsonBlocks, text[start:end+1])
+		if strings.Contains(text, `"tool_calls"`) {
+			// 解析器允许 JSON 前后带说明文字。逐个尝试对象起点，避免嵌套字段
+			// 恰好出现在 tool_calls 前时，从内层左花括号开始截取而解析失败。
+			for start := strings.IndexByte(text, '{'); start >= 0; {
+				var payload cliToolCallPayload
+				decoder := json.NewDecoder(strings.NewReader(text[start:]))
+				if err := decoder.Decode(&payload); err == nil && len(payload.ToolCalls) > 0 {
+					jsonBlocks = append(jsonBlocks, text[start:start+int(decoder.InputOffset())])
+					break
+				}
+				next := strings.IndexByte(text[start+1:], '{')
+				if next < 0 {
+					break
+				}
+				start += next + 1
 			}
 		}
 	}

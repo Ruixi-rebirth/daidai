@@ -18,6 +18,7 @@
               go
               gopls
               golangci-lint
+              mermaid-cli
               just
               sqlite
               curl

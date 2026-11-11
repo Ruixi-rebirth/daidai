@@ -94,7 +94,9 @@ type switchArgs struct {
 func (t *ModelSwitchTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.ToolResult, error) {
 	var args switchArgs
 	if len(rawArgs) > 0 {
-		_ = json.Unmarshal(rawArgs, &args)
+		if err := json.Unmarshal(rawArgs, &args); err != nil {
+			return nil, fmt.Errorf("invalid switch_model args: %w", err)
+		}
 	}
 
 	action := strings.ToLower(strings.TrimSpace(args.Action))
@@ -118,12 +120,14 @@ func (t *ModelSwitchTool) Execute(ctx context.Context, rawArgs json.RawMessage) 
 	case "usage":
 		return t.handleUsage(ctx, channel), nil
 	case "list":
-		return t.handleList(channel), nil
+		return t.handleList(ctx, channel), nil
 	case "switch":
-		if ev := entity.SensoryEventFromContext(ctx); ev != nil && t.immune != nil {
-			if err := t.immune.VerifyDelegationPerm(ev.Role); err != nil {
-				return &core.ToolResult{Text: err.Error()}, nil
-			}
+		ev := entity.SensoryEventFromContext(ctx)
+		if ev == nil || t.immune == nil {
+			return &core.ToolResult{Text: "权限校验不可用，拒绝切换模型"}, nil
+		}
+		if err := t.immune.VerifyDelegationPerm(ev.Role); err != nil {
+			return &core.ToolResult{Text: err.Error()}, nil
 		}
 		return t.handleSwitch(model, channel, effort), nil
 	default:
@@ -134,7 +138,7 @@ func (t *ModelSwitchTool) Execute(ctx context.Context, rawArgs json.RawMessage) 
 }
 
 func (t *ModelSwitchTool) handleUsage(ctx context.Context, channelFilter string) *core.ToolResult {
-	return t.handleList(channelFilter)
+	return t.handleList(ctx, channelFilter)
 }
 
 func (t *ModelSwitchTool) handleCurrent() *core.ToolResult {
@@ -143,8 +147,12 @@ func (t *ModelSwitchTool) handleCurrent() *core.ToolResult {
 	}
 }
 
-func (t *ModelSwitchTool) handleList(channelFilter string) *core.ToolResult {
-	models := t.router.ListModels()
+func (t *ModelSwitchTool) handleList(ctx context.Context, channelFilter string) *core.ToolResult {
+	// A user-requested list is an explicit request for the latest available
+	// models. Tool definition generation uses the cached pool and does not
+	// trigger network or CLI discovery on every conversation turn.
+	t.router.RefreshModels(ctx)
+	models := t.router.ListModelsContext(ctx)
 	curr := t.router.CurrentMind()
 
 	channelsMap := make(map[string][]llm.ModelInfo)
@@ -161,20 +169,6 @@ func (t *ModelSwitchTool) handleList(channelFilter string) *core.ToolResult {
 	filter := strings.ToUpper(strings.TrimSpace(channelFilter))
 	if filter != "" {
 		if _, exists := channelsMap[filter]; !exists {
-			t.router.RefreshModels(context.Background())
-			models = t.router.ListModels()
-			channelsMap = make(map[string][]llm.ModelInfo)
-			channelOrder = nil
-			for _, m := range models {
-				ch := m.Channel
-				if _, exists := channelsMap[ch]; !exists {
-					channelOrder = append(channelOrder, ch)
-				}
-				channelsMap[ch] = append(channelsMap[ch], m)
-			}
-		}
-
-		if _, exists := channelsMap[filter]; !exists {
 			allChans := t.router.Channels()
 			return &core.ToolResult{
 				Text: fmt.Sprintf("【未探测到 %s 通道模型】\n当前系统挂载的通道为: [%s]。", filter, strings.Join(allChans, ", ")),
@@ -185,14 +179,14 @@ func (t *ModelSwitchTool) handleList(channelFilter string) *core.ToolResult {
 
 	var sb strings.Builder
 	if filter != "" {
-		sb.WriteString(fmt.Sprintf("【实时探测可用心智模型池 · %s 通道】\n\n", filter))
+		fmt.Fprintf(&sb, "【实时探测可用心智模型池 · %s 通道】\n\n", filter)
 	} else {
 		sb.WriteString("【实时探测可用心智模型池】\n\n")
 	}
 
 	for _, ch := range channelOrder {
 		chModels := channelsMap[ch]
-		sb.WriteString(fmt.Sprintf("### %s 通道\n", ch))
+		fmt.Fprintf(&sb, "### %s 通道\n", ch)
 		switch ch {
 		case "AGY":
 			sb.WriteString("- 通道属性：Google Antigravity 自驱智能体沙箱（走本地官方授权配额，0 额外 Token 计费开销）\n")
@@ -200,7 +194,7 @@ func (t *ModelSwitchTool) handleList(channelFilter string) *core.ToolResult {
 			sb.WriteString("- 通道属性：OpenAI 兼容协议高可用端点（按 Token 计费）\n")
 		}
 
-		if usageText, err := t.router.QueryChannelUsage(context.Background(), ch); err == nil && usageText != "" {
+		if usageText, err := t.router.QueryChannelUsage(ctx, ch); err == nil && usageText != "" {
 			sb.WriteString("\n" + usageText + "\n\n")
 		}
 
@@ -223,9 +217,9 @@ func (t *ModelSwitchTool) handleList(channelFilter string) *core.ToolResult {
 				desc = "：" + m.Description
 			}
 			if m.Name != "" && !strings.EqualFold(m.Name, m.ID) {
-				sb.WriteString(fmt.Sprintf("- **%s** (`%s`)%s%s%s\n", m.Name, m.ID, efforts, activeTag, desc))
+				fmt.Fprintf(&sb, "- **%s** (`%s`)%s%s%s\n", m.Name, m.ID, efforts, activeTag, desc)
 			} else {
-				sb.WriteString(fmt.Sprintf("- `%s`%s%s%s\n", m.ID, efforts, activeTag, desc))
+				fmt.Fprintf(&sb, "- `%s`%s%s%s\n", m.ID, efforts, activeTag, desc)
 			}
 		}
 		sb.WriteString("\n")
@@ -260,7 +254,7 @@ func (t *ModelSwitchTool) handleSwitch(model, channel, effort string) *core.Tool
 			if len(c.SupportedEfforts) > 0 {
 				effortInfo = fmt.Sprintf(" [思考强度: %s]", strings.Join(c.SupportedEfforts, ", "))
 			}
-			sb.WriteString(fmt.Sprintf("- [%s 通道] **%s** (`%s`)%s\n", c.Channel, c.Name, c.ID, effortInfo))
+			fmt.Fprintf(&sb, "- [%s 通道] **%s** (`%s`)%s\n", c.Channel, c.Name, c.ID, effortInfo)
 		}
 		return &core.ToolResult{
 			Text: strings.TrimSpace(sb.String()),

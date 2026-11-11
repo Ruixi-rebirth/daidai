@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sync"
 
 	"daidai/internal/config"
@@ -22,12 +23,14 @@ type HandsRegistry struct {
 
 // HandsConfig 双手挂载配置
 type HandsConfig struct {
+	AGYCommand      string
 	Router          *llm.MindRouter
 	Delegates       *entity.Delegates
 	Immune          *entity.ImmuneSystem
 	Workspaces      *entity.WorkspaceManager
 	EnableNixSearch bool
 	OCIConfig       *config.OCIConfig
+	OCIClient       *OCIClient
 }
 
 // NewHandsWithConfig 按配置挂载原子双手
@@ -38,12 +41,12 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 	h.Register(NewRenderTool())
 	h.Register(NewSysInfoTool())
 	h.Register(NewMemoryTool(nil))
-	h.Register(NewWebSearchTool(cfg.Router))
+	h.Register(NewWebSearchToolWithCommand(cfg.Router, cfg.AGYCommand))
 	h.Register(NewReadLinkTool())
 	h.Register(NewScreenshotTool())
 	h.Register(NewSingboxLinksTool(cfg.Immune))
 	if cfg.Workspaces != nil {
-		h.Register(NewWorkspaceTool(cfg.Workspaces, cfg.Immune))
+		h.Register(NewWorkspaceTool(cfg.Workspaces, cfg.Immune, cfg.Delegates))
 	}
 	if cfg.EnableNixSearch {
 		h.Register(NewNixSearchTool())
@@ -53,10 +56,21 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 	}
 	if cfg.Delegates != nil {
 		h.Register(NewDelegateToolWithWorkspace(cfg.Delegates, cfg.Immune, cfg.Workspaces))
-		h.Register(NewFaceTool(cfg.Delegates))
-		h.Register(NewImageTool(cfg.Delegates))
+		h.Register(NewFaceToolWithCommand(cfg.Delegates, cfg.AGYCommand, filepath.Join("data", "assets", "faces"), cfg.Immune))
+		outDir := filepath.Join("data", "workspace", "sandbox")
+		if cfg.Workspaces != nil {
+			outDir = cfg.Workspaces.SandboxDir()
+		}
+		h.Register(NewImageToolWithCommand(cfg.Delegates, cfg.AGYCommand, outDir, cfg.Immune))
 	}
-	if cfg.OCIConfig != nil && cfg.OCIConfig.Enabled {
+	if cfg.OCIClient != nil {
+		timezone := ""
+		if cfg.OCIConfig != nil {
+			timezone = cfg.OCIConfig.Timezone
+		}
+		h.Register(NewOCIBillTool(cfg.OCIClient, timezone))
+		h.Register(NewOCIIPTool(cfg.OCIClient, cfg.Immune))
+	} else if cfg.OCIConfig != nil && cfg.OCIConfig.Enabled {
 		if ociClient, err := NewOCIClient(context.Background(), *cfg.OCIConfig); err == nil {
 			h.Register(NewOCIBillTool(ociClient, cfg.OCIConfig.Timezone))
 			h.Register(NewOCIIPTool(ociClient, cfg.Immune))
@@ -108,6 +122,18 @@ func (h *HandsRegistry) Definitions() []core.ToolDefinition {
 }
 
 func (h *HandsRegistry) Execute(ctx context.Context, name string, rawArgs json.RawMessage) (*core.ToolResult, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("hands: tool execution requires a context")
+	}
+	event := entity.SensoryEventFromContext(ctx)
+	privilegedRole := event != nil && (event.Role == entity.RolePartner || event.Role == entity.RoleCollaborator)
+	if !privilegedRole && !entity.HasSystemToolAccess(ctx) && !entity.GuestToolAllowed(name) {
+		if event == nil {
+			return nil, fmt.Errorf("权限不足：缺少用户身份上下文，拒绝调用工具 %q", name)
+		}
+		return nil, fmt.Errorf("权限不足：访客不能调用工具 %q", name)
+	}
+
 	h.mu.RLock()
 	t, ok := h.tools[name]
 	h.mu.RUnlock()

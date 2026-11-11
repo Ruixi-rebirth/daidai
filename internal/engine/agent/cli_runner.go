@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -11,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"daidai/internal/core"
 	"daidai/internal/entity"
 )
 
@@ -24,7 +24,7 @@ type CLIAgentConfig struct {
 	Timeout     time.Duration
 }
 
-// CLIWorker 通用命令行子进程沙箱工作者 (直接实现 entity.Worker)
+// CLIWorker 通用命令行子进程工作者 (直接实现 entity.Worker；不提供操作系统级隔离)
 type CLIWorker struct {
 	cfg CLIAgentConfig
 }
@@ -47,26 +47,79 @@ func (w *CLIWorker) Description() string {
 
 // ExecuteTicket 唤起子进程执行工单并返回真实标准输出与错误状态 (实现 entity.Worker)
 func (w *CLIWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (string, error) {
+	if ctx == nil {
+		return "", fmt.Errorf("[%s] ticket execution context cannot be nil", w.cfg.Name)
+	}
+	if t == nil {
+		return "", fmt.Errorf("[%s] ticket cannot be nil", w.cfg.Name)
+	}
+	if strings.TrimSpace(w.cfg.Command) == "" {
+		return "", fmt.Errorf("[%s] command cannot be empty", w.cfg.Name)
+	}
+
 	var finalArgs []string
+	passesGoal := false
 	for _, arg := range w.cfg.Args {
+		if strings.Contains(arg, "{{GOAL}}") {
+			passesGoal = true
+		}
 		if arg == "{{GOAL}}" {
 			finalArgs = append(finalArgs, t.Goal)
 		} else {
 			finalArgs = append(finalArgs, strings.ReplaceAll(arg, "{{GOAL}}", t.Goal))
 		}
 	}
+	if !passesGoal {
+		return "", fmt.Errorf("[%s] args must include {{GOAL}} so the task reaches the command", w.cfg.Name)
+	}
 
 	workDir := strings.TrimSpace(t.Workspace)
 	if workDir == "" {
 		workDir = strings.TrimSpace(w.cfg.DefaultDir)
 	}
-	if strings.HasPrefix(workDir, "~") {
+	if workDir == "~" {
+		workDir = strings.TrimSpace(w.cfg.DefaultDir)
+	}
+	if strings.HasPrefix(workDir, "~/") || strings.HasPrefix(workDir, "~"+string(filepath.Separator)) {
 		if home, err := os.UserHomeDir(); err == nil && home != "" {
-			workDir = filepath.Join(home, strings.TrimPrefix(workDir, "~"))
+			workDir = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(workDir, "~"), string(filepath.Separator)))
 		}
 	}
+	if workDir == "" {
+		workDir = "."
+	}
 	if workDir != "" {
+		absWorkDir, err := filepath.Abs(filepath.Clean(workDir))
+		if err != nil {
+			return "", fmt.Errorf("[%s] resolve working directory: %w", w.cfg.Name, err)
+		}
+		workDir, err = filepath.EvalSymlinks(absWorkDir)
+		if err != nil {
+			return "", fmt.Errorf("[%s] resolve working directory %q: %w", w.cfg.Name, absWorkDir, err)
+		}
 		workDir = filepath.Clean(workDir)
+		info, err := os.Stat(workDir)
+		if err != nil {
+			return "", fmt.Errorf("[%s] inspect working directory %q: %w", w.cfg.Name, workDir, err)
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("[%s] working directory %q is not a directory", w.cfg.Name, workDir)
+		}
+		if workDir == string(filepath.Separator) {
+			return "", fmt.Errorf("[%s] working directory cannot be the filesystem root", w.cfg.Name)
+		}
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			if resolvedHome, err := filepath.EvalSymlinks(home); err == nil {
+				home = resolvedHome
+			}
+			home, err = filepath.Abs(filepath.Clean(home))
+			if err != nil {
+				return "", fmt.Errorf("[%s] resolve user home directory: %w", w.cfg.Name, err)
+			}
+			if workDir == home {
+				return "", fmt.Errorf("[%s] working directory cannot be the entire user home", w.cfg.Name)
+			}
+		}
 	}
 
 	taskCtx, cancel := context.WithTimeout(ctx, w.cfg.Timeout)
@@ -83,14 +136,22 @@ func (w *CLIWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (string
 		}
 		return nil
 	}
+	cmd.WaitDelay = 2 * time.Second
 
-	var stdoutBuf, stderrBuf bytes.Buffer
-	cmd.Stdout = &stdoutBuf
-	cmd.Stderr = &stderrBuf
+	stdoutBuf := core.NewLimitedBuffer(2 << 20)
+	stderrBuf := core.NewLimitedBuffer(2 << 20)
+	cmd.Stdout = stdoutBuf
+	cmd.Stderr = stderrBuf
 
 	err := cmd.Run()
 	stdoutStr := strings.TrimSpace(stdoutBuf.String())
 	stderrStr := strings.TrimSpace(stderrBuf.String())
+	if stdoutBuf.Truncated() {
+		stdoutStr += "\n[标准输出已截断，最多保留 2 MiB]"
+	}
+	if stderrBuf.Truncated() {
+		stderrStr += "\n[标准错误已截断，最多保留 2 MiB]"
+	}
 
 	if err != nil {
 		detail := stderrStr

@@ -10,6 +10,9 @@ import (
 
 var appStartTime = time.Now()
 
+// MaxImageBytes is the shared image payload limit for rendered, generated, and uploaded media.
+const MaxImageBytes = 10 << 20
+
 // FormatSystemStatus 格式化宿主机实时硬件与运行时指标（默认按非敏感脱敏模式输出）
 func FormatSystemStatus() string {
 	return FormatSystemStatusWithPerm(false)
@@ -76,7 +79,7 @@ type UserRole string
 const (
 	RolePartner      UserRole = "partner"      // 核心搭档/死党 (最高信任级，拥有全部权限与 Delegates 调度权)
 	RoleCollaborator UserRole = "collaborator" // 协作者/好友 (允许日常工具与工程审查)
-	RoleGuest        UserRole = "guest"        // 普通群友/访客 (受限权限，仅限日常交流与只读工具)
+	RoleGuest        UserRole = "guest"        // 普通群友/访客 (受限权限，由执行层强制校验可用工具)
 )
 
 // AttachmentKind 表示附件类型

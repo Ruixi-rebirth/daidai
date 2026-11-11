@@ -51,7 +51,7 @@ type ChatMessage struct {
 type ChatOptions struct {
 	Temperature float32
 	MaxTokens   int
-	ReadOnly    bool // 当发起人为受限访客 (RoleGuest) 时设为 true，禁止底层 CLI 越权执行写操作或危险工具
+	ReadOnly    bool // 标记受限访客请求，供路由层与提供方选择受限执行路径；不单独构成权限边界
 }
 
 // ChatResponse 模型响应，支持纯文本与工具调用

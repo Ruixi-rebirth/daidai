@@ -43,10 +43,34 @@ func (d *dedupCache) CheckAndSet(msgID string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	now := time.Now().Unix()
 	if _, exists := d.seen[msgID]; exists {
 		return true
 	}
+	d.rememberLocked(msgID)
+	return false
+}
+
+func (d *dedupCache) Contains(msgID string) bool {
+	if msgID == "" {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, exists := d.seen[msgID]
+	return exists
+}
+
+func (d *dedupCache) Remember(msgID string) {
+	if msgID == "" {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.rememberLocked(msgID)
+}
+
+func (d *dedupCache) rememberLocked(msgID string) {
+	now := time.Now().Unix()
 
 	if len(d.seen) >= d.max {
 		oldestKey := ""
@@ -64,7 +88,6 @@ func (d *dedupCache) CheckAndSet(msgID string) bool {
 		}
 	}
 	d.seen[msgID] = now
-	return false
 }
 
 type msgCache struct {
@@ -86,8 +109,20 @@ func newMsgCache(max int, dbMgr *db.Manager) *msgCache {
 		db:    dbMgr,
 	}
 	if dbMgr != nil {
+		if err := dbMgr.DeleteMsgCacheByContentPrefix("qq", "/agy code"); err != nil {
+			slog.Warn("qq: 清理历史 OAuth 授权码缓存失败", "err", err)
+		}
+		if err := dbMgr.DeleteMsgCacheByContentPrefix("qq", "/agy auth"); err != nil {
+			slog.Warn("qq: 清理历史 OAuth 授权码缓存失败", "err", err)
+		}
 		if loaded, err := dbMgr.LoadMsgCache("qq", max); err == nil && len(loaded) > 0 {
 			for _, item := range loaded {
+				if entity.IsSensitiveAuthCommand(item.Content) {
+					if err := dbMgr.DeleteMsgCache("qq", item.MsgID); err != nil {
+						slog.Warn("qq: 删除检测到的 OAuth 授权码缓存失败", "msgID", item.MsgID, "err", err)
+					}
+					continue
+				}
 				c.items[item.MsgID] = item.Content
 				c.keys = append(c.keys, item.MsgID)
 			}
@@ -98,7 +133,7 @@ func newMsgCache(max int, dbMgr *db.Manager) *msgCache {
 }
 
 func (c *msgCache) Set(msgID, content string) {
-	if msgID == "" || content == "" {
+	if msgID == "" || content == "" || entity.IsSensitiveAuthCommand(content) {
 		return
 	}
 	c.mu.Lock()
@@ -114,7 +149,9 @@ func (c *msgCache) Set(msgID, content string) {
 	c.mu.Unlock()
 
 	if c.db != nil {
-		_ = c.db.SaveMsgCache("qq", msgID, content)
+		if err := c.db.SaveMsgCache("qq", msgID, content); err != nil {
+			slog.Warn("qq: 持久化引用消息缓存失败", "msgID", msgID, "err", err)
+		}
 	}
 }
 
@@ -136,6 +173,7 @@ type QQChannel struct {
 	msgCache   *msgCache
 	dedup      *dedupCache
 	stopCancel context.CancelFunc
+	wsWG       sync.WaitGroup
 
 	wsMu        sync.Mutex
 	wsSessionID string
@@ -217,17 +255,21 @@ func (q *QQChannel) Start(ctx context.Context, onSensory func(event *entity.Sens
 }
 
 // IngestRaw 接收解析后的感知事件并推入防抖队列
-func (q *QQChannel) IngestRaw(event *entity.SensoryEvent) {
-	if q.debounce != nil && event != nil {
-		q.debounce.Push(event)
+func (q *QQChannel) IngestRaw(event *entity.SensoryEvent) bool {
+	if event == nil {
+		return false
 	}
+	if q.debounce == nil {
+		return false
+	}
+	return q.debounce.Push(event)
 }
 
 // dispatchEvent 解析 WebSocket 网关下发的消息事件并推入防抖队列 (零前缀纯净 ID)
-func (q *QQChannel) dispatchEvent(payload map[string]any) {
+func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 	d, ok := payload["d"].(map[string]any)
 	if !ok {
-		return
+		return true
 	}
 	eventType, _ := payload["t"].(string)
 
@@ -245,12 +287,12 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) {
 	rawContent, _ := d["content"].(string)
 	content = cleanQQContent(rawContent)
 
-	if msgID != "" && q.dedup != nil && q.dedup.CheckAndSet(msgID) {
+	if msgID != "" && q.dedup != nil && q.dedup.Contains(msgID) {
 		slog.Debug("qq: 拦截到重复投递的事件消息", "msgID", msgID)
-		return
+		return true
 	}
 
-	if msgID != "" && content != "" && q.msgCache != nil {
+	if msgID != "" && content != "" && q.msgCache != nil && !entity.IsSensitiveAuthCommand(content) {
 		q.msgCache.Set(msgID, content)
 	}
 
@@ -289,7 +331,11 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) {
 		convID = userID
 
 	default:
-		return
+		return true
+	}
+	if msgID == "" {
+		slog.Warn("qq: 忽略缺少原消息 ID 的事件，无法使用被动回复凭证", "eventType", eventType, "channelID", convID)
+		return true
 	}
 
 	var replyCtx *entity.SensoryEvent
@@ -305,12 +351,17 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) {
 		if refContent == "" && refMsgID != "" && q.msgCache != nil {
 			refContent = q.msgCache.Get(refMsgID)
 		}
+		if entity.IsSensitiveAuthCommand(refContent) {
+			refContent = "[OAuth authorization code redacted]"
+		}
+		refContent = core.TruncateRunes(refContent, core.MaxQuotedMessageRunes, "\n[引用消息过长，后续内容已截断]")
 
 		slog.Info("qq: 处理引用消息", "msgID", msgID, "refMsgID", refMsgID, "hitCache", refContent != "")
 
 		if refContent != "" {
 			replyCtx = &entity.SensoryEvent{
-				Content: strings.TrimSpace(refContent),
+				Content:      strings.TrimSpace(refContent),
+				RawMessageID: refMsgID,
 			}
 		}
 	}
@@ -329,8 +380,10 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) {
 					}
 					if elType == 103 {
 						if c, ok := elMap["content"].(string); ok && strings.TrimSpace(c) != "" {
+							refMsgID, _ := elMap["id"].(string)
 							replyCtx = &entity.SensoryEvent{
-								Content: strings.TrimSpace(c),
+								Content:      strings.TrimSpace(c),
+								RawMessageID: refMsgID,
 							}
 							slog.Info("qq: 从 v2 msg_elements 中成功解析出引用消息", "msgID", msgID)
 							break
@@ -341,12 +394,17 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) {
 		}
 	}
 
-	if convID != "" && (content != "" || len(images) > 0) {
+	if convID != "" && userID == "" {
+		slog.Warn("qq: 忽略缺少发送者 ID 的消息事件", "eventType", eventType, "msgID", msgID, "channelID", convID)
+		return true
+	}
+
+	if convID != "" && userID != "" && (content != "" || len(images) > 0) {
 		role := entity.RoleGuest
 		if q.immune != nil {
 			role = q.immune.ResolveRole(userID)
 		}
-		q.IngestRaw(&entity.SensoryEvent{
+		accepted := q.IngestRaw(&entity.SensoryEvent{
 			Platform:     "qq",
 			ChannelID:    convID,
 			IsGroup:      isGroup,
@@ -359,13 +417,23 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) {
 			RawMessageID: msgID,
 			OccurredAt:   time.Now(),
 		})
+		if !accepted {
+			return false
+		}
+		if q.dedup != nil {
+			q.dedup.Remember(msgID)
+		}
 	}
+	return true
 }
 
 // Transmit 物理发声：投递全息表达体到 QQ 客户端 (支持大文本自动分片与图文混合发送)
 func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) error {
-	if u == nil || q.client == nil {
+	if u == nil {
 		return nil
+	}
+	if q.client == nil {
+		return fmt.Errorf("QQ client is unavailable")
 	}
 
 	imgData := u.CardData
@@ -377,21 +445,30 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) error {
 	if u.ChannelID == "" {
 		return fmt.Errorf("empty channelID in utterance")
 	}
+	if u.QuoteMsgID == "" {
+		return fmt.Errorf("QQ 主动推送已于 2025-04-21 停用；必须在有效的入站消息上下文中被动回复")
+	}
 
 	chunks := core.SplitMarkdownChunks(content, 1200)
 	if len(chunks) == 0 {
 		chunks = []string{""}
 	}
+	if len(chunks) > 5 {
+		return fmt.Errorf("QQ 被动回复最多 5 条，当前内容需要 %d 条，请缩短回复", len(chunks))
+	}
 
 	for i, chunk := range chunks {
 		if i > 0 {
-			time.Sleep(150 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(150 * time.Millisecond):
+			}
 		}
 
-		quoteID := ""
+		quoteID := u.QuoteMsgID
 		var media []byte
 		if i == 0 {
-			quoteID = u.QuoteMsgID
 			media = imgData
 		}
 
@@ -424,10 +501,23 @@ func (q *QQChannel) Stop(ctx context.Context) error {
 	if q.stopCancel != nil {
 		q.stopCancel()
 	}
-	if q.debounce != nil {
-		q.debounce.Stop()
+	wsDone := make(chan struct{})
+	go func() {
+		q.wsWG.Wait()
+		close(wsDone)
+	}()
+	var firstErr error
+	select {
+	case <-wsDone:
+	case <-ctx.Done():
+		firstErr = ctx.Err()
 	}
-	return nil
+	if q.debounce != nil {
+		if err := q.debounce.Shutdown(ctx); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // cleanQQContent 剥离 QQ 官方网关在群聊 @ 消息中注入的 <@!bot_id> 标签并清理首尾空白
@@ -443,5 +533,5 @@ func cleanQQContent(s string) string {
 		}
 		s = s[:start] + s[start+end+1:]
 	}
-	return strings.TrimSpace(s)
+	return core.TruncateRunes(strings.TrimSpace(s), core.MaxUserMessageRunes, "\n[消息过长，后续内容已截断]")
 }

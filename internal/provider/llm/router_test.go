@@ -282,8 +282,8 @@ func TestAGYMindProvider_AssemblePromptPreservesHistory(t *testing.T) {
 	}
 
 	roPrompt := agy.assemblePrompt(msgs, nil, true)
-	if !strings.Contains(roPrompt, "严格只读隔离模式") {
-		t.Fatalf("expected read-only sandbox notice in guest prompt, got:\n%s", roPrompt)
+	if !strings.Contains(roPrompt, "访客行为限制") || !strings.Contains(roPrompt, "由应用执行层控制") {
+		t.Fatalf("expected guest behavior and enforcement boundary in prompt, got:\n%s", roPrompt)
 	}
 }
 

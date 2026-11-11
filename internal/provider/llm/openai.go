@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -14,6 +13,8 @@ import (
 
 	"daidai/internal/core"
 )
+
+const maxOpenAIResponseBytes = 16 << 20
 
 // OpenAIConfig 通用 OpenAI 兼容协议配置
 type OpenAIConfig struct {
@@ -25,9 +26,10 @@ type OpenAIConfig struct {
 
 // OpenAIProvider 统一 OpenAI 兼容驱动
 type OpenAIProvider struct {
-	mu         sync.RWMutex
-	cfg        OpenAIConfig
-	httpClient *http.Client
+	mu              sync.RWMutex
+	cfg             OpenAIConfig
+	configuredModel string
+	httpClient      *http.Client
 }
 
 // NewOpenAIProvider 实例化 OpenAI 协议驱动
@@ -39,9 +41,15 @@ func NewOpenAIProvider(cfg OpenAIConfig) *OpenAIProvider {
 		cfg.Timeout = 60 * time.Second
 	}
 	return &OpenAIProvider{
-		cfg: cfg,
+		cfg:             cfg,
+		configuredModel: strings.TrimSpace(cfg.Model),
 		httpClient: &http.Client{
 			Timeout: cfg.Timeout,
+			// Model APIs should not redirect requests, prompts, or credentials to
+			// another host or to an internal service.
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 	}
 }
@@ -71,7 +79,7 @@ func (p *OpenAIProvider) DiscoverModels(ctx context.Context) []ModelInfo {
 	p.mu.RLock()
 	baseURL := strings.TrimRight(p.cfg.BaseURL, "/")
 	apiKey := p.cfg.APIKey
-	configuredModel := strings.TrimSpace(p.cfg.Model)
+	configuredModel := p.configuredModel
 	p.mu.RUnlock()
 
 	var models []ModelInfo
@@ -108,14 +116,15 @@ func (p *OpenAIProvider) DiscoverModels(ctx context.Context) []ModelInfo {
 			req.Header.Set("Authorization", "Bearer "+apiKey)
 			resp, err := p.httpClient.Do(req)
 			if err == nil {
-				defer resp.Body.Close()
+				defer func() { _ = resp.Body.Close() }()
 				if resp.StatusCode == http.StatusOK {
+					body, readErr := core.ReadBounded(resp.Body, maxOpenAIResponseBytes)
 					var listResp struct {
 						Data []struct {
 							ID string `json:"id"`
 						} `json:"data"`
 					}
-					if err := json.NewDecoder(resp.Body).Decode(&listResp); err == nil {
+					if readErr == nil && json.Unmarshal(body, &listResp) == nil {
 						for _, item := range listResp.Data {
 							addModel(item.ID)
 						}
@@ -228,20 +237,20 @@ func (p *OpenAIProvider) ChatWithTools(ctx context.Context, messages []core.Chat
 	if err != nil {
 		return nil, fmt.Errorf("send request error: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := core.ReadBounded(resp.Body, maxOpenAIResponseBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read response body error: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("api returned status %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, fmt.Errorf("api returned status %d: %s", resp.StatusCode, responseSummary(bodyBytes))
 	}
 
 	var chatResp openAIChatResponse
 	if err := json.Unmarshal(bodyBytes, &chatResp); err != nil {
-		return nil, fmt.Errorf("unmarshal response error: %w (body: %s)", err, string(bodyBytes))
+		return nil, fmt.Errorf("unmarshal response error: %w (body: %s)", err, responseSummary(bodyBytes))
 	}
 
 	if chatResp.Error != nil && chatResp.Error.Message != "" {
@@ -315,14 +324,14 @@ func (p *OpenAIProvider) Embed(ctx context.Context, text string) ([]float32, err
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := core.ReadBounded(resp.Body, maxOpenAIResponseBytes)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("embedding api status %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, fmt.Errorf("embedding api status %d: %s", resp.StatusCode, responseSummary(bodyBytes))
 	}
 
 	var embResp openAIEmbeddingResponse
@@ -336,4 +345,12 @@ func (p *OpenAIProvider) Embed(ctx context.Context, text string) ([]float32, err
 		return nil, nil
 	}
 	return embResp.Data[0].Embedding, nil
+}
+
+func responseSummary(body []byte) string {
+	const maxSummaryBytes = 4096
+	if len(body) <= maxSummaryBytes {
+		return string(body)
+	}
+	return string(body[:maxSummaryBytes]) + "..."
 }

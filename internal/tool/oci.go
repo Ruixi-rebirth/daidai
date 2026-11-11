@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -23,9 +24,12 @@ import (
 )
 
 const (
-	imdsBaseURL      = "http://169.254.169.254/opc/v2"
-	signatureVersion = "1"
-	defaultRegion    = "ap-singapore-1"
+	imdsBaseURL          = "http://169.254.169.254/opc/v2"
+	signatureVersion     = "1"
+	defaultRegion        = "ap-singapore-1"
+	maxIMDSResponseBytes = 1 << 20
+	maxOCIResponseBytes  = 8 << 20
+	maxOCIPaginatedBytes = 64 << 20
 )
 
 // OCIClient Oracle Cloud REST API 原生签名客户端
@@ -60,19 +64,28 @@ func FetchIMDS(ctx context.Context, path string, target any) error {
 	}
 	req.Header.Set("Authorization", "Bearer Oracle")
 
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("IMDS returned status %d", resp.StatusCode)
 	}
 
 	if target != nil {
-		return json.NewDecoder(resp.Body).Decode(target)
+		data, err := readLimitedBody(resp.Body, maxIMDSResponseBytes)
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(data, target)
 	}
 	return nil
 }
@@ -114,6 +127,18 @@ func parseRSAPrivateKey(pemBytes []byte) (*rsa.PrivateKey, error) {
 	}
 
 	return nil, fmt.Errorf("failed to parse RSA private key: %w", err)
+}
+
+func validOCIRegion(region string) bool {
+	if len(region) == 0 || len(region) > 63 || region[0] == '-' || region[len(region)-1] == '-' {
+		return false
+	}
+	for _, char := range region {
+		if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 // NewOCIClient 从 OCIConfig 实例化客户端 (私钥与认证凭据直接从配置内容读取)
@@ -171,6 +196,10 @@ func NewOCIClient(ctx context.Context, cfg config.OCIConfig) (*OCIClient, error)
 	if region == "" {
 		region = defaultRegion
 	}
+	region = strings.ToLower(region)
+	if !validOCIRegion(region) {
+		return nil, fmt.Errorf("无效的 OCI region %q：只允许字母、数字和连字符", region)
+	}
 	if compartmentID == "" && tenancyOCID != "" {
 		compartmentID = tenancyOCID
 	}
@@ -185,7 +214,12 @@ func NewOCIClient(ctx context.Context, cfg config.OCIConfig) (*OCIClient, error)
 		compartmentID: compartmentID,
 		fingerprint:   fp,
 		privateKey:    privKey,
-		httpClient:    &http.Client{Timeout: 45 * time.Second},
+		httpClient: &http.Client{
+			Timeout: 45 * time.Second,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}, nil
 }
 
@@ -290,12 +324,79 @@ func (c *OCIClient) Do(ctx context.Context, method, urlStr string, bodyData any)
 	if err != nil {
 		return nil, nil, fmt.Errorf("http request [%s %s] failed: %w", method, urlStr, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
-	respBytes, err := io.ReadAll(resp.Body)
+	respBytes, err := readLimitedBody(resp.Body, maxOCIResponseBytes)
 	if err != nil {
 		return resp, nil, fmt.Errorf("read response body error: %w", err)
 	}
 
 	return resp, respBytes, nil
+}
+
+func readLimitedBody(body io.Reader, maxBytes int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read response body: %w", err)
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("response body exceeded %d byte limit", maxBytes)
+	}
+	return data, nil
+}
+
+func summarizeOCIResponse(body []byte) string {
+	const maxSummaryRunes = 4000
+	text := strings.TrimSpace(string(body))
+	runes := []rune(text)
+	if len(runes) > maxSummaryRunes {
+		return string(runes[:maxSummaryRunes]) + "…(已截断)"
+	}
+	return text
+}
+
+func listOCIResources[T any](ctx context.Context, client *OCIClient, endpoint string) ([]T, error) {
+	pageURL := endpoint
+	seenPages := make(map[string]struct{})
+	var all []T
+	var totalBytes int64
+	for page := 0; page < 1000; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		resp, body, err := client.Do(ctx, http.MethodGet, pageURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("OCI list request failed: %w", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("OCI list request returned HTTP %d: %s", resp.StatusCode, summarizeOCIResponse(body))
+		}
+		totalBytes += int64(len(body))
+		if totalBytes > maxOCIPaginatedBytes {
+			return nil, fmt.Errorf("OCI list response exceeded %d byte aggregate limit", maxOCIPaginatedBytes)
+		}
+		var items []T
+		if err := json.Unmarshal(body, &items); err != nil {
+			return nil, fmt.Errorf("decode OCI list response: %w", err)
+		}
+		all = append(all, items...)
+
+		next := strings.TrimSpace(resp.Header.Get("opc-next-page"))
+		if next == "" {
+			return all, nil
+		}
+		if _, exists := seenPages[next]; exists {
+			return nil, fmt.Errorf("OCI list response repeated a pagination token")
+		}
+		seenPages[next] = struct{}{}
+		parsed, err := url.Parse(endpoint)
+		if err != nil {
+			return nil, err
+		}
+		query := parsed.Query()
+		query.Set("page", next)
+		parsed.RawQuery = query.Encode()
+		pageURL = parsed.String()
+	}
+	return nil, fmt.Errorf("OCI list exceeded 1000 pages")
 }

@@ -23,7 +23,18 @@ type Hands interface {
 	Execute(ctx context.Context, name string, rawArgs json.RawMessage) (*core.ToolResult, error)
 }
 
-// Worker DSH 隔离沙箱工作者接口 (异构自驱执行单元)
+// GuestToolAllowed is the single allowlist used both when exposing tools to a
+// guest model and when enforcing tool execution at the registry boundary.
+func GuestToolAllowed(name string) bool {
+	switch name {
+	case "render_card", "get_system_status", "manage_memory", "search_web", "read_link", "screenshot_web", "search_nix_package", "express_face":
+		return true
+	default:
+		return false
+	}
+}
+
+// Worker 异构任务执行单元接口；具体隔离能力取决于实现。
 type Worker interface {
 	Name() string
 	Description() string

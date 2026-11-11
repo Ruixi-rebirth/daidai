@@ -9,14 +9,19 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"daidai/internal/core"
 )
 
 const (
-	tokenURL   = "https://bots.qq.com/app/getAppAccessToken"
-	apiBaseURL = "https://api.sgroup.qq.com"
+	tokenURL            = "https://bots.qq.com/app/getAppAccessToken"
+	apiBaseURL          = "https://api.sgroup.qq.com"
+	maxAPIResponseBytes = 1 << 20
+	maxQQMediaBytes     = core.MaxImageBytes
 )
 
 // Client 负责与 QQ 开放平台 OpenAPI 进行鉴权和 REST API 通信
@@ -56,7 +61,7 @@ func (c *Client) notifySent(respBytes []byte, content string) {
 		slog.Info("qq: 成功登记出站消息 ID", "id", res.ID)
 		fn(res.ID, content)
 	} else {
-		slog.Warn("qq: 发送成功但响应未解析出 id", "raw", string(respBytes))
+		slog.Warn("qq: 发送成功但响应未解析出 id", "raw", summarizeAPIResponse(respBytes))
 	}
 }
 
@@ -69,18 +74,25 @@ func NewClient(appID, secret string) *Client {
 		secret: secret,
 		httpClient: &http.Client{
 			Timeout: 20 * time.Second,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 		msgSeq: initSeq,
 	}
 }
 
 func (c *Client) nextSeq() uint32 {
-	seq := atomic.AddUint32(&c.msgSeq, 1)
-	if seq == 0 || seq > 10000000 {
-		atomic.StoreUint32(&c.msgSeq, 100000)
-		seq = 100000
+	for {
+		current := atomic.LoadUint32(&c.msgSeq)
+		next := current + 1
+		if next == 0 || next > 10000000 {
+			next = 100000
+		}
+		if atomic.CompareAndSwapUint32(&c.msgSeq, current, next) {
+			return next
+		}
 	}
-	return seq
 }
 
 // StartTokenRefresher 启动后台周期性检查并刷新 AccessToken 的协程
@@ -102,7 +114,7 @@ func (c *Client) StartTokenRefresher(ctx context.Context) error {
 				exp := c.expiresAt
 				c.mu.RUnlock()
 
-				if time.Now().After(exp) {
+				if time.Until(exp) <= 2*time.Minute {
 					if err := c.refreshToken(ctx); err != nil {
 						slog.Error("failed to refresh qq access token", "err", err)
 					}
@@ -114,11 +126,19 @@ func (c *Client) StartTokenRefresher(ctx context.Context) error {
 }
 
 func (c *Client) refreshToken(ctx context.Context) error {
+	return c.refreshTokenForRejectedToken(ctx, "")
+}
+
+func (c *Client) refreshTokenForRejectedToken(ctx context.Context, rejectedToken string) error {
 	c.refreshMu.Lock()
 	defer c.refreshMu.Unlock()
 
 	c.mu.RLock()
-	if time.Until(c.expiresAt) > 2*time.Minute && c.accessToken != "" {
+	if rejectedToken != "" && c.accessToken != rejectedToken && c.accessToken != "" {
+		c.mu.RUnlock()
+		return nil
+	}
+	if rejectedToken == "" && time.Until(c.expiresAt) > 2*time.Minute && c.accessToken != "" {
 		c.mu.RUnlock()
 		return nil
 	}
@@ -139,19 +159,26 @@ func (c *Client) refreshToken(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("token request returned status %d: %s", resp.StatusCode, string(body))
+		body, _ := readBoundedAPIResponse(resp.Body)
+		return fmt.Errorf("token request returned status %d: %s", resp.StatusCode, summarizeAPIResponse(body))
 	}
 
 	var res struct {
 		AccessToken string `json:"access_token"`
 		ExpiresIn   any    `json:"expires_in"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+	body, err := readBoundedAPIResponse(resp.Body)
+	if err != nil {
 		return err
+	}
+	if err := json.Unmarshal(body, &res); err != nil {
+		return err
+	}
+	if strings.TrimSpace(res.AccessToken) == "" {
+		return fmt.Errorf("token response did not contain an access_token")
 	}
 
 	expiresSec := 7200
@@ -191,6 +218,12 @@ func (c *Client) Token() string {
 
 // UploadMedia 上传富媒体文件至 QQ 开放平台并换取 file_info 凭据
 func (c *Client) UploadMedia(ctx context.Context, targetType, targetID string, fileType int, data []byte) (string, error) {
+	if len(data) == 0 {
+		return "", fmt.Errorf("upload media failed: image data is empty")
+	}
+	if len(data) > maxQQMediaBytes {
+		return "", fmt.Errorf("upload media failed: image exceeds %d byte limit", maxQQMediaBytes)
+	}
 	url := fmt.Sprintf("%s/v2/%s/%s/files", apiBaseURL, targetType, targetID)
 	payload := map[string]any{
 		"file_type":    fileType,
@@ -211,18 +244,18 @@ func (c *Client) UploadMedia(ctx context.Context, targetType, targetID string, f
 		return "", fmt.Errorf("failed to parse media upload response: %w", err)
 	}
 	if res.FileInfo == "" {
-		return "", fmt.Errorf("upload media returned empty file_info: %s", string(respBytes))
+		return "", fmt.Errorf("upload media returned empty file_info: %s", summarizeAPIResponse(respBytes))
 	}
 
 	return res.FileInfo, nil
 }
 
-// SendGroupMessage 发送 QQ 群聊消息 (优先采用 msg_type: 2 Markdown 格式，失败则平滑降级为 msg_type: 0 纯文本)
+// SendGroupMessage 发送 QQ 群聊 Markdown 消息。
 func (c *Client) SendGroupMessage(ctx context.Context, groupOpenID string, content string, msgID string) error {
 	return c.sendMessage(ctx, "groups", groupOpenID, content, msgID)
 }
 
-// SendC2CMessage 发送 QQ 私聊消息 (优先采用 msg_type: 2 Markdown 格式，失败则平滑降级为 msg_type: 0 纯文本)
+// SendC2CMessage 发送 QQ 私聊 Markdown 消息。
 func (c *Client) SendC2CMessage(ctx context.Context, userOpenID string, content string, msgID string) error {
 	return c.sendMessage(ctx, "users", userOpenID, content, msgID)
 }
@@ -241,28 +274,12 @@ func (c *Client) sendMessage(ctx context.Context, targetType, targetID, content,
 		mdPayload["msg_id"] = msgID
 	}
 
-	resp, err := c.postJSONWithFallback(ctx, url, mdPayload, "msg_id")
+	resp, err := c.doPostJSON(ctx, url, mdPayload)
 	if err == nil {
 		c.notifySent(resp, content)
 		return nil
 	}
-
-	slog.Warn("qq api markdown 消息发送失败，自动降级为普通文本格式", "targetType", targetType, "err", err)
-
-	textPayload := map[string]any{
-		"content":  content,
-		"msg_type": 0,
-		"msg_seq":  c.nextSeq(),
-	}
-	if msgID != "" {
-		textPayload["msg_id"] = msgID
-	}
-
-	resp, err = c.postJSONWithFallback(ctx, url, textPayload, "msg_id")
-	if err == nil {
-		c.notifySent(resp, content)
-	}
-	return err
+	return fmt.Errorf("send QQ markdown message: %w", err)
 }
 
 // SendGroupMediaMessage 发送 QQ 群聊富媒体消息
@@ -284,46 +301,25 @@ func (c *Client) sendMediaMessage(ctx context.Context, targetType, targetID, con
 	url := fmt.Sprintf("%s/v2/%s/%s/messages", apiBaseURL, targetType, targetID)
 	payload := map[string]any{
 		"msg_type": 7,
+		// QQ v2 在富媒体消息中仍要求 content 字段，即使消息没有文字。
+		"content": content,
 		"media": map[string]string{
 			"file_info": fileInfo,
 		},
 		"msg_seq": c.nextSeq(),
 	}
-	if content != "" {
-		payload["content"] = content
+	if content == "" {
+		payload["content"] = " "
 	}
 	if msgID != "" {
 		payload["msg_id"] = msgID
 	}
 
-	resp, err := c.postJSONWithFallback(ctx, url, payload, "msg_id")
+	resp, err := c.doPostJSON(ctx, url, payload)
 	if err == nil {
 		c.notifySent(resp, content)
 	}
 	return err
-}
-
-func (c *Client) postJSONWithFallback(ctx context.Context, url string, payload map[string]any, fallbackKey string) ([]byte, error) {
-	respBytes, err := c.doPostJSON(ctx, url, payload)
-	if err != nil && fallbackKey != "" {
-		if _, hasKey := payload[fallbackKey]; hasKey {
-			slog.Warn("qq api 被动消息发送失败，尝试降级为主动消息重发", "url", url, "err", err)
-			fallbackPayload := make(map[string]any, len(payload))
-			for k, v := range payload {
-				if k != fallbackKey {
-					fallbackPayload[k] = v
-				}
-			}
-			fallbackPayload["msg_seq"] = c.nextSeq()
-			var retryErr error
-			respBytes, retryErr = c.doPostJSON(ctx, url, fallbackPayload)
-			if retryErr == nil {
-				slog.Info("qq api 降级主动消息重发成功", "url", url)
-				return respBytes, nil
-			}
-		}
-	}
-	return respBytes, err
 }
 
 func (c *Client) doPostJSON(ctx context.Context, url string, data any) ([]byte, error) {
@@ -337,44 +333,71 @@ func (c *Client) doPostJSON(ctx context.Context, url string, data any) ([]byte, 
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "QQBot "+c.Token())
+	usedToken := c.Token()
+	req.Header.Set("Authorization", "QQBot "+usedToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
-	respBytes, err := io.ReadAll(resp.Body)
+	respBytes, err := readBoundedAPIResponse(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		slog.Warn("qq api 返回 401 未授权，尝试即时刷新 token 并重发请求...", "url", url)
-		if refErr := c.refreshToken(ctx); refErr == nil {
+		if refErr := c.refreshTokenForRejectedToken(ctx, usedToken); refErr == nil {
 			retryReq, rErr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-			if rErr == nil {
-				retryReq.Header.Set("Content-Type", "application/json")
-				retryReq.Header.Set("Authorization", "QQBot "+c.Token())
-				retryResp, doErr := c.httpClient.Do(retryReq)
-				if doErr == nil {
-					defer retryResp.Body.Close()
-					retryBytes, _ := io.ReadAll(retryResp.Body)
-					if retryResp.StatusCode >= 200 && retryResp.StatusCode < 300 {
-						slog.Info("qq api 401 刷新 token 后重发成功", "url", url)
-						return retryBytes, nil
-					}
-					respBytes = retryBytes
-					resp.StatusCode = retryResp.StatusCode
-				}
+			if rErr != nil {
+				return nil, rErr
 			}
+			retryReq.Header.Set("Content-Type", "application/json")
+			retryReq.Header.Set("Authorization", "QQBot "+c.Token())
+			retryResp, doErr := c.httpClient.Do(retryReq)
+			if doErr != nil {
+				return nil, doErr
+			}
+			defer func() { _ = retryResp.Body.Close() }()
+			retryBytes, readErr := readBoundedAPIResponse(retryResp.Body)
+			if readErr != nil {
+				return nil, readErr
+			}
+			if retryResp.StatusCode >= 200 && retryResp.StatusCode < 300 {
+				slog.Info("qq api 401 刷新 token 后重发成功", "url", url)
+				return retryBytes, nil
+			}
+			respBytes = retryBytes
+			resp.StatusCode = retryResp.StatusCode
+		} else {
+			return nil, fmt.Errorf("refresh QQ token after 401: %w", refErr)
 		}
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return respBytes, fmt.Errorf("api request failed [status=%d]: %s", resp.StatusCode, string(respBytes))
+		return respBytes, fmt.Errorf("api request failed [status=%d]: %s", resp.StatusCode, summarizeAPIResponse(respBytes))
 	}
 
 	return respBytes, nil
+}
+
+func readBoundedAPIResponse(body io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, maxAPIResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxAPIResponseBytes {
+		return nil, fmt.Errorf("QQ API 响应超过 %d 字节上限", maxAPIResponseBytes)
+	}
+	return data, nil
+}
+
+func summarizeAPIResponse(data []byte) string {
+	text := strings.TrimSpace(string(data))
+	if runes := []rune(text); len(runes) > 4000 {
+		return string(runes[:4000]) + "..."
+	}
+	return text
 }

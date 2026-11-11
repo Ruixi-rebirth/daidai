@@ -13,6 +13,12 @@ import (
 	"daidai/internal/entity"
 )
 
+const (
+	maxToolCallsPerThink   = 8
+	maxToolArgumentsBytes  = 64 << 10
+	maxAssistantReplyRunes = 5000
+)
+
 // Cortex 具体双轨认知大脑实现 (实现 entity.Cognition)
 type Cortex struct {
 	llm          core.LLMProvider
@@ -75,7 +81,7 @@ func (c *Cortex) ModelList() string {
 	if c.hands == nil {
 		return c.MindStatus()
 	}
-	res, err := c.hands.Execute(context.Background(), "switch_model", json.RawMessage(`{"action":"list"}`))
+	res, err := c.hands.Execute(entity.WithSystemToolAccess(context.Background()), "switch_model", json.RawMessage(`{"action":"list"}`))
 	if err != nil || res == nil || res.Text == "" {
 		return c.MindStatus()
 	}
@@ -87,7 +93,7 @@ func (c *Cortex) ModelUsage() string {
 	if c.hands == nil {
 		return c.MindStatus()
 	}
-	res, err := c.hands.Execute(context.Background(), "switch_model", json.RawMessage(`{"action":"usage"}`))
+	res, err := c.hands.Execute(entity.WithSystemToolAccess(context.Background()), "switch_model", json.RawMessage(`{"action":"usage"}`))
 	if err != nil || res == nil || res.Text == "" {
 		return c.ModelList()
 	}
@@ -96,6 +102,15 @@ func (c *Cortex) ModelUsage() string {
 
 // Think 对感知事件进行认知推理并一次性合成全息生命表达体 (Utterance)
 func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity.Utterance, error) {
+	if event == nil {
+		return nil, fmt.Errorf("cortex cannot process a nil sensory event")
+	}
+	if c.llm == nil {
+		return nil, fmt.Errorf("cortex has no language model provider")
+	}
+	event.Content = core.TruncateRunes(event.Content, core.MaxUserMessageRunes, "\n[消息过长，后续内容已截断]")
+	event.VisionSummary = core.TruncateRunes(event.VisionSummary, core.MaxVisionSummaryRunes, "\n[视觉摘要过长，后续内容已截断]")
+
 	// 注入角色设定、现实时空锚点与长期记忆沉淀
 	now := time.Now()
 	weekdayCn := [...]string{"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"}[now.Weekday()]
@@ -107,9 +122,11 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 	}
 
 	if c.workspaces != nil && event != nil && event.Role != entity.RoleGuest {
-		wsPath, wsName := c.workspaces.GetCurrent(event.ChannelID)
-		if c.workspaces.IsSandbox(wsPath) {
-			timeContext += fmt.Sprintf("【当前工作空间】：%s (沙盒)\n", wsPath)
+		wsPath, wsName, wsErr := c.workspaces.GetCurrentChecked(event.ChannelID)
+		if wsErr != nil {
+			timeContext += "【当前工作空间】：读取失败；不要假设工作目录，工程工单会被拒绝直到状态恢复。\n"
+		} else if c.workspaces.IsSandbox(wsPath) {
+			timeContext += fmt.Sprintf("【当前工作空间】：%s (默认工作区)\n", wsPath)
 		} else {
 			timeContext += fmt.Sprintf("【当前工作空间】：%s (工程: %s)\n", wsPath, wsName)
 		}
@@ -147,7 +164,12 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 
 	// 若物理通道携带了引用的上下文消息，按原生 Markdown 引用块语义呈现
 	if event.ReplyContext != nil && event.ReplyContext.Content != "" {
-		quoted := "> " + strings.ReplaceAll(strings.TrimSpace(event.ReplyContext.Content), "\n", "\n> ")
+		quotedContent := strings.TrimSpace(event.ReplyContext.Content)
+		if entity.IsSensitiveAuthCommand(quotedContent) {
+			quotedContent = "[OAuth authorization code redacted]"
+		}
+		quotedContent = core.TruncateRunes(quotedContent, core.MaxQuotedMessageRunes, "\n[引用消息过长，后续内容已截断]")
+		quoted := "> " + strings.ReplaceAll(quotedContent, "\n", "\n> ")
 		userContent = quoted + "\n\n" + event.Content
 	}
 
@@ -161,6 +183,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 		}
 		if len(imgURLs) > 0 {
 			if caption, vErr := c.vision.Describe(ctx, imgURLs, event.Content); vErr == nil && caption != "" {
+				caption = core.TruncateRunes(caption, core.MaxVisionSummaryRunes, "\n[视觉摘要过长，后续内容已截断]")
 				event.VisionSummary = caption
 				userContent += fmt.Sprintf("\n【多模态视觉观察：%s】", caption)
 			} else if vErr != nil {
@@ -192,16 +215,13 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 		Content: userContent,
 	})
 
-	readOnly := event.Role == entity.RoleGuest
+	readOnly := event.Role != entity.RolePartner && event.Role != entity.RoleCollaborator
 	var toolDefs []core.ToolDefinition
 	if c.hands != nil {
 		allDefs := c.hands.Definitions()
 		if readOnly {
 			for _, td := range allDefs {
-				switch td.Function.Name {
-				case "delegate_ticket", "switch_model", "switch_workspace", "generate_image":
-					continue
-				default:
+				if entity.GuestToolAllowed(td.Function.Name) {
 					toolDefs = append(toolDefs, td)
 				}
 			}
@@ -212,10 +232,15 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 	toolCtx := entity.WithSensoryEvent(ctx, event)
 	var lastToolText string
 	var directCardData []byte
+	linkToolCalls := 0
+	toolCallsUsed := 0
 
 	// 单次心智推理与多轮工具调用循环
 	for round := 0; round < 4; round++ {
 		activeTools := toolDefs
+		if toolCallsUsed >= maxToolCallsPerThink {
+			activeTools = nil
+		}
 		if len(directCardData) > 0 {
 			// 已生成待发送图像，本轮仅需模型给出一句自然配文，不再重复触发工具
 			activeTools = nil
@@ -229,10 +254,26 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 		if err != nil {
 			return nil, fmt.Errorf("cortex reasoning failed: %w", err)
 		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if resp == nil {
+			return nil, fmt.Errorf("cortex reasoning failed: model returned an empty response")
+		}
+		if len(resp.ToolCalls) > maxToolCallsPerThink {
+			return nil, fmt.Errorf("cortex reasoning failed: model returned %d tool calls; limit is %d", len(resp.ToolCalls), maxToolCallsPerThink)
+		}
+		if err := validateToolCalls(resp.ToolCalls); err != nil {
+			return nil, fmt.Errorf("cortex reasoning failed: invalid model tool calls: %w", err)
+		}
 
 		// 若未触发任何 Tool 调用，组装文本与（可能存在的）图像一并发送
 		if len(resp.ToolCalls) == 0 {
 			cleanText := sanitizeAssistantSpoken(resp.Content)
+			cleanText = core.TruncateRunes(cleanText, maxAssistantReplyRunes, "\n[回复过长，后续内容已截断]")
+			if cleanText == "" && len(directCardData) == 0 {
+				return nil, fmt.Errorf("cortex reasoning failed: model returned neither text nor media")
+			}
 			utterance := &entity.Utterance{
 				Platform:   event.Platform,
 				IsGroup:    event.IsGroup,
@@ -242,30 +283,67 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 				CardData:   directCardData,
 			}
 
-			if c.memory != nil {
-				c.memory.Commit(ctx, event, cleanText)
-			}
 			return utterance, nil
 		}
 
 		messages = append(messages, core.ChatMessage{
 			Role:      core.RoleAssistant,
-			Content:   resp.Content,
+			Content:   core.TruncateRunes(resp.Content, maxAssistantReplyRunes, "\n[模型说明过长，后续内容已截断]"),
 			ToolCalls: resp.ToolCalls,
 		})
 
-		isRenderCard := false
-		linkToolCalls := 0
+		renderCardProducedImage := false
 		for _, tc := range resp.ToolCalls {
-			slog.Info("cortex: 大脑触发工具调用", "name", tc.Function.Name, "args", tc.Function.Arguments)
-			if tc.Function.Name == "render_card" {
-				isRenderCard = true
+			if err := ctx.Err(); err != nil {
+				return nil, err
 			}
-
+			if toolCallsUsed >= maxToolCallsPerThink {
+				lastToolText = fmt.Sprintf("本次认知最多执行 %d 个工具调用，后续调用已跳过。", maxToolCallsPerThink)
+				messages = append(messages, core.ChatMessage{
+					Role:       core.RoleTool,
+					ToolCallID: tc.ID,
+					Name:       tc.Function.Name,
+					Content:    lastToolText,
+				})
+				continue
+			}
+			toolCallsUsed++
+			if len(directCardData) > 0 && toolProducesImage(tc.Function.Name) {
+				lastToolText = "本轮已有待发送图片，额外图片调用已跳过。"
+				messages = append(messages, core.ChatMessage{
+					Role:       core.RoleTool,
+					ToolCallID: tc.ID,
+					Name:       tc.Function.Name,
+					Content:    lastToolText,
+				})
+				continue
+			}
+			slog.Info("cortex: 大脑触发工具调用", "name", tc.Function.Name, "argsBytes", len(tc.Function.Arguments))
+			if len(tc.Function.Arguments) > maxToolArgumentsBytes {
+				lastToolText = fmt.Sprintf("工具 %s 的参数超过 %d 字节上限，调用已拒绝。", tc.Function.Name, maxToolArgumentsBytes)
+				messages = append(messages, core.ChatMessage{
+					Role:       core.RoleTool,
+					ToolCallID: tc.ID,
+					Name:       tc.Function.Name,
+					Content:    lastToolText,
+				})
+				continue
+			}
+			if !toolAvailable(activeTools, tc.Function.Name) {
+				lastToolText = fmt.Sprintf("工具 %s 未在当前推理轮次开放，调用已拒绝。", tc.Function.Name)
+				messages = append(messages, core.ChatMessage{
+					Role:       core.RoleTool,
+					ToolCallID: tc.ID,
+					Name:       tc.Function.Name,
+					Content:    lastToolText,
+				})
+				continue
+			}
 			if tc.Function.Name == "screenshot_web" || tc.Function.Name == "read_link" {
 				linkToolCalls++
 				if linkToolCalls > 2 {
 					slog.Info("cortex: 拦截超限的链接处理调用（单次上限 2 个）", "name", tc.Function.Name)
+					lastToolText = "已达到单次会话链接处理上限，后续链接没有处理。"
 					messages = append(messages, core.ChatMessage{
 						Role:       core.RoleTool,
 						ToolCallID: tc.ID,
@@ -277,30 +355,57 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 			}
 
 			if c.hands == nil {
-				continue
-			}
-
-			toolRes, tErr := c.hands.Execute(toolCtx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
-			if tErr != nil {
+				lastToolText = "工具系统未配置，无法执行工具调用。"
 				messages = append(messages, core.ChatMessage{
 					Role:       core.RoleTool,
 					ToolCallID: tc.ID,
 					Name:       tc.Function.Name,
-					Content:    fmt.Sprintf("工具执行失败: %v", tErr),
+					Content:    "工具系统未配置，无法执行此调用。",
 				})
 				continue
 			}
 
-			if len(toolRes.ImageData) > 0 && len(directCardData) == 0 {
-				directCardData = toolRes.ImageData
+			toolRes, tErr := c.hands.Execute(toolCtx, tc.Function.Name, json.RawMessage(tc.Function.Arguments))
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if tErr != nil {
+				failureText := safeTruncateOutput(fmt.Sprintf("工具 %s 执行失败：%v", tc.Function.Name, tErr), 4000)
+				lastToolText = failureText
+				messages = append(messages, core.ChatMessage{
+					Role:       core.RoleTool,
+					ToolCallID: tc.ID,
+					Name:       tc.Function.Name,
+					Content:    failureText,
+				})
+				continue
+			}
+			if toolRes == nil {
+				lastToolText = fmt.Sprintf("工具 %s 未返回结果。", tc.Function.Name)
+				messages = append(messages, core.ChatMessage{
+					Role:       core.RoleTool,
+					ToolCallID: tc.ID,
+					Name:       tc.Function.Name,
+					Content:    "工具未返回结果。",
+				})
+				continue
+			}
+
+			if len(toolRes.ImageData) > 0 {
+				if tc.Function.Name == "render_card" {
+					directCardData = toolRes.ImageData
+					renderCardProducedImage = true
+				} else if len(directCardData) == 0 {
+					directCardData = toolRes.ImageData
+				}
 			}
 
 			outText := toolRes.Text
 			if outText == "" {
 				outText = "执行成功"
 			}
-			lastToolText = outText
 			safeOut := safeTruncateOutput(outText, 4000)
+			lastToolText = safeOut
 			messages = append(messages, core.ChatMessage{
 				Role:       core.RoleTool,
 				ToolCallID: tc.ID,
@@ -309,10 +414,10 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 			})
 		}
 
-		// 若是纯 Markdown 排版卡片渲染，卡片即主要产物，直接返回；
-		// 网页截图与出图 (isRenderCard 为 false) 则继续流转到下一轮，由大脑消化提取到的页面标题与正文后输出完整自然总结
-		if len(directCardData) > 0 && isRenderCard {
+		// 只有 render_card 实际生成图片时才直接返回；网页截图或其他图片仍进入下一轮，由大脑结合工具结果组织回复。
+		if len(resp.ToolCalls) == 1 && len(directCardData) > 0 && renderCardProducedImage {
 			cleanText := sanitizeAssistantSpoken(resp.Content)
+			cleanText = core.TruncateRunes(cleanText, maxAssistantReplyRunes, "\n[回复过长，后续内容已截断]")
 			utter := &entity.Utterance{
 				Platform:   event.Platform,
 				IsGroup:    event.IsGroup,
@@ -320,9 +425,6 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 				QuoteMsgID: event.RawMessageID,
 				Text:       cleanText,
 				CardData:   directCardData,
-			}
-			if c.memory != nil {
-				c.memory.Commit(ctx, event, cleanText)
 			}
 			return utter, nil
 		}
@@ -344,11 +446,11 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 
 	finalText := ""
 	if fErr == nil && finalResp != nil && strings.TrimSpace(finalResp.Content) != "" {
-		finalText = sanitizeAssistantSpoken(finalResp.Content)
+		finalText = core.TruncateRunes(sanitizeAssistantSpoken(finalResp.Content), maxAssistantReplyRunes, "\n[回复过长，后续内容已截断]")
 	} else if lastToolText != "" {
 		finalText = sanitizeAssistantSpoken(lastToolText)
 	} else {
-		finalText = "已处理完毕。"
+		finalText = "工具调用没有返回可确认的结果。"
 	}
 
 	utter := &entity.Utterance{
@@ -359,10 +461,52 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 		Text:       finalText,
 		CardData:   directCardData,
 	}
-	if c.memory != nil {
-		c.memory.Commit(ctx, event, utter.Text)
-	}
 	return utter, nil
+}
+
+func toolAvailable(tools []core.ToolDefinition, name string) bool {
+	for _, tool := range tools {
+		if tool.Function.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func toolProducesImage(name string) bool {
+	switch name {
+	case "render_card", "screenshot_web", "generate_image", "express_face":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateToolCalls(calls []core.ToolCall) error {
+	seenIDs := make(map[string]struct{}, len(calls))
+	for i, call := range calls {
+		if strings.TrimSpace(call.ID) == "" {
+			return fmt.Errorf("tool call %d has an empty ID", i)
+		}
+		if _, exists := seenIDs[call.ID]; exists {
+			return fmt.Errorf("tool call ID %q is duplicated", call.ID)
+		}
+		seenIDs[call.ID] = struct{}{}
+		if strings.TrimSpace(call.Function.Name) == "" {
+			return fmt.Errorf("tool call %q has an empty function name", call.ID)
+		}
+		if call.Type != "" && call.Type != "function" {
+			return fmt.Errorf("tool call %q has unsupported type %q", call.ID, call.Type)
+		}
+	}
+	return nil
+}
+
+// CommitDeliveredReply 在发送层确认结果后持久化本轮消息，避免将未送达或未脱敏的回复写入会话历史。
+func (c *Cortex) CommitDeliveredReply(ctx context.Context, event *entity.SensoryEvent, replyText string) {
+	if c.memory != nil {
+		c.memory.Commit(ctx, event, replyText)
+	}
 }
 
 // sanitizeAssistantSpoken 彻底清洗助手发言，剥离任何内部工具调用标记与调试残留

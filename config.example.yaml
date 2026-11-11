@@ -27,7 +27,8 @@ agent:
   max_concurrent: 1
   runners:
     - name: "agy"
-      description: "Google Antigravity 自驱智能体沙箱，具备完整的代码库检索、文件编辑、终端执行与自省反思能力"
+      description: "Google Antigravity 工程执行器，可在所选工作目录中检索代码、编辑文件并运行命令；不提供操作系统级隔离"
+      # 此命令也供 AGY 模型、OAuth、视觉、网页检索和生图工具共用。
       command: "agy"
       default_dir: "data/workspace/sandbox"
 

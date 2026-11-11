@@ -8,12 +8,16 @@ import (
 	"strings"
 	"testing"
 
+	"daidai/assets"
 	"daidai/internal/entity"
 )
 
 func TestFaceTool_HitCache(t *testing.T) {
 	tmpDir := t.TempDir()
-	dummyBytes := []byte("fake-png-data")
+	dummyBytes, err := assets.SmallFaces.ReadFile(filepath.Join("daidai_faces_small", "开心.png"))
+	if err != nil {
+		t.Fatalf("failed to read bundled test face: %v", err)
+	}
 	testFacePath := filepath.Join(tmpDir, "开心.png")
 	if err := os.WriteFile(testFacePath, dummyBytes, 0644); err != nil {
 		t.Fatalf("failed to write test face: %v", err)

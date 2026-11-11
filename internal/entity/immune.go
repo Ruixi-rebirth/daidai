@@ -41,6 +41,7 @@ func (im *ImmuneSystem) AddCollaborator(userID string) {
 
 // ResolveRole 评估感知事件发起人的角色权限
 func (im *ImmuneSystem) ResolveRole(senderID string) UserRole {
+	senderID = strings.TrimSpace(senderID)
 	im.mu.RLock()
 	defer im.mu.RUnlock()
 

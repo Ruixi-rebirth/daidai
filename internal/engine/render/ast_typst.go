@@ -3,8 +3,6 @@ package render
 import (
 	"bytes"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"unicode"
 
@@ -15,12 +13,70 @@ import (
 
 func parseTableRow(line string) []string {
 	trimmed := strings.TrimSpace(line)
-	trimmed = strings.TrimPrefix(trimmed, "|")
-	trimmed = strings.TrimSuffix(trimmed, "|")
-	parts := strings.Split(trimmed, "|")
-	cells := make([]string, len(parts))
-	for i, p := range parts {
-		cells[i] = strings.TrimSpace(p)
+	var cells []string
+	var cell strings.Builder
+	codeTicks := 0
+	lastWasSeparator := false
+
+	for i := 0; i < len(trimmed); {
+		if trimmed[i] == '`' {
+			end := i + 1
+			for end < len(trimmed) && trimmed[end] == '`' {
+				end++
+			}
+			tickCount := end - i
+			switch codeTicks {
+			case 0:
+				codeTicks = tickCount
+			case tickCount:
+				codeTicks = 0
+			}
+			cell.WriteString(trimmed[i:end])
+			i = end
+			lastWasSeparator = false
+			continue
+		}
+
+		if trimmed[i] == '\\' && codeTicks == 0 {
+			end := i + 1
+			for end < len(trimmed) && trimmed[end] == '\\' {
+				end++
+			}
+			backslashes := end - i
+			if end < len(trimmed) && trimmed[end] == '|' && backslashes%2 == 1 {
+				cell.WriteString(strings.Repeat("\\", backslashes/2))
+				cell.WriteByte('|')
+				i = end + 1
+				lastWasSeparator = false
+				continue
+			}
+			if end < len(trimmed) && trimmed[end] == '|' {
+				cell.WriteString(strings.Repeat("\\", backslashes/2))
+			} else {
+				cell.WriteString(trimmed[i:end])
+			}
+			i = end
+			lastWasSeparator = false
+			continue
+		}
+
+		if trimmed[i] == '|' && codeTicks == 0 {
+			// Ignore an optional leading border pipe while preserving empty inner cells.
+			if i != 0 || len(cells) != 0 || cell.Len() != 0 {
+				cells = append(cells, strings.TrimSpace(cell.String()))
+				cell.Reset()
+			}
+			i++
+			lastWasSeparator = true
+			continue
+		}
+
+		cell.WriteByte(trimmed[i])
+		lastWasSeparator = false
+		i++
+	}
+	if !lastWasSeparator {
+		cells = append(cells, strings.TrimSpace(cell.String()))
 	}
 	return cells
 }
@@ -56,9 +112,9 @@ func tryRenderMarkdownTable(node *ast.Paragraph, source []byte, buf *bytes.Buffe
 	if cols == 0 {
 		return false
 	}
-	buf.WriteString(fmt.Sprintf("#table(columns: %d, stroke: 0.6pt + rgb(\"#d0d7de\"), inset: 8pt,\n", cols))
+	fmt.Fprintf(buf, "#table(columns: %d, stroke: 0.6pt + rgb(\"#d0d7de\"), inset: 8pt,\n", cols)
 	for _, h := range headers {
-		buf.WriteString(fmt.Sprintf("  table.cell(fill: rgb(\"#f6f8fa\"))[#strong[#%s]],\n", typstQuote(h)))
+		fmt.Fprintf(buf, "  table.cell(fill: rgb(\"#f6f8fa\"))[#strong[#%s]],\n", typstQuote(h))
 	}
 	for _, rowLine := range rawLines[2:] {
 		if !strings.Contains(rowLine, "|") {
@@ -70,7 +126,7 @@ func tryRenderMarkdownTable(node *ast.Paragraph, source []byte, buf *bytes.Buffe
 			if i < len(cells) {
 				val = cells[i]
 			}
-			buf.WriteString(fmt.Sprintf("  [#%s],\n", typstQuote(val)))
+			fmt.Fprintf(buf, "  [#%s],\n", typstQuote(val))
 		}
 	}
 	buf.WriteString(")\n\n")
@@ -165,7 +221,7 @@ func MarkdownToTypst(source []byte) string {
 			if entering {
 				info := ""
 				if node.Info != nil {
-					info = strings.TrimSpace(string(node.Info.Text(source)))
+					info = strings.TrimSpace(string(node.Info.Value(source)))
 				}
 				var codeBuf bytes.Buffer
 				lines := node.Lines()
@@ -175,9 +231,9 @@ func MarkdownToTypst(source []byte) string {
 				}
 				codeText := strings.TrimRight(codeBuf.String(), "\r\n")
 				if info != "" {
-					buf.WriteString(fmt.Sprintf("#raw(block: true, lang: %s, %s)\n\n", typstQuote(info), typstQuote(codeText)))
+					fmt.Fprintf(&buf, "#raw(block: true, lang: %s, %s)\n\n", typstQuote(info), typstQuote(codeText))
 				} else {
-					buf.WriteString(fmt.Sprintf("#raw(block: true, %s)\n\n", typstQuote(codeText)))
+					fmt.Fprintf(&buf, "#raw(block: true, %s)\n\n", typstQuote(codeText))
 				}
 				return ast.WalkSkipChildren, nil
 			}
@@ -191,7 +247,7 @@ func MarkdownToTypst(source []byte) string {
 					codeBuf.Write(line.Value(source))
 				}
 				codeText := strings.TrimRight(codeBuf.String(), "\r\n")
-				buf.WriteString(fmt.Sprintf("#raw(block: true, %s)\n\n", typstQuote(codeText)))
+				fmt.Fprintf(&buf, "#raw(block: true, %s)\n\n", typstQuote(codeText))
 				return ast.WalkSkipChildren, nil
 			}
 
@@ -203,7 +259,7 @@ func MarkdownToTypst(source []byte) string {
 						spanBuf.Write(t.Segment.Value(source))
 					}
 				}
-				buf.WriteString(fmt.Sprintf("#raw(block: false, %s)", typstQuote(spanBuf.String())))
+				fmt.Fprintf(&buf, "#raw(block: false, %s)", typstQuote(spanBuf.String()))
 				return ast.WalkSkipChildren, nil
 			}
 
@@ -241,15 +297,6 @@ func MarkdownToTypst(source []byte) string {
 
 		case *ast.Image:
 			if entering {
-				dest := strings.TrimSpace(string(node.Destination))
-				if dest != "" {
-					if absPath, err := filepath.Abs(dest); err == nil {
-						if info, statErr := os.Stat(absPath); statErr == nil && !info.IsDir() {
-							buf.WriteString(fmt.Sprintf("#image(%s, width: 100%%)", typstQuote(absPath)))
-							return ast.WalkSkipChildren, nil
-						}
-					}
-				}
 				var altBuf bytes.Buffer
 				for c := node.FirstChild(); c != nil; c = c.NextSibling() {
 					if t, ok := c.(*ast.Text); ok {
@@ -258,7 +305,7 @@ func MarkdownToTypst(source []byte) string {
 				}
 				alt := strings.TrimSpace(altBuf.String())
 				if alt == "" {
-					alt = dest
+					alt = "图片"
 				}
 				buf.WriteString("#" + typstQuote("[图片: "+alt+"]"))
 				return ast.WalkSkipChildren, nil
@@ -267,7 +314,7 @@ func MarkdownToTypst(source []byte) string {
 		case *ast.Link:
 			if entering {
 				dest := string(node.Destination)
-				buf.WriteString(fmt.Sprintf("#link(%s)[", typstQuote(dest)))
+				fmt.Fprintf(&buf, "#link(%s)[", typstQuote(dest))
 			} else {
 				buf.WriteString("]")
 			}
@@ -276,7 +323,7 @@ func MarkdownToTypst(source []byte) string {
 			if entering {
 				url := string(node.URL(source))
 				label := string(node.Label(source))
-				buf.WriteString(fmt.Sprintf("#link(%s)[#%s]", typstQuote(url), typstQuote(label)))
+				fmt.Fprintf(&buf, "#link(%s)[#%s]", typstQuote(url), typstQuote(label))
 			}
 
 		case *ast.Text:

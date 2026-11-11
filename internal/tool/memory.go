@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"daidai/internal/core"
 	"daidai/internal/db"
@@ -30,7 +31,7 @@ func (t *MemoryTool) Name() string {
 }
 
 func (t *MemoryTool) Description() string {
-	return "管理关于当前用户的长期记忆事实：支持新增（add）、更新（update）、删除（delete）、检索（search）或列出全部记忆（list）。"
+	return "管理当前会话可见的长期记忆：私聊维护全局事实，群聊维护本群事实，并可检索或列出当前可见事实。"
 }
 
 func (t *MemoryTool) Parameters() map[string]any {
@@ -40,7 +41,7 @@ func (t *MemoryTool) Parameters() map[string]any {
 			"action": map[string]any{
 				"type":        "string",
 				"enum":        []string{"add", "update", "delete", "search", "list"},
-				"description": "操作类型：add（新增事实）、update（按 fact_id 更新既有事实）、delete（按 fact_id 删除既有事实）、search（按 query 检索历史事实）、list（列出该用户全部生效事实）",
+				"description": "操作类型：add（新增当前范围事实）、update（按 fact_id 更新当前范围事实）、delete（按 fact_id 删除当前范围事实）、search（检索当前可见事实和会话历史）、list（列出当前会话可见事实）",
 			},
 			"fact": map[string]any{
 				"type":        "string",
@@ -79,29 +80,45 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 
 	action := strings.ToUpper(strings.TrimSpace(args.Action))
 	factText := strings.TrimSpace(args.Fact)
+	scopeType, scopeID := memoryScope(event)
 
 	switch action {
 	case "ADD":
 		if factText == "" {
 			return &core.ToolResult{Text: "参数错误：add 操作必须提供非空的 fact 内容。"}, nil
 		}
+		if utf8.RuneCountInString(factText) > core.MaxFactContentRunes {
+			return &core.ToolResult{Text: fmt.Sprintf("参数错误：fact 内容不能超过 %d 个字符。", core.MaxFactContentRunes)}, nil
+		}
 		factVec := memory.EmbedText(ctx, factText)
-		if existing, err := t.db.ListActiveFacts(ctx, event.Platform, event.SenderID); err == nil {
-			for _, f := range existing {
-				if f.Content == factText {
-					return &core.ToolResult{Text: fmt.Sprintf("该记忆已存在 [ID: %d]：%s", f.ID, f.Content)}, nil
-				}
-				if memory.LexicalOverlap(factText, f.Content) >= 0.78 ||
-					(len(factVec) > 0 && len(f.Embedding) > 0 && memory.CosineSimilarity(factVec, f.Embedding) >= 0.88) {
-					_ = t.db.ApplyFactMutations(ctx, event.Platform, event.SenderID, []db.FactMutation{
-						{Action: "UPDATE", FactID: f.ID, Fact: factText, Quote: event.Content, Embedding: factVec},
-					})
-					return &core.ToolResult{Text: fmt.Sprintf("已合并更新近似记忆 [ID: %d] 为：%s", f.ID, factText)}, nil
-				}
+		existing, err := t.db.ListVisibleFacts(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup)
+		if err != nil {
+			return nil, fmt.Errorf("读取长期记忆失败: %w", err)
+		}
+		for _, f := range existing {
+			if !factMatchesScope(f, scopeType, scopeID) {
+				continue
+			}
+			if f.Content == factText {
+				return &core.ToolResult{Text: fmt.Sprintf("该记忆已存在 [ID: %d]：%s", f.ID, f.Content)}, nil
 			}
 		}
-		err := t.db.ApplyFactMutations(ctx, event.Platform, event.SenderID, []db.FactMutation{
-			{Action: "ADD", Fact: factText, Quote: event.Content, Embedding: factVec},
+		for _, f := range existing {
+			if !factMatchesScope(f, scopeType, scopeID) {
+				continue
+			}
+			if memory.LexicalOverlap(factText, f.Content) >= 0.78 ||
+				(len(factVec) > 0 && len(f.Embedding) > 0 && memory.CosineSimilarity(factVec, f.Embedding) >= 0.88) {
+				if err := t.db.ApplyFactMutations(ctx, event.Platform, event.SenderID, []db.FactMutation{
+					{Action: "UPDATE", FactID: f.ID, Fact: factText, ExpectedFact: f.Content, ScopeType: scopeType, ScopeID: scopeID, Quote: event.Content, Embedding: factVec},
+				}); err != nil {
+					return nil, fmt.Errorf("更新近似记忆失败: %w", err)
+				}
+				return &core.ToolResult{Text: fmt.Sprintf("已合并更新近似记忆 [ID: %d] 为：%s", f.ID, factText)}, nil
+			}
+		}
+		err = t.db.ApplyFactMutations(ctx, event.Platform, event.SenderID, []db.FactMutation{
+			{Action: "ADD", Fact: factText, ScopeType: scopeType, ScopeID: scopeID, Quote: event.Content, Embedding: factVec},
 		})
 		if err != nil {
 			return nil, fmt.Errorf("写入长期记忆失败: %w", err)
@@ -112,9 +129,19 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 		if args.FactID <= 0 || factText == "" {
 			return &core.ToolResult{Text: "参数错误：update 操作必须提供有效的 fact_id 与新的 fact 内容。"}, nil
 		}
+		if utf8.RuneCountInString(factText) > core.MaxFactContentRunes {
+			return &core.ToolResult{Text: fmt.Sprintf("参数错误：fact 内容不能超过 %d 个字符。", core.MaxFactContentRunes)}, nil
+		}
+		target, err := t.visibleFact(ctx, event, args.FactID)
+		if err != nil {
+			return nil, err
+		}
+		if !factMatchesScope(target, scopeType, scopeID) {
+			return &core.ToolResult{Text: "群聊中只能更新本群记忆；全局记忆请在私聊中操作。"}, nil
+		}
 		factVec := memory.EmbedText(ctx, factText)
-		err := t.db.ApplyFactMutations(ctx, event.Platform, event.SenderID, []db.FactMutation{
-			{Action: "UPDATE", FactID: args.FactID, Fact: factText, Quote: event.Content, Embedding: factVec},
+		err = t.db.ApplyFactMutations(ctx, event.Platform, event.SenderID, []db.FactMutation{
+			{Action: "UPDATE", FactID: args.FactID, Fact: factText, ExpectedFact: target.Content, ScopeType: target.ScopeType, ScopeID: target.ScopeID, Quote: event.Content, Embedding: factVec},
 		})
 		if err != nil {
 			return &core.ToolResult{Text: fmt.Sprintf("更新记忆失败：%v", err)}, nil
@@ -125,8 +152,15 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 		if args.FactID <= 0 {
 			return &core.ToolResult{Text: "参数错误：delete 操作必须提供有效的 fact_id。"}, nil
 		}
-		err := t.db.ApplyFactMutations(ctx, event.Platform, event.SenderID, []db.FactMutation{
-			{Action: "DELETE", FactID: args.FactID, Quote: event.Content},
+		target, err := t.visibleFact(ctx, event, args.FactID)
+		if err != nil {
+			return nil, err
+		}
+		if !factMatchesScope(target, scopeType, scopeID) {
+			return &core.ToolResult{Text: "群聊中只能删除本群记忆；全局记忆请在私聊中操作。"}, nil
+		}
+		err = t.db.ApplyFactMutations(ctx, event.Platform, event.SenderID, []db.FactMutation{
+			{Action: "DELETE", FactID: args.FactID, ExpectedFact: target.Content, ScopeType: target.ScopeType, ScopeID: target.ScopeID, Quote: event.Content},
 		})
 		if err != nil {
 			return &core.ToolResult{Text: fmt.Sprintf("删除记忆失败：%v", err)}, nil
@@ -134,17 +168,21 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 		return &core.ToolResult{Text: fmt.Sprintf("已忘掉记忆 [ID: %d]", args.FactID)}, nil
 
 	case "LIST", "SEARCH":
-		facts, err := t.db.ListActiveFacts(ctx, event.Platform, event.SenderID)
+		facts, err := t.db.ListVisibleFacts(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup)
 		if err != nil {
 			return nil, fmt.Errorf("读取长期记忆失败: %w", err)
 		}
 		q := strings.TrimSpace(args.Query)
 		if action == "SEARCH" && q != "" {
-			facts = memory.RankFactsByBM25(q, facts, 0.25)
+			facts = memory.RankFactsByBM25(ctx, q, facts, 0.25)
 		}
 		var factLines []string
 		for _, f := range facts {
-			factLines = append(factLines, fmt.Sprintf("- [ID: %d] %s", f.ID, f.Content))
+			label := "全局"
+			if f.ScopeType == "group" {
+				label = "本群"
+			}
+			factLines = append(factLines, fmt.Sprintf("- [ID: %d][%s] %s", f.ID, label, f.Content))
 		}
 
 		var sections []string
@@ -152,23 +190,34 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 			sections = append(sections, fmt.Sprintf("【长期记忆事实 (%d 条)】：\n%s", len(factLines), strings.Join(factLines, "\n")))
 		}
 
-		if action == "SEARCH" && q != "" && event.ChannelID != "" {
-			if msgs, mErr := memory.SearchMessagesByBM25(ctx, t.db, event.Platform, event.ChannelID, q, 10); mErr == nil && len(msgs) > 0 {
-				var msgLines []string
-				for _, m := range msgs {
-					speaker := "用户"
-					if m.IsBot {
-						speaker = "呆呆"
-					} else if m.Name != "" {
-						speaker = m.Name
-					}
-					text := strings.ReplaceAll(strings.TrimSpace(m.Text), "\n", " ")
-					if r := []rune(text); len(r) > 200 {
-						text = string(r[:200]) + "..."
-					}
-					msgLines = append(msgLines, fmt.Sprintf("- [%s %s]: %s", m.CreatedAt.Format("2006-01-02 15:04"), speaker, text))
+		if action == "SEARCH" && q != "" {
+			if event.ChannelID == "" {
+				sections = append(sections, "【历史对话搜索不可用】当前会话缺少会话 ID。")
+			} else {
+				chatType := "private"
+				if event.IsGroup {
+					chatType = "group"
 				}
-				sections = append(sections, fmt.Sprintf("【历史对话原文命中 (%d 条)】：\n%s", len(msgLines), strings.Join(msgLines, "\n")))
+				msgs, mErr := memory.SearchMessagesInChatByBM25(ctx, t.db, event.Platform, chatType, event.ChannelID, q, 10)
+				if mErr != nil {
+					sections = append(sections, fmt.Sprintf("【历史对话搜索失败】%v", mErr))
+				} else if len(msgs) > 0 {
+					var msgLines []string
+					for _, m := range msgs {
+						speaker := "用户"
+						if m.IsBot {
+							speaker = "呆呆"
+						} else if m.Name != "" {
+							speaker = m.Name
+						}
+						text := strings.ReplaceAll(strings.TrimSpace(m.Text), "\n", " ")
+						if r := []rune(text); len(r) > 200 {
+							text = string(r[:200]) + "..."
+						}
+						msgLines = append(msgLines, fmt.Sprintf("- [%s %s]: %s", m.CreatedAt.Format("2006-01-02 15:04"), speaker, text))
+					}
+					sections = append(sections, fmt.Sprintf("【历史对话原文命中 (%d 条)】：\n%s", len(msgLines), strings.Join(msgLines, "\n")))
+				}
 			}
 		}
 
@@ -183,4 +232,38 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 	default:
 		return &core.ToolResult{Text: fmt.Sprintf("未知的记忆操作类型: %s", args.Action)}, nil
 	}
+}
+
+func memoryScope(event *entity.SensoryEvent) (string, string) {
+	if event != nil && event.IsGroup {
+		return "group", strings.TrimSpace(event.ChannelID)
+	}
+	return "global", ""
+}
+
+func factMatchesScope(fact *core.Fact, scopeType, scopeID string) bool {
+	if fact == nil {
+		return false
+	}
+	if fact.ScopeType == "" {
+		return scopeType == "global"
+	}
+	factScopeID := fact.ScopeID
+	if factScopeID == "" {
+		factScopeID = fact.ConvID
+	}
+	return fact.ScopeType == scopeType && factScopeID == scopeID
+}
+
+func (t *MemoryTool) visibleFact(ctx context.Context, event *entity.SensoryEvent, factID int64) (*core.Fact, error) {
+	facts, err := t.db.ListVisibleFacts(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup)
+	if err != nil {
+		return nil, fmt.Errorf("读取长期记忆失败: %w", err)
+	}
+	for _, fact := range facts {
+		if fact.ID == factID {
+			return fact, nil
+		}
+	}
+	return nil, fmt.Errorf("未找到当前会话可见的记忆事实 ID %d", factID)
 }

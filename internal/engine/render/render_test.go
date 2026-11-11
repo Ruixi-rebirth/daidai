@@ -45,12 +45,12 @@ func TestMarkdownToTypst_AST(t *testing.T) {
 		t.Fatalf("expected nested list newline and indentation, got:\n%s", nestedRes)
 	}
 
-	// 验证本地图片渲染不会残留多余的右括号后缀
+	// 不允许 Markdown 图片引用服务器本地文件
 	tmpImg := filepath.Join(t.TempDir(), "sample.png")
 	_ = os.WriteFile(tmpImg, []byte("fake"), 0644)
 	imgRes := MarkdownToTypst([]byte("![示意图](" + tmpImg + ")"))
-	if strings.Contains(imgRes, `#"]"`) || !strings.Contains(imgRes, "#image(") {
-		t.Fatalf("expected clean #image(...) without stray closing bracket, got: %s", imgRes)
+	if strings.Contains(imgRes, "#image(") || !strings.Contains(imgRes, `#"[图片: 示意图]"`) {
+		t.Fatalf("expected local image reference to render as a placeholder, got: %s", imgRes)
 	}
 }
 

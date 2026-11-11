@@ -3,6 +3,7 @@ package entity
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -16,7 +17,32 @@ type WorkerInfo struct {
 	Description string `json:"description"`
 }
 
-// Delegates 抽象工单与多沙箱工作者调度系统 (保持确定性注册顺序与全局并发资源保护)
+func workspaceLeaseKey(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" || filepath.Clean(path) == "." {
+		return ""
+	}
+	return resolvePathThroughExistingParent(path)
+}
+
+func workspacesOverlap(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	a = workspaceLeaseKey(a)
+	b = workspaceLeaseKey(b)
+	if a == "" || b == "" {
+		return false
+	}
+	rel, err := filepath.Rel(a, b)
+	if err == nil && (rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))) {
+		return true
+	}
+	rel, err = filepath.Rel(b, a)
+	return err == nil && (rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))))
+}
+
+// Delegates 抽象工单与多工作者调度系统 (保持确定性注册顺序与全局并发资源保护)
 type Delegates struct {
 	mu            sync.RWMutex
 	tickets       map[string]*Ticket
@@ -24,6 +50,8 @@ type Delegates struct {
 	order         []string
 	defaultWorker string
 	maxConcurrent int
+	nextTicketID  uint64
+	workspaceUses map[string]int
 }
 
 // NewDelegates 实例化工单与工作者调度系统 (默认全局最大并发为 1)
@@ -40,6 +68,7 @@ func NewDelegatesWithLimit(maxConcurrent int, workers ...Worker) *Delegates {
 		tickets:       make(map[string]*Ticket),
 		workers:       make(map[string]Worker),
 		maxConcurrent: maxConcurrent,
+		workspaceUses: make(map[string]int),
 	}
 	for _, w := range workers {
 		d.Register(w)
@@ -67,7 +96,7 @@ func (d *Delegates) MaxConcurrent() int {
 	return d.maxConcurrent
 }
 
-// Register 注册一个沙箱工作者实体（首个注册的工作者自动成为默认主力）
+// Register 注册一个工作者实体（首个注册的工作者自动成为默认主力）
 func (d *Delegates) Register(w Worker) {
 	if w == nil {
 		return
@@ -139,36 +168,43 @@ func (d *Delegates) WorkerNames() []string {
 }
 
 // CreateTicket 创建并记录新工单 (保留空的 workspace 以允许下游 Worker 使用其配置的 DefaultDir)
-func (d *Delegates) CreateTicket(requesterID, channelID, goal, model, workspace, workerName string) *Ticket {
+func (d *Delegates) CreateTicket(requesterID, channelID, goal, model, workspace, workerName string, allowSensitive ...bool) *Ticket {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	// 清理已完结的历史工单，避免长期运行内存无界增长
 	if len(d.tickets) > 200 {
 		for id, old := range d.tickets {
-			if old.Status != TicketRunning && old.Status != TicketPending {
+			if old.Status != TicketRunning && old.Status != TicketStopping && old.Status != TicketPending {
 				delete(d.tickets, id)
 			}
 		}
 	}
 
-	ticketID := fmt.Sprintf("tkt_%d", time.Now().UnixNano())
+	d.nextTicketID++
+	ticketID := fmt.Sprintf("tkt_%d", d.nextTicketID)
 
+	canSeeSensitive := len(allowSensitive) > 0 && allowSensitive[0]
 	t := &Ticket{
-		ID:          ticketID,
-		Goal:        goal,
-		RequesterID: requesterID,
-		ChannelID:   channelID,
-		Worker:      strings.TrimSpace(workerName),
-		Workspace:   strings.TrimSpace(workspace),
-		Model:       strings.TrimSpace(model),
-		Status:      TicketPending,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		ID:             ticketID,
+		Goal:           goal,
+		RequesterID:    requesterID,
+		ChannelID:      channelID,
+		Worker:         strings.TrimSpace(workerName),
+		Workspace:      strings.TrimSpace(workspace),
+		Model:          strings.TrimSpace(model),
+		Status:         TicketPending,
+		AllowSensitive: canSeeSensitive,
+		executionToken: d.nextTicketID,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
 	}
 
 	d.tickets[ticketID] = t
-	return t
+	// Do not expose the scheduler-owned mutable record. Callers may keep or
+	// modify this snapshot without racing with cancellation or state updates.
+	copy := *t
+	return &copy
 }
 
 // GetTicket 查询工单状态
@@ -176,7 +212,11 @@ func (d *Delegates) GetTicket(id string) (*Ticket, bool) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	t, ok := d.tickets[id]
-	return t, ok
+	if !ok || t == nil {
+		return nil, false
+	}
+	cp := *t
+	return &cp, true
 }
 
 // ActiveTickets 获取当前正在执行或待执行的所有活跃工单快照
@@ -186,7 +226,7 @@ func (d *Delegates) ActiveTickets() []*Ticket {
 
 	var list []*Ticket
 	for _, t := range d.tickets {
-		if t.Status == TicketRunning || t.Status == TicketPending {
+		if t.Status == TicketRunning || t.Status == TicketStopping || t.Status == TicketPending {
 			cp := *t
 			list = append(list, &cp)
 		}
@@ -194,38 +234,62 @@ func (d *Delegates) ActiveTickets() []*Ticket {
 	return list
 }
 
-// AbortByChannel 紧急中断指定会话通道中正在执行的工单
+// AbortByChannel 请求中断指定会话通道中的运行工单，并取消尚未启动的工单。
 func (d *Delegates) AbortByChannel(channelID string) int {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 
 	aborted := 0
+	var cancelFuncs []context.CancelFunc
 	for _, t := range d.tickets {
-		if t.Status == TicketRunning && t.ChannelID == channelID && t.CancelFunc != nil {
-			t.CancelFunc()
-			t.CancelFunc = nil
-			t.Status = TicketAborted
-			t.UpdatedAt = time.Now()
-			aborted++
+		if t.ChannelID != channelID || (t.Status != TicketRunning && t.Status != TicketPending) {
+			continue
 		}
+		wasRunning := t.Status == TicketRunning
+		if t.CancelFunc != nil {
+			cancelFuncs = append(cancelFuncs, t.CancelFunc)
+			t.CancelFunc = nil
+		}
+		if wasRunning {
+			t.Status = TicketStopping
+		} else {
+			t.Status = TicketAborted
+		}
+		t.UpdatedAt = time.Now()
+		aborted++
+	}
+	d.mu.Unlock()
+	for _, cancel := range cancelFuncs {
+		cancel()
 	}
 	return aborted
 }
 
-// AbortAll 紧急熔断打断所有正在执行的工单
+// AbortAll 请求中断所有运行工单，并取消尚未启动的工单。
 func (d *Delegates) AbortAll() int {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 
 	aborted := 0
+	var cancelFuncs []context.CancelFunc
 	for _, t := range d.tickets {
-		if t.Status == TicketRunning && t.CancelFunc != nil {
-			t.CancelFunc()
-			t.CancelFunc = nil
-			t.Status = TicketAborted
-			t.UpdatedAt = time.Now()
-			aborted++
+		if t.Status != TicketRunning && t.Status != TicketPending {
+			continue
 		}
+		wasRunning := t.Status == TicketRunning
+		if t.CancelFunc != nil {
+			cancelFuncs = append(cancelFuncs, t.CancelFunc)
+			t.CancelFunc = nil
+		}
+		if wasRunning {
+			t.Status = TicketStopping
+		} else {
+			t.Status = TicketAborted
+		}
+		t.UpdatedAt = time.Now()
+		aborted++
+	}
+	d.mu.Unlock()
+	for _, cancel := range cancelFuncs {
+		cancel()
 	}
 	return aborted
 }
@@ -233,8 +297,15 @@ func (d *Delegates) AbortAll() int {
 // ResetSession 重置指定通道在指定工作空间下的所有 Worker 内部会话状态 (例如 AGY 的 ConversationID)
 func (d *Delegates) ResetSession(channelID, workspace string) {
 	d.mu.RLock()
-	defer d.mu.RUnlock()
-	for _, w := range d.workers {
+	workers := make([]Worker, 0, len(d.order))
+	for _, name := range d.order {
+		if worker, ok := d.workers[name]; ok {
+			workers = append(workers, worker)
+		}
+	}
+	d.mu.RUnlock()
+
+	for _, w := range workers {
 		if r, ok := w.(interface{ ResetSession(channelID, cwd string) }); ok {
 			r.ResetSession(channelID, workspace)
 		}
@@ -248,6 +319,80 @@ func (d *Delegates) CheckCapacity(t *Ticket) error {
 	return d.checkCapacityLocked(t)
 }
 
+// runIfWorkspaceIdle holds the scheduler lock while checking and running a
+// workspace maintenance action, preventing a ticket from starting between the
+// idle check and the action.
+func (d *Delegates) runIfWorkspaceIdle(workspace string, action func() error) error {
+	if action == nil {
+		return fmt.Errorf("工作区维护操作不可为空")
+	}
+	workspace = strings.TrimSpace(workspace)
+	if filepath.Clean(workspace) == "." || workspace == "" {
+		return fmt.Errorf("工作区路径不可为空")
+	}
+	workspace = workspaceLeaseKey(workspace)
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for leased := range d.workspaceUses {
+		if workspacesOverlap(workspace, leased) {
+			return fmt.Errorf("工作区 %q 与其他工具正在使用的目录重叠，请等待操作结束后再清理", workspace)
+		}
+	}
+	for _, ticket := range d.tickets {
+		if ticket.Status != TicketRunning && ticket.Status != TicketStopping && ticket.Status != TicketPending {
+			continue
+		}
+		ticketWorkspace := workspaceLeaseKey(ticket.Workspace)
+		if ticketWorkspace == "." || ticketWorkspace == "" || workspacesOverlap(workspace, ticketWorkspace) {
+			return fmt.Errorf("工单 [%s] 仍可能使用工作区 %q（状态：%s），请等待任务结束后再清理", ticket.ID, workspace, ticket.Status)
+		}
+	}
+	return action()
+}
+
+// AcquireWorkspaceLease reserves a workspace for a direct tool operation that
+// is not represented by a ticket, preventing overlap with tickets and cleanup.
+func (d *Delegates) AcquireWorkspaceLease(workspace string) (func(), error) {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" || filepath.Clean(workspace) == "." {
+		return nil, fmt.Errorf("工作区路径不可为空")
+	}
+	workspace = workspaceLeaseKey(workspace)
+
+	d.mu.Lock()
+	for _, ticket := range d.tickets {
+		if ticket.Status != TicketRunning && ticket.Status != TicketStopping && ticket.Status != TicketPending {
+			continue
+		}
+		ticketWorkspace := workspaceLeaseKey(ticket.Workspace)
+		if ticketWorkspace == "" || ticketWorkspace == "." || workspacesOverlap(workspace, ticketWorkspace) {
+			d.mu.Unlock()
+			return nil, fmt.Errorf("工单 [%s] 仍可能使用工作区 %q（状态：%s）", ticket.ID, workspace, ticket.Status)
+		}
+	}
+	for leased := range d.workspaceUses {
+		if workspacesOverlap(workspace, leased) {
+			d.mu.Unlock()
+			return nil, fmt.Errorf("工作区 %q 与其他工具正在使用的目录重叠", workspace)
+		}
+	}
+	if d.workspaceUses == nil {
+		d.workspaceUses = make(map[string]int)
+	}
+	d.workspaceUses[workspace] = 1
+	d.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			d.mu.Lock()
+			delete(d.workspaceUses, workspace)
+			d.mu.Unlock()
+		})
+	}, nil
+}
+
 func (d *Delegates) checkCapacityLocked(t *Ticket) error {
 	if t == nil {
 		return fmt.Errorf("工单对象不可为空")
@@ -258,12 +403,12 @@ func (d *Delegates) checkCapacityLocked(t *Ticket) error {
 	}
 	if _, ok := d.workers[workerName]; !ok {
 		available := strings.Join(d.order, ", ")
-		return fmt.Errorf("沙箱工作者 %q 未挂载 (当前已挂载: [%s])", t.Worker, available)
+		return fmt.Errorf("工作者 %q 未挂载 (当前已挂载: [%s])", t.Worker, available)
 	}
 
 	var running []*Ticket
 	for _, existing := range d.tickets {
-		if existing.Status == TicketRunning && existing.ID != t.ID {
+		if (existing.Status == TicketRunning || existing.Status == TicketStopping) && existing.ID != t.ID {
 			running = append(running, existing)
 		}
 	}
@@ -275,15 +420,24 @@ func (d *Delegates) checkCapacityLocked(t *Ticket) error {
 
 	if len(running) >= maxConc {
 		first := running[0]
-		return fmt.Errorf("系统负载保护已生效：当前已有后台工程工单 [%s] 正在执行（目标：%s，已运行 %s）。为保护服务器稳定性，全局限制同时运行 %d 个沙箱任务。请等待其执行完毕，或发送 /stop 中断现有工单",
-			first.ID, first.Goal, time.Since(first.CreatedAt).Truncate(time.Second), maxConc)
+		return fmt.Errorf("系统负载保护已生效：当前有后台工程工单仍占用执行容量（状态：%s，已运行 %s）。为保护服务器稳定性，全局限制同时运行 %d 个任务。请等待其退出，或发送 /stop 请求中断",
+			first.Status, time.Since(first.CreatedAt).Truncate(time.Second), maxConc)
 	}
 
 	targetWs := strings.TrimSpace(t.Workspace)
+	if targetWs == "" && len(d.workspaceUses) > 0 {
+		return fmt.Errorf("有直接工具正在使用工作区，当前工单未指定工作区路径，暂不能安全启动")
+	}
 	if targetWs != "" {
+		workspace := workspaceLeaseKey(targetWs)
+		for leased := range d.workspaceUses {
+			if workspacesOverlap(workspace, leased) {
+				return fmt.Errorf("工作空间 %q 与其他工具正在使用的目录重叠，请等待操作结束后再提交工单", targetWs)
+			}
+		}
 		for _, rt := range running {
-			if strings.TrimSpace(rt.Workspace) == targetWs {
-				return fmt.Errorf("工作空间冲突保护：工单 [%s] 正在同一工作空间 %q 下运行，请等待其执行完毕以避免并发读写冲突", rt.ID, targetWs)
+			if workspacesOverlap(workspace, rt.Workspace) {
+				return fmt.Errorf("工作空间冲突保护：工单 [%s] 在同一工作空间 %q 中仍占用执行权（状态：%s），请等待其退出以避免并发读写冲突", rt.ID, targetWs, rt.Status)
 			}
 		}
 	}
@@ -293,8 +447,36 @@ func (d *Delegates) checkCapacityLocked(t *Ticket) error {
 
 // ExecuteTicket 驱动对应的 Worker 执行工单 (支持按 Worker 名字路由并强制执行全局并发控制)
 func (d *Delegates) ExecuteTicket(ctx context.Context, t *Ticket) (string, error) {
+	if ctx == nil {
+		return "", fmt.Errorf("工单执行需要有效的 context")
+	}
 	d.mu.Lock()
+	if t == nil {
+		d.mu.Unlock()
+		return "", fmt.Errorf("工单对象不可为空")
+	}
+	stored, ok := d.tickets[t.ID]
+	if !ok || stored == nil || stored.executionToken == 0 || stored.executionToken != t.executionToken {
+		d.mu.Unlock()
+		return "", fmt.Errorf("工单不是由当前调度器签发的有效对象")
+	}
+	// Always execute the scheduler-owned record. The caller only holds a
+	// snapshot and cannot alter worker, workspace, requester, or permissions.
+	t = stored
+	if t.Status != TicketPending {
+		status := t.Status
+		d.mu.Unlock()
+		return "", fmt.Errorf("工单当前状态为 %q，不能重复执行", status)
+	}
+	if err := ctx.Err(); err != nil {
+		t.Status = TicketAborted
+		t.UpdatedAt = time.Now()
+		d.mu.Unlock()
+		return "", err
+	}
 	if err := d.checkCapacityLocked(t); err != nil {
+		t.Status = TicketFailed
+		t.UpdatedAt = time.Now()
 		d.mu.Unlock()
 		return "", err
 	}
@@ -311,9 +493,13 @@ func (d *Delegates) ExecuteTicket(ctx context.Context, t *Ticket) (string, error
 	t.CancelFunc = cancel
 	t.Status = TicketRunning
 	t.UpdatedAt = time.Now()
+	workerTicket := *t
+	// Worker 只接收该次执行的不可变快照，避免 /stop 并发更新调度状态时
+	// 与 Worker 读取共享 Ticket 产生数据竞争。
+	workerTicket.CancelFunc = nil
 	d.mu.Unlock()
 
-	output, err := worker.ExecuteTicket(execCtx, t)
+	output, err := executeWorker(execCtx, worker, &workerTicket)
 	if !t.AllowSensitive {
 		output = core.RedactSensitiveIPs(output)
 	}
@@ -321,6 +507,16 @@ func (d *Delegates) ExecuteTicket(ctx context.Context, t *Ticket) (string, error
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	t.CancelFunc = nil
+	if t.Status == TicketAborted || t.Status == TicketStopping || execCtx.Err() == context.Canceled {
+		t.Status = TicketAborted
+		t.UpdatedAt = time.Now()
+		return "", context.Canceled
+	}
+	if execCtx.Err() == context.DeadlineExceeded {
+		t.Status = TicketFailed
+		t.UpdatedAt = time.Now()
+		return "", context.DeadlineExceeded
+	}
 
 	if err != nil {
 		if t.Status != TicketAborted {
@@ -334,4 +530,14 @@ func (d *Delegates) ExecuteTicket(ctx context.Context, t *Ticket) (string, error
 	t.Output = output
 	t.UpdatedAt = time.Now()
 	return output, nil
+}
+
+func executeWorker(ctx context.Context, worker Worker, ticket *Ticket) (output string, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			output = ""
+			err = fmt.Errorf("worker panicked: %v", recovered)
+		}
+	}()
+	return worker.ExecuteTicket(ctx, ticket)
 }

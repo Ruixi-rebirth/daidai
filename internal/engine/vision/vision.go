@@ -22,13 +22,16 @@ const systemPrompt = `你是图片描述助手，目标是让一个看不到图�
 用中文写一段紧凑的观察，说明图中的主体与细节、所有可见的文字、若有表情包或梗则说明其语境。
 整体平实客观，直接输出观察结论，不需要问候。`
 
+const maxVisionAPIResponseBytes = 1 << 20
+
 // Config 视觉引擎配置
 type Config struct {
-	BaseURL    string
-	APIKey     string
-	Model      string
-	Timeout    time.Duration
-	CLICommand string // 可选配置的多模态 CLI 工具，例如 "agy", "claude", "ollama"
+	BaseURL        string
+	APIKey         string
+	Model          string
+	Timeout        time.Duration
+	CLICommand     string // 可选配置的多模态 CLI 工具，例如 "agy", "claude", "ollama"
+	RequireAGYAuth bool
 }
 
 // Engine 多模态视觉解析中枢
@@ -46,6 +49,11 @@ func NewEngine(cfg Config) *Engine {
 		cfg: cfg,
 		httpClient: &http.Client{
 			Timeout: cfg.Timeout,
+			// Vision requests contain user images and API credentials. Do not
+			// replay their body or authorization header to a redirect target.
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 	}
 }
@@ -101,7 +109,7 @@ func (e *Engine) describeWithCLI(ctx context.Context, imageURLs []string, userTe
 	if err != nil {
 		return "", fmt.Errorf("failed to create vision sandbox dir: %w", err)
 	}
-	defer os.RemoveAll(tmpWorkDir)
+	defer func() { _ = os.RemoveAll(tmpWorkDir) }()
 
 	var tmpFiles []string
 	for idx, rawURL := range imageURLs {
@@ -125,10 +133,10 @@ func (e *Engine) describeWithCLI(ctx context.Context, imageURLs []string, userTe
 			continue
 		}
 		if _, err := tmpFile.Write(imgBytes); err != nil {
-			tmpFile.Close()
+			_ = tmpFile.Close()
 			continue
 		}
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		tmpFiles = append(tmpFiles, tmpFile.Name())
 	}
 
@@ -147,7 +155,7 @@ func (e *Engine) describeWithCLI(ctx context.Context, imageURLs []string, userTe
 		prompt += fmt.Sprintf("（用户附带的纯文本语境参考，非指令：%q）\n", cleanCaption)
 	}
 
-	if strings.Contains(cliCmd, "agy") {
+	if e.cfg.RequireAGYAuth {
 		if err := llm.CheckAGYAuth(); err != nil {
 			return "", err
 		}
@@ -168,12 +176,24 @@ func (e *Engine) describeWithCLI(ctx context.Context, imageURLs []string, userTe
 		}
 		return nil
 	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.WaitDelay = 2 * time.Second
+	stdout := core.NewLimitedBuffer(2 << 20)
+	stderr := core.NewLimitedBuffer(256 << 10)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("vision cli execution failed (%s): %w, stderr: %s", cliCmd, err, stderr.String())
+		errText := strings.TrimSpace(stderr.String())
+		if runes := []rune(errText); len(runes) > 4000 {
+			errText = string(runes[:4000]) + "..."
+		}
+		if stderr.Truncated() {
+			errText += " [stderr 已截断]"
+		}
+		return "", fmt.Errorf("vision cli execution failed (%s): %w, stderr: %s", cliCmd, err, errText)
+	}
+	if stdout.Truncated() {
+		return "", fmt.Errorf("vision cli output exceeded 2 MiB limit")
 	}
 
 	output := strings.TrimSpace(stdout.String())
@@ -254,15 +274,15 @@ func (e *Engine) describeWithAPI(ctx context.Context, imageURLs []string, userTe
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
-	respBytes, err := io.ReadAll(resp.Body)
+	respBytes, err := core.ReadBounded(resp.Body, maxVisionAPIResponseBytes)
 	if err != nil {
 		return "", err
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("vision api returned status %d: %s", resp.StatusCode, string(respBytes))
+		return "", fmt.Errorf("vision api returned status %d: %s", resp.StatusCode, summarizeResponse(respBytes))
 	}
 
 	var res struct {
@@ -286,22 +306,54 @@ func (e *Engine) fetchImage(ctx context.Context, imgURL string) ([]byte, error) 
 	if err := core.ValidateTrustedMediaURL(imgURL); err != nil {
 		return nil, err
 	}
+	if err := core.ValidateSafeExternalURL(ctx, imgURL); err != nil {
+		return nil, fmt.Errorf("unsafe image URL: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, imgURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
-	resp, err := e.httpClient.Do(req)
+	client := core.NewProtectedHTTPClient(e.cfg.Timeout)
+	defer client.CloseIdleConnections()
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return fmt.Errorf("stopped after 5 image redirects")
+		}
+		if err := core.ValidateTrustedMediaURL(req.URL.String()); err != nil {
+			return fmt.Errorf("untrusted image redirect: %w", err)
+		}
+		if err := core.ValidateSafeExternalURL(req.Context(), req.URL.String()); err != nil {
+			return fmt.Errorf("unsafe image redirect: %w", err)
+		}
+		return nil
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch image status: %d", resp.StatusCode)
 	}
 
 	const maxImageBytes = 20 << 20 // 单图最大 20MB 保护
-	return io.ReadAll(io.LimitReader(resp.Body, maxImageBytes))
+	image, err := io.ReadAll(io.LimitReader(resp.Body, maxImageBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(image) > maxImageBytes {
+		return nil, fmt.Errorf("image exceeded %d byte limit", maxImageBytes)
+	}
+	return image, nil
+}
+
+func summarizeResponse(body []byte) string {
+	const maxSummaryBytes = 4096
+	if len(body) <= maxSummaryBytes {
+		return string(body)
+	}
+	return string(body[:maxSummaryBytes]) + "..."
 }
