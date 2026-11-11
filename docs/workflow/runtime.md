@@ -3,7 +3,7 @@
 ## 启动顺序
 
 1. `cmd/daidai/main.go` 从 `--config`、`DAIDAI_CONFIG` 或 `config.yaml` 读取 YAML。加载时会拒绝未知字段、多文档配置、非法服务端口、空或重复的 runner 名称、CLI runner 缺少 `{{GOAL}}` 参数模板、把整个用户主目录设为默认工作区，以及缺少必需凭据。
-   旧版 OCI 日报时刻与时区字段仍被接受，以兼容严格 YAML 配置；它们不会启动定时通知。`--reset` 会在启动前清理搭档私聊的短期历史游标，因此要求配置 `qq.owner_openid`。仅当默认 `config.yaml` 不存在时才使用不启用 QQ 的默认配置；显式路径错误、其他读取失败或 YAML 无效都会停止启动。
+   旧版 OCI 日报时刻字段仍被接受，以兼容严格 YAML 配置，但不会启动定时通知；`oci.timezone` 仍用于按需账单报告的日期格式。`--reset` 会在启动前清理搭档私聊的短期历史游标，因此要求配置 `qq.owner_openid`。仅当默认 `config.yaml` 不存在时才使用不启用 QQ 的默认配置；显式路径错误、其他读取失败或 YAML 无效都会停止启动。
 2. 主进程先绑定健康检查端口，避免同机启动两个实例；随后在 OCI 启用时解析 PEM 并初始化客户端（限时 3 秒，失败则停止启动），再初始化出站网络护栏。
 3. 创建 OpenAI 兼容 API Provider 和 AGY Provider，并注册到 `MindRouter`。访客请求使用 API 兜底通道。
 4. 从 `agent.runners` 读取 AGY 命令、说明与默认目录；同一 AGY 命令贯穿模型 Provider、OAuth、视觉 CLI、网页检索、生图和表情生成。随后创建记忆引擎、可选向量模型、视觉引擎、默认工作区、AGY/CLI 工作者、工单调度器和工作区管理器。

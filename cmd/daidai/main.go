@@ -278,7 +278,7 @@ func run() int {
 	}
 
 	if cfg.OCI.Enabled && ownerOpenID != "" {
-		slog.Warn("OCI 定时账单和告警未启动：当前 QQ 通道只支持被动回复，无法投递主动通知；旧版 oci.daily_report_hour、oci.daily_report_minute 和 oci.timezone 配置仅为兼容而忽略，可继续按需调用 OCI 工具查询")
+		slog.Warn("OCI 定时账单和告警未启动：当前 QQ 通道只支持被动回复，无法投递主动通知；旧版 oci.daily_report_hour 和 oci.daily_report_minute 配置仅为兼容而忽略，可继续按需调用 OCI 工具查询")
 	}
 
 	// 启动健康检查与单实例锁监听服务

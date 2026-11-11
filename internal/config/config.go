@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -75,9 +76,8 @@ type OCIConfig struct {
 	// Deprecated: retained so existing strict YAML files continue to load; QQ cannot deliver scheduled notifications.
 	DailyReportHour *int `yaml:"daily_report_hour"`
 	// Deprecated: retained so existing strict YAML files continue to load; QQ cannot deliver scheduled notifications.
-	DailyReportMinute *int `yaml:"daily_report_minute"`
-	// Deprecated: retained so existing strict YAML files continue to load; no scheduled OCI job uses this timezone.
-	Timezone string `yaml:"timezone"`
+	DailyReportMinute *int   `yaml:"daily_report_minute"`
+	Timezone          string `yaml:"timezone"` // Local timezone used to format on-demand OCI bill reports.
 }
 
 // LoadConfig 从指定路径加载 yaml 配置
@@ -159,6 +159,12 @@ func LoadConfig(path string) (*Config, error) {
 		}
 		if len(missing) > 0 {
 			return nil, fmt.Errorf("oci.enabled requires %s", strings.Join(missing, ", "))
+		}
+		if timezone := strings.TrimSpace(cfg.OCI.Timezone); timezone != "" {
+			cfg.OCI.Timezone = timezone
+			if _, err := time.LoadLocation(timezone); err != nil {
+				return nil, fmt.Errorf("oci.timezone is invalid: %w", err)
+			}
 		}
 	}
 	return &cfg, nil
