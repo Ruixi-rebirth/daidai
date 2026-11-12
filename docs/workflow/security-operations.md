@@ -19,7 +19,7 @@
 
 NixOS 模块默认使用专用 `daidai` 系统用户，但 OCI 宿主配置覆盖了这个默认值：当前服务以 `ruixi` 运行。AGY Worker 因此拥有 `ruixi` 账户可访问的权限；指定工作区并不能隔离用户凭据或其他文件。改用专用账户前，需要迁移或重新登录 AGY 凭据，并重新配置服务读取 OCI、Sing-box 等秘密的权限。
 
-当前 `agent.runners` 配置还把 AGY 的 `default_dir` 设为 `/home/ruixi`，即整个服务账户主目录。工作区范围过宽，包含 OAuth 凭据、SSH 配置和 flakes 仓库等资料；即使服务账户暂不迁移，也应将默认目录缩到专用项目工作区，并在系统级限制 Worker 对其他路径的访问。
+当前 `agent.runners` 配置还把 AGY 的 `default_dir` 设为 `/home/ruixi`，即整个服务账户主目录。这个目录包含 OAuth 凭据、SSH 配置和 flakes 仓库等资料；而 `delegate_ticket` 允许伙伴和协作者发起工单，因此获准的协作者实际上也能触发以 `ruixi` 权限执行的工程任务。应把默认目录缩到专用项目工作区，并在系统级限制 Worker 对其他路径的访问。
 
 ## OCI
 
