@@ -15,6 +15,8 @@ import (
 	"daidai/internal/db"
 )
 
+const groupInterjectionProcessingTimeout = 45 * time.Second
+
 // ChannelRegistry 全双工通道管理器
 type ChannelRegistry struct {
 	mu          sync.RWMutex
@@ -420,6 +422,9 @@ func (a *SuperAgent) Start(ctx context.Context) error {
 
 	if err := a.Channels.StartAll(runCtx, func(event *SensoryEvent) {
 		procTimeout := a.processingTimeout()
+		if event != nil && event.GroupInterjection {
+			procTimeout = groupInterjectionProcessingTimeout
+		}
 		var procCtx context.Context
 		var cancel context.CancelFunc
 		if procTimeout > 0 {
@@ -956,6 +961,21 @@ func parseAGYAuthCodeCommand(content string) (string, bool) {
 	return strings.Trim(strings.Join(parts[2:], " "), "`'\""), true
 }
 
+func (a *SuperAgent) commitObservedGroupMessage(event *SensoryEvent) {
+	if event == nil || (event.StillValid != nil && !event.StillValid()) {
+		return
+	}
+	committer, ok := a.Cognition.(interface {
+		CommitDeliveredReply(context.Context, *SensoryEvent, string)
+	})
+	if !ok {
+		return
+	}
+	commitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	committer.CommitDeliveredReply(commitCtx, event, "")
+}
+
 // Process 核心认知信息流：物理感知 -> 控制面快筛 -> 认知大脑 -> 物理通道发声
 func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 	if event == nil {
@@ -967,6 +987,14 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 
 	content := strings.TrimSpace(event.Content)
 	slog.Info("superagent: 感知事件流入大脑", "channel", event.ChannelID, "isGroup", event.IsGroup, "sender", event.SenderName, "role", event.Role, "contentBytes", len(content))
+	if event.GroupMessageObserved && (!event.GroupInterjection || strings.HasPrefix(content, "/") || content == "继续" || a.Cognition == nil) {
+		unlock := a.lockSession(event)
+		defer unlock()
+		if event.StillValid == nil || event.StillValid() {
+			a.commitObservedGroupMessage(event)
+		}
+		return
+	}
 	if content == "继续" || content == "/continue" {
 		continueCtx, continueCancel := context.WithCancel(ctx)
 		cancellation := &thinkCancellation{key: thinkKey(event)}
@@ -1396,23 +1424,28 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 
 		case "/help":
 			helpText := fmt.Sprintf(`【%s · 控制指令指引】
-- /status   : 查看生命体运行指标与活跃工单
-- /model    : 查看当前激活模型
-- /tasks    : 查看你在当前会话中的近期工单
-- /task <ID> [页码]: 查看工单状态与最近保存的输出（默认第 1 页）
-- 继续      : 续发上一条因平台限制未发送完的回复
-- /models   : 查看实时心智模型池、各通道状态与用量说明
-- /agy login : 发起 Google 账号认证并获取授权网页链接
-- /agy code  : 提交授权码完成登录 (例: /agy code 4/0A...)
-- /agy status: 查看当前 AGY 的 Google 账号认证状态
-- /agy logout: 注销当前 Google 账号并清除本地凭据
-- /stop     : 紧急中断正在运行的思考与后台工单
-- /reset    : 重开当前会话 (清空当前项目 agy 会话与近期上下文)
-- /pwd      : 查看当前所在工作空间与运行模式
-- /cd <目标> : 切入指定生产工程
-- /ws       : 查看已纳管工作空间书签列表 (支持 /ws rm <项目名> 注销)
-- /ws exit  : 退出当前工程，退回默认工作区
-- /ws clean : 清理默认工作区里的临时文件`, a.Persona.Name)
+- /help                         : 显示这份指令列表
+- /status 或 /sysinfo           : 查看运行状态、系统指标与活跃工单
+- /model                       : 查看当前模型
+- /models                      : 查看可用模型
+- /usage                       : 查看模型用量
+- /tasks                        : 查看你在当前会话的近期工单
+- /task <ID> [页码]             : 查看工单状态和输出
+- 继续 或 /continue             : 续发未发送完的长回复
+- /stop                         : 中断你发起的思考和工单
+- /reset、/new 或 /clear        : 重开当前会话并清除近期历史
+- /agy login [force]            : 发起或强制重新进行 Google 认证（私聊）
+- /agy code <授权码>             : 提交 Google 授权码（私聊）
+- /agy status                   : 查看 AGY 认证状态（私聊）
+- /agy logout                   : 注销 AGY 并清除凭据（私聊）
+- /pwd                          : 查看当前工作空间
+- /cd <目标>                    : 切换工作空间
+- /ws 或 /workspaces            : 列出已纳管的工作空间
+- /ws rm <名称>                 : 移除工作空间书签
+- /ws exit                      : 退出当前工作空间
+- /ws clean 或 /clean           : 清理默认 sandbox 临时文件
+
+工单、模型与工作空间指令需要相应权限；群聊中请 @ 呆呆后发送控制指令。`, a.Persona.Name)
 			a.replyText(ctx, event, helpText)
 			return
 
@@ -1576,6 +1609,11 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 	if a.Cognition != nil {
 		utterance, err := a.Cognition.Think(thinkCtx, event)
 		if err != nil {
+			if event.GroupMessageObserved {
+				slog.Warn("superagent: 群聊插话判断失败，已静默记录消息", "channel", event.ChannelID, "err", err)
+				a.commitObservedGroupMessage(event)
+				return
+			}
 			if thinkCtx.Err() != nil || (event.StillValid != nil && !event.StillValid()) {
 				slog.Info("superagent: 当前会话思考上下文已结束", "channel", event.ChannelID, "err", thinkCtx.Err())
 				return
@@ -1594,6 +1632,12 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 				commitCtx, commitCancel := context.WithTimeout(thinkCtx, 15*time.Second)
 				committer.CommitDeliveredReply(commitCtx, event, errorReply)
 				commitCancel()
+			}
+			return
+		}
+		if utterance == nil {
+			if event.GroupMessageObserved {
+				a.commitObservedGroupMessage(event)
 			}
 			return
 		}

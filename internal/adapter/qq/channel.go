@@ -128,6 +128,7 @@ type passiveReplyBudget struct {
 
 const maxQQOutgoingParts = 5
 const passiveReplyBudgetSweepInterval = time.Minute
+const groupInterjectionCooldown = 5 * time.Minute
 
 func maxQQPassiveReplies(isGroup bool) int {
 	if isGroup {
@@ -351,9 +352,47 @@ type QQChannel struct {
 	wsLastSeq   int64
 	wsReady     atomic.Bool
 
-	replyBudgetsMu     sync.Mutex
-	replyBudgets       map[string]*passiveReplyBudget
-	replyBudgetSweepAt time.Time
+	replyBudgetsMu           sync.Mutex
+	replyBudgets             map[string]*passiveReplyBudget
+	replyBudgetSweepAt       time.Time
+	groupInterjectionsMu     sync.Mutex
+	groupInterjections       map[string]time.Time
+	groupInterjectionSweepAt time.Time
+}
+
+func (q *QQChannel) shouldConsiderGroupInterjection(groupID string) bool {
+	if q == nil || strings.TrimSpace(groupID) == "" {
+		return false
+	}
+	now := time.Now()
+	q.groupInterjectionsMu.Lock()
+	defer q.groupInterjectionsMu.Unlock()
+	if q.groupInterjections == nil {
+		q.groupInterjections = make(map[string]time.Time)
+	}
+	if last, exists := q.groupInterjections[groupID]; exists && now.Sub(last) < groupInterjectionCooldown {
+		return false
+	}
+	q.groupInterjections[groupID] = now
+	if now.Sub(q.groupInterjectionSweepAt) >= 10*time.Minute || len(q.groupInterjections) > 4096 {
+		for id, last := range q.groupInterjections {
+			if now.Sub(last) >= groupInterjectionCooldown {
+				delete(q.groupInterjections, id)
+			}
+		}
+		q.groupInterjectionSweepAt = now
+	}
+	if len(q.groupInterjections) > 4096 {
+		oldestID := ""
+		var oldestAt time.Time
+		for id, at := range q.groupInterjections {
+			if oldestID == "" || at.Before(oldestAt) {
+				oldestID, oldestAt = id, at
+			}
+		}
+		delete(q.groupInterjections, oldestID)
+	}
+	return true
 }
 
 func (q *QQChannel) reservePassiveReplyBudget(msgID string, count, limit int, window time.Duration) (*passiveReplyBudget, int, bool, error) {
@@ -755,13 +794,36 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 			q.inbox.RememberPending(attachmentScope, append(append([]*core.Attachment(nil), files...), images...))
 		}
 		if fullGroupEvent && !botMentioned {
-			// Full-message mode can split a group @ and its image/file into
-			// separate events. Retain only attachment metadata here; the later
-			// addressed message can explicitly request processing it.
-			if q.dedup != nil {
+			if content == "" {
+				if q.dedup != nil {
+					q.dedup.Remember(msgID)
+				}
+				return true
+			}
+			// Ordinary group messages are saved to formal group history. Attachments
+			// stay pending and slash commands never execute without an @ mention.
+			canInterject := len(images) == 0 && omittedImages == 0 && len(files) == 0 && omittedFiles == 0 && len(pendingImages) == 0 && len(pendingFiles) == 0 && omittedPendingImages == 0 && omittedPendingFiles == 0 && !strings.HasPrefix(content, "/") && content != "继续"
+			if canInterject {
+				canInterject = q.shouldConsiderGroupInterjection(convID)
+			}
+			accepted := q.IngestRaw(&entity.SensoryEvent{
+				Platform:             "qq",
+				ChannelID:            convID,
+				IsGroup:              true,
+				SenderID:             userID,
+				SenderName:           strings.TrimSpace(senderName),
+				Role:                 role,
+				Content:              strings.TrimSpace(content),
+				ReplyContext:         replyCtx,
+				RawMessageID:         msgID,
+				OccurredAt:           time.Now(),
+				GroupMessageObserved: true,
+				GroupInterjection:    canInterject,
+			})
+			if accepted && q.dedup != nil {
 				q.dedup.Remember(msgID)
 			}
-			return true
+			return accepted
 		}
 		accepted := q.IngestRaw(&entity.SensoryEvent{
 			Platform:             "qq",
@@ -841,6 +903,9 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) error {
 	}
 	if u.Proactive && u.QuoteMsgID != "" {
 		return fmt.Errorf("QQ 主动消息不能同时携带被动回复引用 ID")
+	}
+	if u.GroupInterjection && (!u.IsGroup || u.Proactive || u.QuoteMsgID == "") {
+		return fmt.Errorf("QQ群聊插话必须关联触发它的群消息，并通过被动回复发送")
 	}
 	if u.QuoteMsgID == "" && !u.Proactive {
 		return fmt.Errorf("QQ 消息缺少入站引用 ID，必须显式标记为主动发送")

@@ -469,6 +469,37 @@ func (w *sessionWorker) loop(onIdleCleanup func() bool) {
 				w.dispatchQueued(merged)
 			}
 
+			// Unaddressed group messages are history records (and occasionally
+			// candidates for a short interjection), not ordinary turns to merge
+			// with an @-addressed request. Dispatch each one separately so every
+			// message is retained with its own platform message ID.
+			if ev.GroupMessageObserved {
+				if timer != nil {
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+					timer = nil
+					timerCh = nil
+				}
+				if len(pendingEvents) > 0 {
+					w.dispatchQueued(mergeQueuedEvents(pendingEvents))
+					pendingEvents = nil
+					pendingRunes = 0
+				}
+				if !idleTimer.Stop() {
+					select {
+					case <-idleTimer.C:
+					default:
+					}
+				}
+				idleTimer.Reset(w.config.IdleTimeout)
+				w.dispatchQueued(queued)
+				continue
+			}
+
 			eventRunes := utf8.RuneCountInString(ev.Content)
 			if len(pendingEvents) > 0 && pendingRunes+eventRunes+1 > w.config.MaxMergedRunes {
 				if timer != nil {

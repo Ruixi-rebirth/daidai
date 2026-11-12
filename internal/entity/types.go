@@ -85,15 +85,16 @@ type Ticket struct {
 
 // Utterance 全息生命表达体 (由认知大脑一次性合成，零前缀规范)
 type Utterance struct {
-	Platform     string // 目标物理平台 (如 "qq", "telegram", "cli")
-	IsGroup      bool   // 是否为群聊会话
-	ChannelID    string // 纯净会话标识 (纯群号或纯私聊用户 ID)
-	QuoteMsgID   string
-	Proactive    bool     // 主动发送；平台可能限制适用场景或频率
-	Text         string   // 纯净人话
-	FallbackText string   // 媒体发送失败时替代图片的文字内容
-	CardData     []byte   // 美学卡片长图 (Maple Mono 排版图卷)
-	Images       [][]byte // 一条表达携带的多张图片；CardData 保留用于兼容单图调用
+	Platform          string // 目标物理平台 (如 "qq", "telegram", "cli")
+	IsGroup           bool   // 是否为群聊会话
+	ChannelID         string // 纯净会话标识 (纯群号或纯私聊用户 ID)
+	QuoteMsgID        string
+	Proactive         bool     // 主动发送；平台可能限制适用场景或频率
+	GroupInterjection bool     // 未 @ 群消息的有限插话；必须关联原群消息作为被动回复
+	Text              string   // 纯净人话
+	FallbackText      string   // 媒体发送失败时替代图片的文字内容
+	CardData          []byte   // 美学卡片长图 (Maple Mono 排版图卷)
+	Images            [][]byte // 一条表达携带的多张图片；CardData 保留用于兼容单图调用
 }
 
 // PartialDeliveryError marks a channel failure after part of an utterance was

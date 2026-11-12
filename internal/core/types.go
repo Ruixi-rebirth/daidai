@@ -146,6 +146,8 @@ type SensoryEvent struct {
 	ReplyContext         *SensoryEvent // 引用的前置消息上下文
 	RawMessageID         string        // 原始平台消息 ID (用于被动回复凭证)
 	OccurredAt           time.Time     // 事件发生时间
+	GroupMessageObserved bool          // 未 @ 机器人的 QQ 群消息；写入本群历史，但默认不触发认知回复
+	GroupInterjection    bool          // 当前未 @ 群消息通过低频判断，可尝试生成一条短回复
 	OnProgress           func(string)  // 认知耗时操作（如签发重型工单）时的即时进度回执回调
 	StillValid           func() bool   // 可选的队列代际校验；等待会话锁后用于丢弃已被 reset 作废的事件
 }
