@@ -82,8 +82,10 @@ func (c *Client) FetchGatewayURL(ctx context.Context) (string, error) {
 	if err != nil || gatewayURL.Scheme != "wss" || gatewayURL.Host == "" || gatewayURL.User != nil || gatewayURL.Fragment != "" {
 		return "", fmt.Errorf("fetch gateway returned an invalid wss URL")
 	}
-	// Only the documented official Gateway host may receive the access token in IDENTIFY.
-	trustedGatewayHost := strings.EqualFold(gatewayURL.Hostname(), "api.bot.qq.com")
+	// The official gateway may return either the unified API host or the
+	// legacy official gateway host. Restrict IDENTIFY credentials to these hosts.
+	gatewayHost := strings.ToLower(gatewayURL.Hostname())
+	trustedGatewayHost := gatewayHost == "api.bot.qq.com" || gatewayHost == "api.sgroup.qq.com"
 	if !trustedGatewayHost || (gatewayURL.Port() != "" && gatewayURL.Port() != "443") {
 		return "", fmt.Errorf("fetch gateway returned an invalid wss URL")
 	}
