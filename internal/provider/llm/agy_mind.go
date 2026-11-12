@@ -408,7 +408,7 @@ func (p *AGYMindProvider) ChatWithTools(
 	if readOnly {
 		args = append(args, "--mode", "plan", "--sandbox")
 	} else {
-		args = append(args, "--dangerously-skip-permissions")
+		args = append(args, "--mode", "auto", "--sandbox")
 	}
 
 	cmd := exec.CommandContext(execCtx, command, args...)

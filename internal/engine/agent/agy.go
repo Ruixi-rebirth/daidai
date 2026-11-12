@@ -274,13 +274,15 @@ func (w *AGYWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (string
 
 	executionGoal := t.Goal
 	executionGoal += "\n\n【工单阶段边界】单次工单最多运行 5 分钟。若完整目标无法在本次时限内可靠完成，不要一次性铺开全部工作；先完成一个可独立验证、能在本阶段收敛的部分。阶段结束时明确写出：本阶段完成项、整体目标是否仍未完成、剩余阶段、下一阶段可直接执行的具体指令，以及涉及的文件或状态。不要把阶段完成表述成整体目标完成。若目标可以在本阶段完整完成，则正常完成并说明验证结果。"
+	executionGoal += "\n\n【执行边界】仅在当前工作区内读取和修改文件，使用 AGY Auto 模式与终端沙箱。不要尝试访问工作区外的文件、关闭沙箱或绕过权限策略。若操作需要沙箱外权限或被拒绝，应说明受限步骤和所需权限，不要把它表述为已完成。"
 	if !t.AllowSensitive {
 		executionGoal += "\n\n【行为要求：当前不是核心搭档私聊。不要主动探测宿主机公网 IP，也不要在回复中输出本机公网 IP。该要求是行为指引，不代表操作系统权限隔离。】"
 	}
 	args := []string{
 		"-p", executionGoal,
 		"--output-format", "json",
-		"--dangerously-skip-permissions",
+		"--mode", "auto",
+		"--sandbox",
 	}
 	if model != "" {
 		args = append(args, "--model", model)
