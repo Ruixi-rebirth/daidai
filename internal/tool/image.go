@@ -19,6 +19,9 @@ import (
 
 // runStatelessImageGen 无状态调用一次 agy 执行生图子任务（不占用工程工单槽位，不累积幽灵会话上下文）
 func runStatelessImageGen(ctx context.Context, command, goal, workDir string) (string, error) {
+	if ctx == nil {
+		return "", fmt.Errorf("image generation requires a caller context")
+	}
 	if err := llm.CheckAGYAuth(); err != nil {
 		return "", err
 	}
@@ -27,16 +30,13 @@ func runStatelessImageGen(ctx context.Context, command, goal, workDir string) (s
 		command = "agy"
 	}
 
-	execCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-	defer cancel()
-
 	args := []string{
 		"-p", goal,
 		"--output-format", "text",
 		"--sandbox",
 	}
 
-	cmd := exec.CommandContext(execCtx, command, args...)
+	cmd := exec.CommandContext(ctx, command, args...)
 	if workDir != "" {
 		cmd.Dir = workDir
 	}
@@ -181,7 +181,16 @@ func (t *ImageTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 	if err := os.MkdirAll(t.outDir, 0755); err != nil {
 		return nil, fmt.Errorf("创建图片输出目录失败: %w", err)
 	}
-	outFile, err := os.CreateTemp(t.outDir, "gen_*.jpg")
+	workDir, err := os.MkdirTemp(t.outDir, ".imagegen-*")
+	if err != nil {
+		return nil, fmt.Errorf("创建图片临时工作目录失败: %w", err)
+	}
+	if err := os.Chmod(workDir, 0700); err != nil {
+		_ = os.RemoveAll(workDir)
+		return nil, fmt.Errorf("保护图片临时工作目录失败: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(workDir) }()
+	outFile, err := os.CreateTemp(workDir, "gen_*.png")
 	if err != nil {
 		return nil, fmt.Errorf("创建图片临时文件失败: %w", err)
 	}
@@ -191,15 +200,21 @@ func (t *ImageTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 		return nil, fmt.Errorf("关闭图片临时文件失败: %w", err)
 	}
 	defer func() { _ = os.Remove(outPath) }()
+	// Keep the randomized target name, but remove the empty placeholder. If the
+	// generator fails to create the image, the later read must report a missing
+	// file instead of misclassifying this empty file as an unsupported format.
+	if err := os.Remove(outPath); err != nil {
+		return nil, fmt.Errorf("准备图片输出路径失败: %w", err)
+	}
 	absOutFile, err := filepath.Abs(outPath)
 	if err != nil {
 		return nil, fmt.Errorf("解析图片临时文件路径失败: %w", err)
 	}
 
-	goal := fmt.Sprintf("请调用 image-generator 子智能体生成一张图片，画面要求：%s 。生成完成后，请将生成的图片文件复制到目标路径：%s 。", prompt, absOutFile)
+	goal := fmt.Sprintf("请调用 image-generator 子智能体生成一张图片，画面要求：%s。最终文件必须是实际 PNG 格式（不是仅修改扩展名）；生成完成后将图片复制到目标路径：%s。", prompt, absOutFile)
 
 	slog.Info("image_tool: 触发无状态后台生成图片", "promptBytes", len(prompt))
-	output, execErr := runStatelessImageGen(ctx, t.command, goal, filepath.Dir(absOutFile))
+	output, execErr := runStatelessImageGen(ctx, t.command, goal, workDir)
 	if execErr != nil {
 		slog.Warn("image_tool: 生成图片失败", "err", execErr)
 		return &core.ToolResult{
@@ -207,18 +222,23 @@ func (t *ImageTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 		}, nil
 	}
 
-	if data, err := readFileLimited(absOutFile, maxGeneratedImageBytes); err == nil && validImageData(data) {
+	if data, err := readFileLimited(absOutFile, maxGeneratedImageBytes); err == nil {
+		normalized, format, normalizeErr := normalizeImageData(ctx, data)
+		if normalizeErr != nil {
+			slog.Warn("image_tool: 生成结果无法解码或转换", "contentType", imageContentType(data), "format", format, "bytes", len(data), "err", normalizeErr)
+			return &core.ToolResult{Text: fmt.Sprintf("生图任务写出了文件，但无法识别或转换为可发送图片（检测类型：%s）：%v", imageContentType(data), normalizeErr)}, nil
+		}
 		return &core.ToolResult{
 			Text:      fmt.Sprintf("已生成图片：%s", prompt),
-			ImageData: data,
+			ImageData: normalized,
 		}, nil
 	} else if err != nil && !os.IsNotExist(err) {
-		return &core.ToolResult{Text: fmt.Sprintf("图片已生成，但读取失败：%v", err)}, nil
-	} else if err == nil {
-		return &core.ToolResult{Text: "图片生成器输出的文件不是受支持的图片格式。"}, nil
+		slog.Warn("image_tool: 生成结果读取失败", "err", err)
+		return &core.ToolResult{Text: "图片生成任务已执行，但读取生成结果失败；请检查服务日志。"}, nil
 	}
 
+	slog.Warn("image_tool: 生图任务未在目标位置生成图片", "outputBytes", len(output))
 	return &core.ToolResult{
-		Text: fmt.Sprintf("已执行生图任务，但未找到生成的图片文件（输出：%s）", output),
+		Text: "已执行生图任务，但没有找到生成的图片文件。请重试，或调整描述后再生成。",
 	}, nil
 }

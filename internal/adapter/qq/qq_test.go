@@ -17,11 +17,11 @@ func TestMsgCache_PersistenceAndHit(t *testing.T) {
 	cache1 := newMsgCache(10, dbMgr)
 	testMsgID := "msg_123456"
 	testContent := "func main() {\n\tprintln(\"Hello Daidai\")\n}"
-	cache1.Set(testMsgID, testContent)
+	cache1.Set(testMsgID, testContent, "private", "user_123")
 
 	// 模拟进程重启，重新从 SQLite 加载
 	cache2 := newMsgCache(10, dbMgr)
-	hit := cache2.Get(testMsgID)
+	hit := cache2.Get(testMsgID, "private", "user_123")
 	if hit != testContent {
 		t.Fatalf("expected cache hit %q, got %q", testContent, hit)
 	}
@@ -35,7 +35,7 @@ func TestQQChannel_MessageReferenceResolutionAndZeroPrefix(t *testing.T) {
 
 	referencedID := "ref_msg_888"
 	referencedCode := "package main\nimport \"fmt\"\nfunc main() { fmt.Println(\"Daidai\") }"
-	cache.Set(referencedID, referencedCode)
+	cache.Set(referencedID, referencedCode, "group", "GROUP_OPENID_RAW_123")
 
 	channel := &QQChannel{
 		msgCache: cache,

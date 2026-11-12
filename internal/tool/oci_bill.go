@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"sort"
@@ -12,6 +13,7 @@ import (
 
 	"daidai/internal/core"
 	"daidai/internal/engine/render"
+	"daidai/internal/entity"
 )
 
 // OCIBillTool OCI 账单与防扣费安全巡检工具
@@ -45,14 +47,14 @@ func (t *OCIBillTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"render_card": map[string]any{
 				"type":        "boolean",
-				"description": "是否同时排版渲染为卡片长图 (默认 false)",
+				"description": "根据报告内容和用户偏好决定是否直接渲染账单卡片：用户明确要求图片，或账单概览/费用对比更适合图表式浏览时设为 true；简单结果或用户要纯文字时设为 false。未指定时返回文字，由对话继续判断是否调用 render_card",
 			},
 		},
 	}
 }
 
 type ociBillArgs struct {
-	RenderCard bool `json:"render_card"`
+	RenderCard *bool `json:"render_card"`
 }
 
 type ociUsageItem struct {
@@ -112,6 +114,117 @@ type OCIBillReport struct {
 	BoundIPs      []string
 	HasRisk       bool
 	Markdown      string
+}
+
+type OCICostSummary struct {
+	Date       string
+	TodayCost  float64
+	MonthTotal float64
+	Currency   string
+}
+
+func SummarizeIPList(ips []string, limit int) string {
+	if len(ips) == 0 {
+		return "无"
+	}
+	if limit <= 0 || limit > len(ips) {
+		limit = len(ips)
+	}
+	visible := strings.Join(ips[:limit], ", ")
+	if remaining := len(ips) - limit; remaining > 0 {
+		visible += fmt.Sprintf("，另有 %d 个未列出", remaining)
+	}
+	return visible
+}
+
+// FetchOCICostSummary checks billing data without scanning every compartment's volumes and IPs.
+func FetchOCICostSummary(ctx context.Context, client *OCIClient) (*OCICostSummary, error) {
+	if client == nil {
+		return nil, fmt.Errorf("OCI client 未初始化")
+	}
+	nowUTC := time.Now().UTC()
+	monthStart := time.Date(nowUTC.Year(), nowUTC.Month(), 1, 0, 0, 0, 0, time.UTC)
+	tomorrowStart := time.Date(nowUTC.Year(), nowUTC.Month(), nowUTC.Day(), 0, 0, 0, 0, time.UTC).Add(24 * time.Hour)
+	endpoint := fmt.Sprintf("https://usageapi.%s.oci.oraclecloud.com/20200107/usage", client.region)
+	body := map[string]any{
+		"tenantId":         client.tenancyOCID,
+		"timeUsageStarted": monthStart.Format("2006-01-02T15:04:05.000Z"),
+		"timeUsageEnded":   tomorrowStart.Format("2006-01-02T15:04:05.000Z"),
+		"granularity":      "DAILY",
+		"queryType":        "COST",
+		"groupBy":          []string{"service"},
+	}
+	var (
+		pageToken string
+		seen      = make(map[string]struct{})
+		bytesRead int64
+		total     float64
+		today     float64
+		currency  string
+	)
+	for page := 0; page < 1000; page++ {
+		pageURL := endpoint
+		if pageToken != "" {
+			parsed, err := url.Parse(endpoint)
+			if err != nil {
+				return nil, err
+			}
+			query := parsed.Query()
+			query.Set("page", pageToken)
+			parsed.RawQuery = query.Encode()
+			pageURL = parsed.String()
+		}
+		resp, data, err := client.Do(ctx, http.MethodPost, pageURL, body)
+		if err != nil {
+			return nil, fmt.Errorf("request OCI usage API error: %w", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("OCI usage API returned code %d: %s", resp.StatusCode, summarizeOCIResponse(data))
+		}
+		bytesRead += int64(len(data))
+		if bytesRead > maxOCIPaginatedBytes {
+			return nil, fmt.Errorf("OCI usage response exceeded %d byte aggregate limit", maxOCIPaginatedBytes)
+		}
+		var result ociUsageResponse
+		if err := json.Unmarshal(data, &result); err != nil {
+			return nil, fmt.Errorf("unmarshal usage response: %w", err)
+		}
+		for _, item := range result.Items {
+			started := item.TimeUsageStarted.UTC()
+			if item.TimeUsageStarted.IsZero() || started.Before(monthStart) || !started.Before(tomorrowStart) {
+				return nil, fmt.Errorf("OCI usage API returned a record outside the requested UTC range")
+			}
+			itemCurrency := strings.TrimSpace(item.Currency)
+			if itemCurrency == "" && item.ComputedAmount != 0 {
+				return nil, fmt.Errorf("OCI usage item has a nonzero amount without a currency")
+			}
+			if itemCurrency != "" {
+				if currency != "" && currency != itemCurrency {
+					return nil, fmt.Errorf("OCI usage API returned mixed currencies %q and %q", currency, itemCurrency)
+				}
+				currency = itemCurrency
+			}
+			total += item.ComputedAmount
+			if started.Format("2006-01-02") == nowUTC.Format("2006-01-02") {
+				today += item.ComputedAmount
+			}
+		}
+		pageToken = strings.TrimSpace(resp.Header.Get("opc-next-page"))
+		if pageToken == "" {
+			break
+		}
+		if _, exists := seen[pageToken]; exists {
+			return nil, fmt.Errorf("OCI usage API returned a repeated pagination token")
+		}
+		seen[pageToken] = struct{}{}
+		if page == 999 {
+			return nil, fmt.Errorf("OCI usage API exceeded 1000 pages")
+		}
+	}
+	if currency == "" {
+		currency = "未知"
+	}
+	return &OCICostSummary{Date: nowUTC.Format("2006-01-02"), TodayCost: today, MonthTotal: total, Currency: currency}, nil
 }
 
 // FetchBillReport 从 OCI API 查询生成完整账单报告
@@ -326,7 +439,7 @@ func FetchBillReport(ctx context.Context, client *OCIClient, loc *time.Location)
 
 	if len(nonzeroSKUs) > 0 {
 		lines = append(lines, "")
-		lines = append(lines, "**非零扣费记录**")
+		lines = append(lines, "**非零扣费记录摘录（最多展示 5 条）**")
 		startIdx := 0
 		if len(nonzeroSKUs) > 5 {
 			startIdx = len(nonzeroSKUs) - 5
@@ -345,12 +458,9 @@ func FetchBillReport(ctx context.Context, client *OCIClient, loc *time.Location)
 	lines = append(lines, fmt.Sprintf("- **存储占用**: `%d/200 GB` (%d 个卷)%s", totalGB, volCount, storageWarn))
 
 	if len(unboundIPs) > 0 {
-		lines = append(lines, fmt.Sprintf("- **闲置预留IP**: `%d` 个 (`%s`) — 建议释放以防产生计费", len(unboundIPs), strings.Join(unboundIPs, ", ")))
+		lines = append(lines, fmt.Sprintf("- **闲置预留IP**: `%d` 个 (`%s`) — 建议释放以防产生计费", len(unboundIPs), SummarizeIPList(unboundIPs, 20)))
 	} else {
-		boundStr := strings.Join(boundIPs, ", ")
-		if boundStr == "" {
-			boundStr = "无"
-		}
+		boundStr := SummarizeIPList(boundIPs, 20)
 		lines = append(lines, fmt.Sprintf("- **闲置预留IP**: `0` 个 (在用: `%s`)", boundStr))
 	}
 
@@ -415,16 +525,19 @@ func (t *OCIBillTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*co
 	if err != nil {
 		return nil, fmt.Errorf("fetch OCI bill report error: %w", err)
 	}
-
-	res := &core.ToolResult{
-		Text: report.Markdown,
+	if event := entity.SensoryEventFromContext(ctx); event == nil || !event.IsPartnerPrivate() {
+		report.Markdown = core.RedactSensitiveIPs(report.Markdown)
 	}
 
-	if args.RenderCard {
+	res := &core.ToolResult{Text: report.Markdown}
+	if args.RenderCard != nil && *args.RenderCard {
+		res.FallbackText = report.Markdown
 		cardCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
 		if pngBytes, err := render.RenderCard(cardCtx, report.Markdown); err == nil && len(pngBytes) > 0 {
 			res.ImageData = pngBytes
+		} else {
+			slog.Warn("oci_bill: 账单卡片渲染失败，保留 Markdown 报告", "err", err)
 		}
 	}
 

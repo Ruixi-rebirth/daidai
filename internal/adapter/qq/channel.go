@@ -2,16 +2,21 @@ package qq
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"mime"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"daidai/internal/core"
 	"daidai/internal/db"
 	"daidai/internal/entity"
 	"daidai/internal/kernel"
+	"daidai/internal/media"
 )
 
 // Config 官方 QQ 通道配置 (WebSocket + OpenAPI v2)
@@ -91,11 +96,44 @@ func (d *dedupCache) rememberLocked(msgID string) {
 }
 
 type msgCache struct {
-	mu    sync.RWMutex
-	items map[string]string
-	keys  []string
-	max   int
-	db    *db.Manager
+	mu            sync.RWMutex
+	items         map[string]db.MsgCacheEntry
+	keys          []string
+	max           int
+	db            *db.Manager
+	persistCh     chan msgCacheWrite
+	persistDone   chan struct{}
+	persistCtx    context.Context
+	persistCancel context.CancelFunc
+	persistMu     sync.Mutex
+	persistClosed bool
+}
+
+type msgCacheWrite struct {
+	entry db.MsgCacheEntry
+	done  chan struct{}
+}
+
+type qqOutgoingPart struct {
+	text  string
+	image []byte
+}
+
+type passiveReplyBudget struct {
+	used      int
+	reserved  int
+	limit     int
+	expiresAt time.Time
+}
+
+const maxQQOutgoingParts = 5
+const passiveReplyBudgetSweepInterval = time.Minute
+
+func maxQQPassiveReplies(isGroup bool) int {
+	if isGroup {
+		return 5
+	}
+	return 4
 }
 
 func newMsgCache(max int, dbMgr *db.Manager) *msgCache {
@@ -103,18 +141,18 @@ func newMsgCache(max int, dbMgr *db.Manager) *msgCache {
 		max = 500
 	}
 	c := &msgCache{
-		items: make(map[string]string),
+		items: make(map[string]db.MsgCacheEntry),
 		keys:  make([]string, 0, max),
 		max:   max,
 		db:    dbMgr,
 	}
 	if dbMgr != nil {
-		if err := dbMgr.DeleteMsgCacheByContentPrefix("qq", "/agy code"); err != nil {
-			slog.Warn("qq: 清理历史 OAuth 授权码缓存失败", "err", err)
-		}
-		if err := dbMgr.DeleteMsgCacheByContentPrefix("qq", "/agy auth"); err != nil {
-			slog.Warn("qq: 清理历史 OAuth 授权码缓存失败", "err", err)
-		}
+		c.persistCh = make(chan msgCacheWrite, 4096)
+		c.persistDone = make(chan struct{})
+		c.persistCtx, c.persistCancel = context.WithCancel(context.Background())
+		go c.persistLoop()
+	}
+	if dbMgr != nil {
 		if loaded, err := dbMgr.LoadMsgCache("qq", max); err == nil && len(loaded) > 0 {
 			for _, item := range loaded {
 				if entity.IsSensitiveAuthCommand(item.Content) {
@@ -123,7 +161,7 @@ func newMsgCache(max int, dbMgr *db.Manager) *msgCache {
 					}
 					continue
 				}
-				c.items[item.MsgID] = item.Content
+				c.items[item.MsgID] = item
 				c.keys = append(c.keys, item.MsgID)
 			}
 			slog.Info("qq: 成功从 SQLite 载入消息 ID 缓存", "count", len(c.items))
@@ -132,10 +170,91 @@ func newMsgCache(max int, dbMgr *db.Manager) *msgCache {
 	return c
 }
 
-func (c *msgCache) Set(msgID, content string) {
-	if msgID == "" || content == "" || entity.IsSensitiveAuthCommand(content) {
+func (c *msgCache) persistLoop() {
+	defer close(c.persistDone)
+	for {
+		select {
+		case write, ok := <-c.persistCh:
+			if !ok {
+				return
+			}
+			ctx, cancel := context.WithTimeout(c.persistCtx, 5*time.Second)
+			err := c.db.SaveMsgCache(ctx, "qq", write.entry.MsgID, write.entry.Content, write.entry.ChatType, write.entry.ConvID)
+			cancel()
+			if err != nil && !errors.Is(err, context.Canceled) {
+				slog.Warn("qq: 持久化引用消息缓存失败", "msgID", write.entry.MsgID, "err", err)
+			}
+			if write.done != nil {
+				close(write.done)
+			}
+		case <-c.persistCtx.Done():
+			// Close cancels only after closing the queue. Release synchronous
+			// writers for entries that will not be persisted during shutdown.
+			for write := range c.persistCh {
+				if write.done != nil {
+					close(write.done)
+				}
+			}
+			return
+		}
+	}
+}
+
+func (c *msgCache) Close(ctx context.Context) error {
+	if c.persistCh == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	c.persistMu.Lock()
+	if !c.persistClosed {
+		c.persistClosed = true
+		close(c.persistCh)
+	}
+	c.persistMu.Unlock()
+	select {
+	case <-c.persistDone:
+		return nil
+	case <-ctx.Done():
+		c.persistCancel()
+		return ctx.Err()
+	}
+}
+
+// Reopen restarts the persistence worker after a completed channel shutdown.
+// Keep the cache object itself so callbacks installed by NewQQChannel continue
+// writing to the same instance across Stop/Start cycles.
+func (c *msgCache) Reopen() {
+	if c == nil || c.db == nil {
 		return
 	}
+	c.persistMu.Lock()
+	defer c.persistMu.Unlock()
+	if !c.persistClosed {
+		return
+	}
+	c.persistCh = make(chan msgCacheWrite, 4096)
+	c.persistDone = make(chan struct{})
+	c.persistCtx, c.persistCancel = context.WithCancel(context.Background())
+	c.persistClosed = false
+	go c.persistLoop()
+}
+
+func (c *msgCache) Set(msgID, content, chatType, convID string) {
+	c.set(msgID, content, chatType, convID, true)
+}
+
+func (c *msgCache) SetAsync(msgID, content, chatType, convID string) {
+	c.set(msgID, content, chatType, convID, false)
+}
+
+func (c *msgCache) set(msgID, content, chatType, convID string, waitForPersistence bool) {
+	if msgID == "" || content == "" || entity.IsSensitiveAuthCommand(content) ||
+		(chatType != "private" && chatType != "group") || strings.TrimSpace(convID) == "" {
+		return
+	}
+	content = core.TruncateRunes(content, core.MaxUserMessageRunes, "…[消息已截断]")
 	c.mu.Lock()
 	if _, exists := c.items[msgID]; !exists {
 		if len(c.keys) >= c.max {
@@ -145,23 +264,74 @@ func (c *msgCache) Set(msgID, content string) {
 		}
 		c.keys = append(c.keys, msgID)
 	}
-	c.items[msgID] = content
+	entry := db.MsgCacheEntry{MsgID: msgID, Content: content, ChatType: chatType, ConvID: convID}
+	c.items[msgID] = entry
 	c.mu.Unlock()
 
-	if c.db != nil {
-		if err := c.db.SaveMsgCache("qq", msgID, content); err != nil {
-			slog.Warn("qq: 持久化引用消息缓存失败", "msgID", msgID, "err", err)
+	if c.persistCh != nil {
+		c.persistMu.Lock()
+		if c.persistClosed {
+			c.persistMu.Unlock()
+			if !waitForPersistence {
+				slog.Warn("qq: 忽略通道关闭后的引用消息缓存写入", "msgID", msgID)
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := c.db.SaveMsgCache(ctx, "qq", msgID, content, chatType, convID)
+			cancel()
+			if err != nil {
+				slog.Warn("qq: 通道关闭后持久化引用消息缓存失败", "msgID", msgID, "err", err)
+			}
+			return
+		}
+		write := msgCacheWrite{
+			entry: entry,
+		}
+		if waitForPersistence {
+			write.done = make(chan struct{})
+			c.persistCh <- write
+			c.persistMu.Unlock()
+			<-write.done
+			return
+		} else {
+			select {
+			case c.persistCh <- write:
+				c.persistMu.Unlock()
+			default:
+				c.persistMu.Unlock()
+				slog.Warn("qq: 引用消息缓存持久化队列已满，保留内存缓存但未排入 SQLite", "msgID", msgID)
+			}
 		}
 	}
 }
 
-func (c *msgCache) Get(msgID string) string {
-	if msgID == "" {
+func (c *msgCache) Get(msgID, chatType, convID string) string {
+	if msgID == "" || (chatType != "private" && chatType != "group") || strings.TrimSpace(convID) == "" {
 		return ""
 	}
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.items[msgID]
+	entry, exists := c.items[msgID]
+	c.mu.RUnlock()
+	if exists && entry.ChatType == chatType && entry.ConvID == convID {
+		return entry.Content
+	}
+	if c.db == nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	content, err := c.db.GetMsgCache(ctx, "qq", msgID, chatType, convID)
+	if err != nil {
+		slog.Warn("qq: 从持久化引用记录读取原消息失败", "msgID", msgID, "err", err)
+	}
+	if content != "" {
+		return content
+	}
+	content, err = c.db.MessageContentByPlatformID(ctx, "qq", chatType, convID, msgID)
+	if err != nil {
+		slog.Warn("qq: 从历史消息读取引用正文失败", "msgID", msgID, "err", err)
+	}
+	return content
 }
 
 // QQChannel 官方 QQ 开放平台全双工通道 (直接实现 entity.Channel，零前缀、单层架构)
@@ -172,12 +342,105 @@ type QQChannel struct {
 	immune     *entity.ImmuneSystem
 	msgCache   *msgCache
 	dedup      *dedupCache
+	inbox      *media.Inbox
 	stopCancel context.CancelFunc
 	wsWG       sync.WaitGroup
 
 	wsMu        sync.Mutex
 	wsSessionID string
 	wsLastSeq   int64
+	wsReady     atomic.Bool
+
+	replyBudgetsMu     sync.Mutex
+	replyBudgets       map[string]*passiveReplyBudget
+	replyBudgetSweepAt time.Time
+}
+
+func (q *QQChannel) reservePassiveReplyBudget(msgID string, count, limit int, window time.Duration) (*passiveReplyBudget, int, bool, error) {
+	if msgID == "" {
+		return nil, count, false, nil
+	}
+	if limit <= 0 || window <= 0 {
+		return nil, 0, false, fmt.Errorf("invalid QQ passive reply budget: limit=%d window=%s", limit, window)
+	}
+	now := time.Now()
+	q.replyBudgetsMu.Lock()
+	if q.replyBudgets == nil {
+		q.replyBudgets = make(map[string]*passiveReplyBudget)
+	}
+	if !now.Before(q.replyBudgetSweepAt) {
+		for key, budget := range q.replyBudgets {
+			if !now.Before(budget.expiresAt) && budget.reserved == 0 {
+				delete(q.replyBudgets, key)
+			}
+		}
+		q.replyBudgetSweepAt = now.Add(passiveReplyBudgetSweepInterval)
+	}
+	budget := q.replyBudgets[msgID]
+	if budget == nil {
+		budget = &passiveReplyBudget{limit: limit, expiresAt: now.Add(window)}
+		q.replyBudgets[msgID] = budget
+	} else if budget.limit != limit {
+		q.replyBudgetsMu.Unlock()
+		return nil, 0, false, fmt.Errorf("QQ message reply limit changed while processing one inbound message")
+	}
+	if !now.Before(budget.expiresAt) {
+		if budget.reserved == 0 {
+			budget.used = 0
+			budget.expiresAt = now.Add(window)
+		}
+	}
+	if budget.used+budget.reserved+count > budget.limit {
+		available := budget.limit - budget.used - budget.reserved
+		if available <= 0 {
+			used := budget.used + budget.reserved
+			q.replyBudgetsMu.Unlock()
+			return nil, 0, false, fmt.Errorf("QQ 入站消息的被动回复额度已使用或预留 %d/%d 条；本次未发送，请用新消息继续请求", used, budget.limit)
+		}
+		budget.reserved += available
+		q.replyBudgetsMu.Unlock()
+		return budget, available, true, nil
+	}
+	budget.reserved += count
+	q.replyBudgetsMu.Unlock()
+	return budget, count, false, nil
+}
+
+func (q *QQChannel) commitPassiveReplyAttempt(budget *passiveReplyBudget) {
+	if budget == nil {
+		return
+	}
+	q.replyBudgetsMu.Lock()
+	if budget.reserved > 0 {
+		budget.reserved--
+		budget.used++
+	}
+	q.replyBudgetsMu.Unlock()
+}
+
+func (q *QQChannel) reserveAdditionalPassiveReply(budget *passiveReplyBudget) bool {
+	if budget == nil {
+		return true
+	}
+	q.replyBudgetsMu.Lock()
+	defer q.replyBudgetsMu.Unlock()
+	if budget.used+budget.reserved >= budget.limit {
+		return false
+	}
+	budget.reserved++
+	return true
+}
+
+func (q *QQChannel) releasePassiveReplyReservations(budget *passiveReplyBudget, count int) {
+	if budget == nil || count <= 0 {
+		return
+	}
+	q.replyBudgetsMu.Lock()
+	budget.reserved -= count
+	if budget.reserved < 0 {
+		budget.reserved = 0
+	}
+	q.replyBudgetsMu.Unlock()
 }
 
 func (q *QQChannel) getWSSession() (string, int64) {
@@ -209,24 +472,47 @@ func (q *QQChannel) clearWSSession() {
 func NewQQChannel(cfg Config, immune *entity.ImmuneSystem) *QQChannel {
 	cache := newMsgCache(1000, db.DefaultManager())
 	cli := NewClient(cfg.AppID, cfg.Secret)
-	cli.SetOnMessageSent(func(msgID, content string) {
-		cache.Set(msgID, content)
-	})
-
-	return &QQChannel{
+	channel := &QQChannel{
 		cfg:      cfg,
 		client:   cli,
 		immune:   immune,
 		msgCache: cache,
 		dedup:    newDedupCache(2000),
 	}
+	cli.SetOnMessageSent(func(msgID, content, targetType, targetID string) {
+		// If QQ reflects an outbound group message through GROUP_MESSAGE_CREATE,
+		// its accepted send ID lets the inbound path drop that exact echo.
+		if channel.dedup != nil {
+			channel.dedup.Remember(msgID)
+		}
+		chatType := "private"
+		if targetType == "groups" {
+			chatType = "group"
+		}
+		cache.SetAsync(msgID, content, chatType, targetID)
+	})
+	return channel
 }
 
 func (q *QQChannel) Name() string {
 	return "qq"
 }
 
+// Ready reports whether the QQ gateway has completed READY or RESUMED.
+func (q *QQChannel) Ready() bool {
+	return q.wsReady.Load()
+}
+
+// SetAttachmentInbox enables short-lived, metadata-only attachment follow-ups.
+func (q *QQChannel) SetAttachmentInbox(inbox *media.Inbox) {
+	q.inbox = inbox
+}
+
 func (q *QQChannel) Start(ctx context.Context, onSensory func(event *entity.SensoryEvent)) error {
+	q.wsReady.Store(false)
+	if q.msgCache != nil {
+		q.msgCache.Reopen()
+	}
 	chCtx, cancel := context.WithCancel(ctx)
 	q.stopCancel = cancel
 
@@ -237,7 +523,8 @@ func (q *QQChannel) Start(ctx context.Context, onSensory func(event *entity.Sens
 			return
 		}
 		event.Content = strings.TrimSpace(event.Content)
-		if event.Content == "" && len(event.Images) == 0 {
+		if event.Content == "" && len(event.Images) == 0 && event.OmittedImages == 0 && len(event.Files) == 0 && event.OmittedFiles == 0 &&
+			len(event.PendingImages) == 0 && event.OmittedPendingImages == 0 && len(event.PendingFiles) == 0 && event.OmittedPendingFiles == 0 {
 			return
 		}
 		onSensory(event)
@@ -274,41 +561,68 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 	eventType, _ := payload["t"].(string)
 
 	var (
-		convID     string
-		userID     string
-		senderName string
-		content    string
-		msgID      string
-		isGroup    bool
-		images     []*core.Attachment
+		convID         string
+		userID         string
+		senderName     string
+		content        string
+		msgID          string
+		isGroup        bool
+		fullGroupEvent bool
+		botMentioned   bool
+		images         []*core.Attachment
+		omittedImages  int
+		files          []*core.Attachment
+		omittedFiles   int
 	)
 
 	msgID, _ = d["id"].(string)
 	rawContent, _ := d["content"].(string)
 	content = cleanQQContent(rawContent)
 
-	if msgID != "" && q.dedup != nil && q.dedup.Contains(msgID) {
-		slog.Debug("qq: 拦截到重复投递的事件消息", "msgID", msgID)
-		return true
-	}
-
-	if msgID != "" && content != "" && q.msgCache != nil && !entity.IsSensitiveAuthCommand(content) {
-		q.msgCache.Set(msgID, content)
-	}
-
-	// 解析附件图片
+	// 只有明确标记为图片的附件进入视觉模型；类型不明的附件按普通文件处理，须用户明确要求后才读取。
 	if attList, ok := d["attachments"].([]any); ok {
 		for _, item := range attList {
 			if attMap, ok := item.(map[string]any); ok {
 				fileURL, _ := attMap["url"].(string)
 				contentType, _ := attMap["content_type"].(string)
-				if fileURL != "" {
-					images = append(images, &core.Attachment{
-						Kind:     core.AttachmentImage,
-						URL:      fileURL,
-						MimeType: contentType,
-					})
+				fileName, _ := attMap["filename"].(string)
+				if fileName == "" {
+					fileName, _ = attMap["name"].(string)
 				}
+				fileName = core.TruncateRunes(strings.TrimSpace(fileName), 160, "…")
+				contentType = strings.ToLower(strings.TrimSpace(core.TruncateRunes(contentType, 128, "")))
+				baseContentType := strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0])
+				if fileName != "" && (baseContentType == "" || baseContentType == "application/octet-stream" || baseContentType == "binary/octet-stream") {
+					guessedType := strings.ToLower(strings.TrimSpace(strings.SplitN(mime.TypeByExtension(filepath.Ext(fileName)), ";", 2)[0]))
+					if guessedType != "" {
+						baseContentType = guessedType
+					}
+				}
+				contentType = core.TruncateRunes(baseContentType, 128, "…")
+				if fileURL == "" {
+					continue
+				}
+				if len(fileURL) > core.MaxAttachmentURLBytes {
+					if strings.HasPrefix(contentType, "image/") {
+						omittedImages++
+					} else {
+						omittedFiles++
+					}
+					continue
+				}
+				if strings.HasPrefix(contentType, "image/") {
+					if len(images) >= core.MaxVisionImagesPerRequest {
+						omittedImages++
+						continue
+					}
+					images = append(images, &core.Attachment{Kind: core.AttachmentImage, URL: fileURL, MimeType: contentType, Name: fileName, SourceMessageID: msgID})
+					continue
+				}
+				if len(files) >= core.MaxIncomingFilesPerRequest {
+					omittedFiles++
+					continue
+				}
+				files = append(files, &core.Attachment{Kind: core.AttachmentFile, URL: fileURL, MimeType: contentType, Name: fileName, SourceMessageID: msgID})
 			}
 		}
 	}
@@ -316,6 +630,16 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 	switch eventType {
 	case "GROUP_AT_MESSAGE_CREATE": // 群聊中被 @ 的消息
 		isGroup = true
+		botMentioned = true
+		convID, _ = d["group_openid"].(string)
+		if author, ok := d["author"].(map[string]any); ok {
+			userID, _ = author["member_openid"].(string)
+			senderName, _ = author["username"].(string)
+		}
+	case "GROUP_MESSAGE_CREATE": // 群聊全量消息；仅唤醒 @ 机器人的消息
+		isGroup = true
+		fullGroupEvent = true
+		botMentioned = qqMessageMentionsBot(d)
 		convID, _ = d["group_openid"].(string)
 		if author, ok := d["author"].(map[string]any); ok {
 			userID, _ = author["member_openid"].(string)
@@ -331,6 +655,10 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 		convID = userID
 
 	default:
+		return true
+	}
+	if msgID != "" && q.dedup != nil && q.dedup.Contains(msgID) {
+		slog.Debug("qq: 拦截到重复投递的事件消息", "msgID", msgID)
 		return true
 	}
 	if msgID == "" {
@@ -349,12 +677,13 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 
 		refMsgID, _ := ref["message_id"].(string)
 		if refContent == "" && refMsgID != "" && q.msgCache != nil {
-			refContent = q.msgCache.Get(refMsgID)
+			chatType := "private"
+			if isGroup {
+				chatType = "group"
+			}
+			refContent = q.msgCache.Get(refMsgID, chatType, convID)
 		}
-		if entity.IsSensitiveAuthCommand(refContent) {
-			refContent = "[OAuth authorization code redacted]"
-		}
-		refContent = core.TruncateRunes(refContent, core.MaxQuotedMessageRunes, "\n[引用消息过长，后续内容已截断]")
+		refContent = entity.SanitizeQuotedMessageContent(refContent)
 
 		slog.Info("qq: 处理引用消息", "msgID", msgID, "refMsgID", refMsgID, "hitCache", refContent != "")
 
@@ -381,8 +710,9 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 					if elType == 103 {
 						if c, ok := elMap["content"].(string); ok && strings.TrimSpace(c) != "" {
 							refMsgID, _ := elMap["id"].(string)
+							c = entity.SanitizeQuotedMessageContent(c)
 							replyCtx = &entity.SensoryEvent{
-								Content:      strings.TrimSpace(c),
+								Content:      c,
 								RawMessageID: refMsgID,
 							}
 							slog.Info("qq: 从 v2 msg_elements 中成功解析出引用消息", "msgID", msgID)
@@ -399,23 +729,59 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 		return true
 	}
 
-	if convID != "" && userID != "" && (content != "" || len(images) > 0) {
+	var pendingFiles []*core.Attachment
+	var pendingImages []*core.Attachment
+	var omittedPendingFiles int
+	var omittedPendingImages int
+	var attachmentScope string
+	if q.inbox != nil && convID != "" && userID != "" {
+		attachmentScope = media.AttachmentScope("qq", isGroup, convID, userID)
+		pendingFiles, omittedPendingFiles = q.inbox.PendingKind(attachmentScope, core.AttachmentFile)
+		pendingImages, omittedPendingImages = q.inbox.PendingKind(attachmentScope, core.AttachmentImage)
+	}
+	if convID != "" && userID != "" && (content != "" || len(images) > 0 || len(files) > 0 || len(pendingFiles) > 0 || len(pendingImages) > 0 || omittedPendingFiles > 0 || omittedPendingImages > 0) {
+		if content != "" && q.msgCache != nil && !entity.IsSensitiveAuthCommand(content) {
+			chatType := "private"
+			if isGroup {
+				chatType = "group"
+			}
+			q.msgCache.SetAsync(msgID, content, chatType, convID)
+		}
 		role := entity.RoleGuest
 		if q.immune != nil {
 			role = q.immune.ResolveRole(userID)
 		}
+		if q.inbox != nil && (len(files) > 0 || len(images) > 0) {
+			q.inbox.RememberPending(attachmentScope, append(append([]*core.Attachment(nil), files...), images...))
+		}
+		if fullGroupEvent && !botMentioned {
+			// Full-message mode can split a group @ and its image/file into
+			// separate events. Retain only attachment metadata here; the later
+			// addressed message can explicitly request processing it.
+			if q.dedup != nil {
+				q.dedup.Remember(msgID)
+			}
+			return true
+		}
 		accepted := q.IngestRaw(&entity.SensoryEvent{
-			Platform:     "qq",
-			ChannelID:    convID,
-			IsGroup:      isGroup,
-			SenderID:     userID,
-			SenderName:   strings.TrimSpace(senderName),
-			Role:         role,
-			Content:      strings.TrimSpace(content),
-			Images:       images,
-			ReplyContext: replyCtx,
-			RawMessageID: msgID,
-			OccurredAt:   time.Now(),
+			Platform:             "qq",
+			ChannelID:            convID,
+			IsGroup:              isGroup,
+			SenderID:             userID,
+			SenderName:           strings.TrimSpace(senderName),
+			Role:                 role,
+			Content:              strings.TrimSpace(content),
+			Images:               images,
+			OmittedImages:        omittedImages,
+			PendingImages:        pendingImages,
+			OmittedPendingImages: omittedPendingImages,
+			Files:                files,
+			PendingFiles:         pendingFiles,
+			OmittedFiles:         omittedFiles,
+			OmittedPendingFiles:  omittedPendingFiles,
+			ReplyContext:         replyCtx,
+			RawMessageID:         msgID,
+			OccurredAt:           time.Now(),
 		})
 		if !accepted {
 			return false
@@ -427,6 +793,23 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 	return true
 }
 
+func qqMessageMentionsBot(eventData map[string]any) bool {
+	mentions, ok := eventData["mentions"].([]any)
+	if !ok {
+		return false
+	}
+	for _, rawMention := range mentions {
+		mention, ok := rawMention.(map[string]any)
+		if !ok {
+			continue
+		}
+		if isYou, ok := mention["is_you"].(bool); ok && isYou {
+			return true
+		}
+	}
+	return false
+}
+
 // Transmit 物理发声：投递全息表达体到 QQ 客户端 (支持大文本自动分片与图文混合发送)
 func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) error {
 	if u == nil {
@@ -436,60 +819,196 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) error {
 		return fmt.Errorf("QQ client is unavailable")
 	}
 
-	imgData := u.CardData
+	images := u.Images
+	if len(images) == 0 && len(u.CardData) > 0 {
+		images = [][]byte{u.CardData}
+	} else if len(images) > 0 {
+		validImages := make([][]byte, 0, len(images))
+		for _, image := range images {
+			if len(image) > 0 {
+				validImages = append(validImages, image)
+			}
+		}
+		images = validImages
+	}
 	content := u.Text
-	if content == "" && len(imgData) == 0 {
+	if content == "" && len(images) == 0 {
 		return nil
 	}
 
 	if u.ChannelID == "" {
 		return fmt.Errorf("empty channelID in utterance")
 	}
-	if u.QuoteMsgID == "" {
-		return fmt.Errorf("QQ 主动推送已于 2025-04-21 停用；必须在有效的入站消息上下文中被动回复")
+	if u.Proactive && u.QuoteMsgID != "" {
+		return fmt.Errorf("QQ 主动消息不能同时携带被动回复引用 ID")
+	}
+	if u.QuoteMsgID == "" && !u.Proactive {
+		return fmt.Errorf("QQ 消息缺少入站引用 ID，必须显式标记为主动发送")
+	}
+	partLimit := maxQQOutgoingParts
+	replyWindow := time.Duration(0)
+	if !u.Proactive {
+		partLimit = maxQQPassiveReplies(u.IsGroup)
+		replyWindow = time.Hour
+		if u.IsGroup {
+			replyWindow = 5 * time.Minute
+		}
 	}
 
 	chunks := core.SplitMarkdownChunks(content, 1200)
 	if len(chunks) == 0 {
 		chunks = []string{""}
 	}
-	if len(chunks) > 5 {
-		return fmt.Errorf("QQ 被动回复最多 5 条，当前内容需要 %d 条，请缩短回复", len(chunks))
+	if len(chunks) > partLimit {
+		return fmt.Errorf("%w: QQ 单次发送最多 %d 条，当前文字需要 %d 条，请缩短回复", entity.ErrMessageTooLong, partLimit, len(chunks))
+	}
+	parts := make([]qqOutgoingPart, 0, len(chunks)+len(images)-1)
+	for i, chunk := range chunks {
+		part := qqOutgoingPart{text: chunk}
+		if i == 0 && len(images) > 0 {
+			part.image = images[0]
+		}
+		parts = append(parts, part)
+	}
+	for _, image := range images[1:] {
+		parts = append(parts, qqOutgoingPart{image: image})
+	}
+	if len(parts) > partLimit {
+		return fmt.Errorf("%w: 图文内容需要发送 %d 条，超过 QQ 单次最多 %d 条的限制", entity.ErrMessageTooLong, len(parts), partLimit)
+	}
+	budget, reservedCount, limitedByBudget, err := q.reservePassiveReplyBudget(u.QuoteMsgID, len(parts), partLimit, replyWindow)
+	if err != nil {
+		return err
+	}
+	defer func() { q.releasePassiveReplyReservations(budget, reservedCount) }()
+
+	sendPart := func(part qqOutgoingPart) error {
+		if u.IsGroup {
+			if len(part.image) > 0 {
+				return q.client.SendGroupMediaMessage(ctx, u.ChannelID, part.text, part.image, u.QuoteMsgID)
+			}
+			return q.client.SendGroupMessage(ctx, u.ChannelID, part.text, u.QuoteMsgID)
+		}
+		if len(part.image) > 0 {
+			return q.client.SendC2CMediaMessage(ctx, u.ChannelID, part.text, part.image, u.QuoteMsgID)
+		}
+		return q.client.SendC2CMessage(ctx, u.ChannelID, part.text, u.QuoteMsgID)
+	}
+	sendTrackedPart := func(part qqOutgoingPart) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if budget != nil {
+			// Reserve before sending: a network error may arrive after QQ accepted it.
+			q.commitPassiveReplyAttempt(budget)
+			reservedCount--
+		}
+		return sendPart(part)
 	}
 
-	for i, chunk := range chunks {
+	sentParts := 0
+	deliveredText := func() string {
+		var delivered strings.Builder
+		for _, part := range parts[:sentParts] {
+			if part.text != "" {
+				if delivered.Len() > 0 {
+					delivered.WriteString("\n\n")
+				}
+				delivered.WriteString(part.text)
+			}
+			if len(part.image) > 0 {
+				if delivered.Len() > 0 {
+					delivered.WriteString("\n")
+				}
+				delivered.WriteString("[图片已发送]")
+			}
+		}
+		return delivered.String()
+	}
+	undeliveredText := func(from int) string {
+		var remaining strings.Builder
+		for _, part := range parts[from:] {
+			if part.text != "" {
+				if remaining.Len() > 0 {
+					remaining.WriteString("\n\n")
+				}
+				remaining.WriteString(part.text)
+			}
+			if len(part.image) > 0 {
+				if remaining.Len() > 0 {
+					remaining.WriteString("\n\n")
+				}
+				remaining.WriteString("[图片未送达；文字续发无法恢复图片，请告诉我重新发送。]")
+			}
+		}
+		return remaining.String()
+	}
+	partsToSend := len(parts)
+	if limitedByBudget {
+		partsToSend = reservedCount
+		if partsToSend > 0 {
+			parts[partsToSend-1].text = strings.TrimSpace(parts[partsToSend-1].text + "\n[剩余内容未发送；回复“继续”可接着看。]")
+		}
+	}
+	for i, part := range parts[:partsToSend] {
 		if i > 0 {
 			select {
 			case <-ctx.Done():
+				if sentParts > 0 {
+					return &entity.PartialDeliveryError{Err: ctx.Err(), DeliveredText: deliveredText(), UndeliveredText: undeliveredText(sentParts)}
+				}
 				return ctx.Err()
 			case <-time.After(150 * time.Millisecond):
 			}
 		}
-
-		quoteID := u.QuoteMsgID
-		var media []byte
-		if i == 0 {
-			media = imgData
-		}
-
-		var err error
-		if u.IsGroup {
-			if len(media) > 0 {
-				err = q.client.SendGroupMediaMessage(ctx, u.ChannelID, chunk, media, quoteID)
-			} else {
-				err = q.client.SendGroupMessage(ctx, u.ChannelID, chunk, quoteID)
-			}
-		} else {
-			if len(media) > 0 {
-				err = q.client.SendC2CMediaMessage(ctx, u.ChannelID, chunk, media, quoteID)
-			} else {
-				err = q.client.SendC2CMessage(ctx, u.ChannelID, chunk, quoteID)
-			}
-		}
-
+		err := sendTrackedPart(part)
 		if err != nil {
-			slog.Error("qq_channel: 发送失败", "channelID", u.ChannelID, "isGroup", u.IsGroup, "quoteID", quoteID, "err", err)
+			slog.Error("qq_channel: 消息分片发送失败", "channelID", u.ChannelID, "isGroup", u.IsGroup, "quoteID", u.QuoteMsgID, "sentParts", sentParts, "err", err)
+			if sentParts > 0 {
+				partialText := deliveredText()
+				if ctx.Err() != nil {
+					return &entity.PartialDeliveryError{
+						Err:             ctx.Err(),
+						DeliveredText:   partialText,
+						UndeliveredText: undeliveredText(sentParts),
+					}
+				}
+				q.releasePassiveReplyReservations(budget, reservedCount)
+				reservedCount = 0
+				canSendNotice := sentParts+1 < partLimit
+				if budget != nil {
+					canSendNotice = q.reserveAdditionalPassiveReply(budget)
+					if canSendNotice {
+						reservedCount++
+					}
+				}
+				if canSendNotice {
+					notice := "部分内容发送失败，前面的内容已送达。"
+					if len(part.image) > 0 {
+						notice = "部分图片发送失败，前面的内容已送达。"
+					}
+					noticeErr := sendTrackedPart(qqOutgoingPart{text: notice})
+					if noticeErr == nil {
+						partialText = strings.TrimSpace(partialText + "\n\n" + notice)
+					} else {
+						return &entity.PartialDeliveryError{
+							Err:             fmt.Errorf("send part: %v; send partial-delivery notice: %w", err, noticeErr),
+							DeliveredText:   partialText,
+							UndeliveredText: undeliveredText(sentParts),
+						}
+					}
+				}
+				return &entity.PartialDeliveryError{Err: err, DeliveredText: partialText, UndeliveredText: undeliveredText(sentParts)}
+			}
 			return err
+		}
+		sentParts++
+	}
+	if partsToSend < len(parts) {
+		return &entity.PartialDeliveryError{
+			Err:             fmt.Errorf("QQ 被动回复额度仅剩 %d 条，已发送前 %d 条；剩余内容等待续发", partsToSend, sentParts),
+			DeliveredText:   deliveredText(),
+			UndeliveredText: undeliveredText(sentParts),
 		}
 	}
 
@@ -498,6 +1017,7 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) error {
 }
 
 func (q *QQChannel) Stop(ctx context.Context) error {
+	q.wsReady.Store(false)
 	if q.stopCancel != nil {
 		q.stopCancel()
 	}
@@ -517,13 +1037,18 @@ func (q *QQChannel) Stop(ctx context.Context) error {
 			firstErr = err
 		}
 	}
+	if q.msgCache != nil {
+		if err := q.msgCache.Close(ctx); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	return firstErr
 }
 
 // cleanQQContent 剥离 QQ 官方网关在群聊 @ 消息中注入的 <@!bot_id> 标签并清理首尾空白
 func cleanQQContent(s string) string {
 	for {
-		start := strings.Index(s, "<@!")
+		start := strings.Index(s, "<@")
 		if start == -1 {
 			break
 		}

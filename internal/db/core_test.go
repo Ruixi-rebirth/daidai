@@ -13,11 +13,11 @@ func TestManager_MessagesAndFactMutations(t *testing.T) {
 	ctx := context.Background()
 
 	// 1. 验证消息写入与正序读取（零前缀）
-	_, err := mgr.LogMessage(ctx, "qq", "group", "900100", "10001", "小明", "第一条群消息", false, "")
+	_, err := mgr.LogMessage(ctx, "qq", "group", "900100", "10001", "小明", "第一条群消息", false, "", "")
 	if err != nil {
 		t.Fatalf("LogMessage failed: %v", err)
 	}
-	_, err = mgr.LogMessage(ctx, "qq", "group", "900100", "daidai", "呆呆", "收到啦", true, "10001")
+	_, err = mgr.LogMessage(ctx, "qq", "group", "900100", "daidai", "呆呆", "收到啦", true, "10001", "")
 	if err != nil {
 		t.Fatalf("LogMessage bot failed: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestManager_MessagesAndFactMutations(t *testing.T) {
 
 	// 重置后新发的消息能够正常读取
 	time.Sleep(5 * time.Millisecond)
-	_, _ = mgr.LogMessage(ctx, "qq", "group", "900100", "10001", "小明", "重开后的第一句话", false, "")
+	_, _ = mgr.LogMessage(ctx, "qq", "group", "900100", "10001", "小明", "重开后的第一句话", false, "", "")
 	msgsNew, err := mgr.RecentMessages(ctx, "qq", "group", "900100", 10)
 	if err != nil || len(msgsNew) != 1 || msgsNew[0].Text != "重开后的第一句话" {
 		t.Fatalf("expected new message after reset, got %+v (err: %v)", msgsNew, err)

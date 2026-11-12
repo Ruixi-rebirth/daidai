@@ -24,7 +24,7 @@ func (t *RenderTool) Name() string {
 }
 
 func (t *RenderTool) Description() string {
-	return "将 Markdown 文档、代码或表格排版渲染为卡片长图。"
+	return "将 Markdown 内容渲染为卡片长图。对话中按内容和用户偏好判断是否使用：用户明确要求图片时应使用；系统状态、对比数据、报告、分主题总结、较长清单或表格在图片更易浏览或保存时可使用；简单结论、短对话和需要连续阅读的解释保留文字。调用后仍需用自然语言回复用户，说明图片内容。"
 }
 
 func (t *RenderTool) Parameters() map[string]any {
@@ -66,13 +66,17 @@ func (t *RenderTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 	pngBytes, err := render.RenderCard(renderCtx, content)
 	if err != nil {
 		slog.Error("render_tool: 卡片渲染失败", "err", err)
-		return nil, fmt.Errorf("render card failed: %w", err)
+		return &core.ToolResult{
+			Text:         "卡片渲染失败，以下为文字内容：\n" + content,
+			FallbackText: content,
+		}, nil
 	}
 
 	slog.Info("render_tool: 卡片图片渲染成功", "bytes", len(pngBytes))
 
 	return &core.ToolResult{
-		Text:      "卡片图片已成功渲染生成",
-		ImageData: pngBytes,
+		Text:         "卡片图片已成功渲染生成",
+		FallbackText: content,
+		ImageData:    pngBytes,
 	}, nil
 }

@@ -18,8 +18,8 @@ import (
 )
 
 const (
-	tokenURL            = "https://bots.qq.com/app/getAppAccessToken"
-	apiBaseURL          = "https://api.sgroup.qq.com"
+	tokenURL            = "https://api.bot.qq.com/app/getAppAccessToken"
+	apiBaseURL          = "https://api.bot.qq.com"
 	maxAPIResponseBytes = 1 << 20
 	maxQQMediaBytes     = core.MaxImageBytes
 )
@@ -36,17 +36,17 @@ type Client struct {
 	expiresAt   time.Time
 
 	msgSeq        uint32
-	onMessageSent func(msgID, content string)
+	onMessageSent func(msgID, content, targetType, targetID string)
 }
 
 // SetOnMessageSent 注册发送成功后的消息记录回调
-func (c *Client) SetOnMessageSent(fn func(msgID, content string)) {
+func (c *Client) SetOnMessageSent(fn func(msgID, content, targetType, targetID string)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.onMessageSent = fn
 }
 
-func (c *Client) notifySent(respBytes []byte, content string) {
+func (c *Client) notifySent(respBytes []byte, content, targetType, targetID string) {
 	c.mu.RLock()
 	fn := c.onMessageSent
 	c.mu.RUnlock()
@@ -59,9 +59,9 @@ func (c *Client) notifySent(respBytes []byte, content string) {
 	}
 	if err := json.Unmarshal(respBytes, &res); err == nil && res.ID != "" {
 		slog.Info("qq: 成功登记出站消息 ID", "id", res.ID)
-		fn(res.ID, content)
+		fn(res.ID, content, targetType, targetID)
 	} else {
-		slog.Warn("qq: 发送成功但响应未解析出 id", "raw", summarizeAPIResponse(respBytes))
+		slog.Warn("qq: 发送成功但响应未包含可解析的消息 ID")
 	}
 }
 
@@ -169,6 +169,8 @@ func (c *Client) refreshTokenForRejectedToken(ctx context.Context, rejectedToken
 	var res struct {
 		AccessToken string `json:"access_token"`
 		ExpiresIn   any    `json:"expires_in"`
+		Code        int    `json:"code"`
+		Message     string `json:"message"`
 	}
 	body, err := readBoundedAPIResponse(resp.Body)
 	if err != nil {
@@ -178,6 +180,9 @@ func (c *Client) refreshTokenForRejectedToken(ctx context.Context, rejectedToken
 		return err
 	}
 	if strings.TrimSpace(res.AccessToken) == "" {
+		if res.Code != 0 || strings.TrimSpace(res.Message) != "" {
+			return fmt.Errorf("token request rejected [code=%d]: %s", res.Code, summarizeAPIResponse([]byte(res.Message)))
+		}
 		return fmt.Errorf("token response did not contain an access_token")
 	}
 
@@ -276,7 +281,7 @@ func (c *Client) sendMessage(ctx context.Context, targetType, targetID, content,
 
 	resp, err := c.doPostJSON(ctx, url, mdPayload)
 	if err == nil {
-		c.notifySent(resp, content)
+		c.notifySent(resp, content, targetType, targetID)
 		return nil
 	}
 	return fmt.Errorf("send QQ markdown message: %w", err)
@@ -317,7 +322,7 @@ func (c *Client) sendMediaMessage(ctx context.Context, targetType, targetID, con
 
 	resp, err := c.doPostJSON(ctx, url, payload)
 	if err == nil {
-		c.notifySent(resp, content)
+		c.notifySent(resp, content, targetType, targetID)
 	}
 	return err
 }
@@ -365,7 +370,7 @@ func (c *Client) doPostJSON(ctx context.Context, url string, data any) ([]byte, 
 			if readErr != nil {
 				return nil, readErr
 			}
-			if retryResp.StatusCode >= 200 && retryResp.StatusCode < 300 {
+			if validateAPIResponse(retryResp.StatusCode, retryBytes) == nil {
 				slog.Info("qq api 401 刷新 token 后重发成功", "url", url)
 				return retryBytes, nil
 			}
@@ -376,11 +381,34 @@ func (c *Client) doPostJSON(ctx context.Context, url string, data any) ([]byte, 
 		}
 	}
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return respBytes, fmt.Errorf("api request failed [status=%d]: %s", resp.StatusCode, summarizeAPIResponse(respBytes))
+	if err := validateAPIResponse(resp.StatusCode, respBytes); err != nil {
+		return respBytes, err
 	}
 
 	return respBytes, nil
+}
+
+func validateAPIResponse(status int, respBytes []byte) error {
+	if status < 200 || status >= 300 {
+		return fmt.Errorf("api request failed [status=%d]: %s", status, summarizeAPIResponse(respBytes))
+	}
+	var apiError struct {
+		ErrCode int    `json:"err_code"`
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(respBytes, &apiError); err == nil && (apiError.ErrCode != 0 || apiError.Code != 0) {
+		code := apiError.ErrCode
+		if code == 0 {
+			code = apiError.Code
+		}
+		message := summarizeAPIResponse([]byte(apiError.Message))
+		if message == "" {
+			message = summarizeAPIResponse(respBytes)
+		}
+		return fmt.Errorf("api request rejected [code=%d]: %s", code, message)
+	}
+	return nil
 }
 
 func readBoundedAPIResponse(body io.Reader) ([]byte, error) {

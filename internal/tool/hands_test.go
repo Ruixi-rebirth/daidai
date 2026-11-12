@@ -13,12 +13,12 @@ func TestHandsRegistry_BasicsAndDeterministicOrder(t *testing.T) {
 	})
 
 	defs := reg.Definitions()
-	if len(defs) != 8 {
-		t.Fatalf("expected 8 definitions, got %d", len(defs))
+	if len(defs) != 9 {
+		t.Fatalf("expected 9 definitions, got %d", len(defs))
 	}
 
 	// 验证确定性顺序（保证大模型 Prompt Cache 命中率）
-	expectedOrder := []string{"render_card", "get_system_status", "manage_memory", "search_web", "read_link", "screenshot_web", "singbox_links", "search_nix_package"}
+	expectedOrder := []string{"render_card", "get_system_status", "manage_memory", "summarize_chat", "search_web", "read_link", "screenshot_web", "singbox_links", "search_nix_package"}
 	for i, name := range expectedOrder {
 		if defs[i].Function.Name != name {
 			t.Errorf("expected tool #%d to be %s, got %s", i, name, defs[i].Function.Name)

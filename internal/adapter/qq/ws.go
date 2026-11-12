@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +35,7 @@ func (q *QQChannel) StartWebSocket(ctx context.Context) {
 				if err := q.runWebSocketSession(ctx); err != nil && ctx.Err() == nil {
 					slog.Error("qq websocket session disconnected, reconnecting in 5s...", "err", err)
 				}
+				q.wsReady.Store(false)
 			}
 			select {
 			case <-ctx.Done():
@@ -80,6 +82,11 @@ func (c *Client) FetchGatewayURL(ctx context.Context) (string, error) {
 	if err != nil || gatewayURL.Scheme != "wss" || gatewayURL.Host == "" || gatewayURL.User != nil || gatewayURL.Fragment != "" {
 		return "", fmt.Errorf("fetch gateway returned an invalid wss URL")
 	}
+	// Only the documented official Gateway host may receive the access token in IDENTIFY.
+	trustedGatewayHost := strings.EqualFold(gatewayURL.Hostname(), "api.bot.qq.com")
+	if !trustedGatewayHost || (gatewayURL.Port() != "" && gatewayURL.Port() != "443") {
+		return "", fmt.Errorf("fetch gateway returned an invalid wss URL")
+	}
 	return gatewayURL.String(), nil
 }
 
@@ -104,7 +111,7 @@ func (q *QQChannel) runWebSocketSession(ctx context.Context) error {
 		return fmt.Errorf("failed to get gateway url: %w", err)
 	}
 
-	slog.Info("connecting to qq websocket gateway...", "url", gatewayURL)
+	slog.Info("connecting to qq websocket gateway...")
 
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, gatewayURL, nil)
 	if err != nil {
@@ -121,6 +128,9 @@ func (q *QQChannel) runWebSocketSession(ctx context.Context) error {
 		heartbeatStop = make(chan struct{})
 		heartbeatOnce sync.Once
 		writeMu       sync.Mutex
+		heartbeatMu   sync.Mutex
+		lastHeartbeat time.Time
+		heartbeatAck  bool
 		hbInterval    = 30 * time.Second
 	)
 	defer close(heartbeatStop)
@@ -199,13 +209,31 @@ func (q *QQChannel) runWebSocketSession(ctx context.Context) error {
 						case <-heartbeatStop:
 							return
 						case <-ticker.C:
+							heartbeatMu.Lock()
+							missedAck := !lastHeartbeat.IsZero() && !heartbeatAck
+							if !missedAck {
+								lastHeartbeat = time.Now()
+								heartbeatAck = false
+							}
+							heartbeatMu.Unlock()
+							if missedAck {
+								q.wsReady.Store(false)
+								slog.Warn("qq ws: 上一轮心跳未收到 ACK，关闭连接并重新连接")
+								_ = conn.Close()
+								return
+							}
 							seqMu.Lock()
 							s := lastSeq
 							seqMu.Unlock()
-							_ = sendJSON(map[string]any{
+							if err := sendJSON(map[string]any{
 								"op": 1,
 								"d":  s,
-							})
+							}); err != nil {
+								q.wsReady.Store(false)
+								slog.Warn("qq ws: 心跳发送失败，关闭连接以触发及时重连", "err", err)
+								_ = conn.Close()
+								return
+							}
 						}
 					}
 				}()
@@ -253,22 +281,36 @@ func (q *QQChannel) runWebSocketSession(ctx context.Context) error {
 			slog.Info("sent identify to qq gateway, awaiting ready...")
 
 		case 11: // 服务端心跳 ACK 回应包
+			heartbeatMu.Lock()
+			if !lastHeartbeat.IsZero() {
+				heartbeatAck = true
+			}
+			heartbeatMu.Unlock()
 			slog.Debug("qq ws: 收到心跳 ACK (Op 11)")
 
 		case 0: // Dispatch 事件分发
 			if payload.T == "READY" {
-				advanceSequence(payload.S)
 				var readyData struct {
 					SessionID string `json:"session_id"`
 				}
-				if err := json.Unmarshal(payload.D, &readyData); err == nil && readyData.SessionID != "" {
-					q.setWSSessionID(readyData.SessionID)
+				if err := json.Unmarshal(payload.D, &readyData); err != nil {
+					return fmt.Errorf("decode QQ READY dispatch: %w", err)
 				}
+				if readyData.SessionID == "" {
+					return fmt.Errorf("QQ READY dispatch omitted session_id")
+				}
+				q.setWSSessionID(readyData.SessionID)
+				advanceSequence(payload.S)
+				q.wsReady.Store(true)
 				slog.Info("QQ Bot WebSocket Gateway is READY, 机器人已全线连接上线", "sessionID", readyData.SessionID)
 				continue
 			}
 			if payload.T == "RESUMED" {
+				if sessionID, _ := q.getWSSession(); sessionID == "" {
+					return fmt.Errorf("QQ RESUMED dispatch arrived without a resumable session")
+				}
 				advanceSequence(payload.S)
+				q.wsReady.Store(true)
 				slog.Info("QQ Bot WebSocket session RESUMED, 断线期间事件已无损续接")
 				continue
 			}
@@ -291,14 +333,17 @@ func (q *QQChannel) runWebSocketSession(ctx context.Context) error {
 			seqMu.Lock()
 			s := lastSeq
 			seqMu.Unlock()
-			_ = sendJSON(map[string]any{
+			if err := sendJSON(map[string]any{
 				"op": 1,
 				"d":  s,
-			})
+			}); err != nil {
+				return fmt.Errorf("reply requested heartbeat: %w", err)
+			}
 
 		case 7: // 服务端要求重连
 			return fmt.Errorf("server requested reconnect (op 7)")
 		case 9: // INVALID_SESSION 的 d 标记会话是否仍可恢复
+			q.wsReady.Store(false)
 			var canResume bool
 			if err := json.Unmarshal(payload.D, &canResume); err == nil && canResume {
 				slog.Warn("qq ws: 网关暂时拒绝会话，但仍允许恢复；保留 session 供重连使用")

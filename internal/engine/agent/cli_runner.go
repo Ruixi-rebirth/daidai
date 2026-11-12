@@ -31,9 +31,6 @@ type CLIWorker struct {
 
 // NewCLIWorker 实例化通用命令行工作者
 func NewCLIWorker(cfg CLIAgentConfig) *CLIWorker {
-	if cfg.Timeout <= 0 {
-		cfg.Timeout = 5 * time.Minute
-	}
 	return &CLIWorker{cfg: cfg}
 }
 
@@ -122,7 +119,11 @@ func (w *CLIWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (string
 		}
 	}
 
-	taskCtx, cancel := context.WithTimeout(ctx, w.cfg.Timeout)
+	taskCtx := ctx
+	cancel := func() {}
+	if w.cfg.Timeout > 0 {
+		taskCtx, cancel = context.WithTimeout(ctx, w.cfg.Timeout)
+	}
 	defer cancel()
 
 	cmd := exec.CommandContext(taskCtx, w.cfg.Command, finalArgs...)
@@ -158,10 +159,36 @@ func (w *CLIWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (string
 		if detail == "" {
 			detail = stdoutStr
 		}
-		if detail != "" {
-			return "", fmt.Errorf("[%s] 执行失败 (%v): %s", w.cfg.Name, err, detail)
+		var partial string
+		if stdoutStr != "" {
+			partial = "标准输出：\n" + stdoutStr
 		}
-		return "", fmt.Errorf("[%s] 执行失败: %w", w.cfg.Name, err)
+		if stderrStr != "" {
+			if partial != "" {
+				partial += "\n\n"
+			}
+			partial += "标准错误：\n" + stderrStr
+		}
+		if partial != "" {
+			if stdoutBuf.Truncated() || stderrBuf.Truncated() {
+				partial += "\n[子进程输出已截断]"
+			}
+			partial = "【本阶段未完成，以下是子进程部分输出】\n" + core.TruncateRunes(partial, 6000, "\n[阶段输出超过长度限制，后续内容已截断]")
+		}
+		if detail != "" {
+			return partial, fmt.Errorf("[%s] 执行失败 (%v): %s", w.cfg.Name, err, detail)
+		}
+		return partial, fmt.Errorf("[%s] 执行失败: %w", w.cfg.Name, err)
+	}
+	if stdoutBuf.Truncated() {
+		partial := stdoutStr
+		if stderrStr != "" {
+			if partial != "" {
+				partial += "\n\n"
+			}
+			partial += "标准错误：\n" + stderrStr
+		}
+		return partial, fmt.Errorf("[%s] 标准输出超过 2 MiB 上限，工单结果不完整", w.cfg.Name)
 	}
 
 	switch {

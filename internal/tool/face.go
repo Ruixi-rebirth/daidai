@@ -103,33 +103,49 @@ func normalizeEmotion(raw string) string {
 	}
 }
 
-func (t *FaceTool) readCachedFace(emotion string) ([]byte, bool) {
-	for _, ext := range []string{".png", ".jpg", ".jpeg", ".webp"} {
-		p := filepath.Join(t.baseDir, emotion+ext)
-		if data, err := readFileLimited(p, maxGeneratedImageBytes); err == nil && validImageData(data) {
-			return data, true
+func (t *FaceTool) readCachedFace(ctx context.Context, emotion string) ([]byte, bool) {
+	entries, err := os.ReadDir(t.baseDir)
+	if err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() || strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name())) != emotion {
+				continue
+			}
+			data, err := readFileLimited(filepath.Join(t.baseDir, entry.Name()), maxGeneratedImageBytes)
+			if err != nil {
+				continue
+			}
+			normalized, _, err := normalizeImageData(ctx, data)
+			if err == nil {
+				return normalized, true
+			}
 		}
 	}
 	data, err := assets.SmallFaces.ReadFile(filepath.Join("daidai_faces_small", emotion+".png"))
-	if err == nil && validImageData(data) {
-		return data, true
+	if err == nil {
+		if normalized, _, normalizeErr := normalizeImageData(ctx, data); normalizeErr == nil {
+			return normalized, true
+		}
 	}
 	return nil, false
 }
 
-func (t *FaceTool) referenceFacePath() (string, func(), error) {
-	for _, ext := range []string{".png", ".jpg", ".jpeg", ".webp"} {
-		path := filepath.Join(t.baseDir, "正脸"+ext)
-		if data, err := readFileLimited(path, maxGeneratedImageBytes); err == nil && validImageData(data) {
-			absPath, err := filepath.Abs(path)
-			return absPath, func() {}, err
-		}
+func (t *FaceTool) referenceFacePath(ctx context.Context) (string, func(), error) {
+	if data, ok := t.readCachedFace(ctx, "正脸"); ok {
+		return t.writeReferenceImage(data)
 	}
 
 	data, err := assets.SmallFaces.ReadFile(filepath.Join("daidai_faces_small", "开心.png"))
 	if err != nil {
 		return "", nil, fmt.Errorf("读取内置表情参考图失败: %w", err)
 	}
+	normalized, _, err := normalizeImageData(ctx, data)
+	if err != nil {
+		return "", nil, fmt.Errorf("解码内置表情参考图失败: %w", err)
+	}
+	return t.writeReferenceImage(normalized)
+}
+
+func (t *FaceTool) writeReferenceImage(data []byte) (string, func(), error) {
 	tmpFile, err := os.CreateTemp(t.baseDir, ".face-reference-*.png")
 	if err != nil {
 		return "", nil, fmt.Errorf("创建临时参考图失败: %w", err)
@@ -169,7 +185,7 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 	}
 
 	// 1. 检查本地缓存是否存在该形象或表情
-	if data, ok := t.readCachedFace(emotion); ok {
+	if data, ok := t.readCachedFace(ctx, emotion); ok {
 		return &core.ToolResult{
 			Text:      fmt.Sprintf("已发送呆呆的【%s】图片", emotion),
 			ImageData: data,
@@ -185,7 +201,7 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 	}
 	if event.Role == entity.RoleGuest {
 		for _, fallback := range []string{"开心", "正脸"} {
-			if data, ok := t.readCachedFace(fallback); ok {
+			if data, ok := t.readCachedFace(ctx, fallback); ok {
 				return &core.ToolResult{
 					Text:      fmt.Sprintf("已发送呆呆的【%s】图片", fallback),
 					ImageData: data,
@@ -217,12 +233,7 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 	if err := os.MkdirAll(t.baseDir, 0755); err != nil {
 		return &core.ToolResult{Text: fmt.Sprintf("创建形象缓存目录失败：%v", err)}, nil
 	}
-	cachePath := filepath.Join(t.baseDir, emotion+".jpg")
-	absCachePath, absErr := filepath.Abs(cachePath)
-	if absErr != nil {
-		absCachePath = cachePath
-	}
-	tmpFile, err := os.CreateTemp(t.baseDir, ".face-gen-*.jpg")
+	tmpFile, err := os.CreateTemp(t.baseDir, ".face-gen-*.png")
 	if err != nil {
 		return &core.ToolResult{Text: fmt.Sprintf("创建形象临时文件失败：%v", err)}, nil
 	}
@@ -232,20 +243,25 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 		return &core.ToolResult{Text: fmt.Sprintf("关闭形象临时文件失败：%v", err)}, nil
 	}
 	defer func() { _ = os.Remove(tmpPath) }()
+	// Keep the randomized path but remove the empty placeholder so a failed
+	// generator is reported as a missing output file, not as an empty image.
+	if err := os.Remove(tmpPath); err != nil {
+		return &core.ToolResult{Text: fmt.Sprintf("准备形象输出路径失败：%v", err)}, nil
+	}
 	absTmpPath, absErr := filepath.Abs(tmpPath)
 	if absErr != nil {
 		absTmpPath = tmpPath
 	}
 
-	refPath, cleanupRef, err := t.referenceFacePath()
+	refPath, cleanupRef, err := t.referenceFacePath(ctx)
 	if err != nil {
 		return &core.ToolResult{Text: fmt.Sprintf("准备形象参考图失败：%v", err)}, nil
 	}
 	defer cleanupRef()
-	goal := fmt.Sprintf("请调用 image-generator 子智能体生成一张呆呆本人的二次元插画照片（主题/角度/神态：%s），请让 image-generator 先读取参考基准图 %s 以严格保持同一人物的五官、发色（黑茶色微卷中长发）、白色小兔发夹、蓝灰眼眸与画风一致。生成完成后，将图片文件复制到临时输出路径：%s 。", emotion, refPath, absTmpPath)
+	goal := fmt.Sprintf("请调用 image-generator 子智能体生成一张呆呆本人的二次元插画照片（主题/角度/神态：%s），请让 image-generator 先读取参考基准图 %s 以严格保持同一人物的五官、发色（黑茶色微卷中长发）、白色小兔发夹、蓝灰眼眸与画风一致。最终文件必须是实际 PNG 格式（不是仅修改扩展名）；生成完成后，将图片复制到临时输出路径：%s。", emotion, refPath, absTmpPath)
 
 	slog.Info("face_tool: 触发无状态后台动态生成呆呆新图片", "emotion", emotion)
-	if _, execErr := runStatelessImageGen(ctx, t.command, goal, filepath.Dir(absCachePath)); execErr != nil {
+	if _, execErr := runStatelessImageGen(ctx, t.command, goal, filepath.Dir(absTmpPath)); execErr != nil {
 		slog.Warn("face_tool: 动态生成图片失败", "emotion", emotion, "err", execErr)
 		return &core.ToolResult{
 			Text: fmt.Sprintf("动态生成【%s】图片失败：%v", emotion, execErr),
@@ -254,19 +270,43 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 
 	data, err := readFileLimited(tmpPath, maxGeneratedImageBytes)
 	if err != nil {
-		return &core.ToolResult{Text: fmt.Sprintf("图片已生成，但读取临时文件失败：%v", err)}, nil
+		slog.Warn("face_tool: 生成结果读取失败", "emotion", emotion, "err", err)
+		if os.IsNotExist(err) {
+			return &core.ToolResult{Text: fmt.Sprintf("已尝试生成【%s】图片，但生成器没有写出图片文件。", emotion)}, nil
+		}
+		return &core.ToolResult{Text: fmt.Sprintf("已生成【%s】图片，但读取失败；请检查服务日志。", emotion)}, nil
 	}
 	if len(data) == 0 {
 		return &core.ToolResult{Text: fmt.Sprintf("已尝试生成【%s】图片，但输出文件为空", emotion)}, nil
 	}
-	if !validImageData(data) {
-		return &core.ToolResult{Text: fmt.Sprintf("生成的【%s】文件不是受支持的图片格式", emotion)}, nil
+	normalized, format, normalizeErr := normalizeImageData(ctx, data)
+	if normalizeErr != nil {
+		slog.Warn("face_tool: 生成结果无法解码或转换", "emotion", emotion, "contentType", imageContentType(data), "format", format, "bytes", len(data), "err", normalizeErr)
+		return &core.ToolResult{Text: fmt.Sprintf("生成的【%s】图片无法识别或转换（检测类型：%s）：%v", emotion, imageContentType(data), normalizeErr)}, nil
 	}
-	if err := os.Rename(tmpPath, cachePath); err != nil {
-		return &core.ToolResult{Text: fmt.Sprintf("图片已生成，但更新形象缓存失败：%v", err)}, nil
+	cacheFile, err := os.CreateTemp(t.baseDir, ".face-cache-*.png")
+	if err != nil {
+		slog.Warn("face_tool: 创建规范化缓存临时文件失败", "emotion", emotion, "err", err)
+		return &core.ToolResult{Text: fmt.Sprintf("已生成【%s】图片，但暂时无法保存到形象缓存；请重试。", emotion)}, nil
+	}
+	cacheTempPath := cacheFile.Name()
+	defer func() { _ = os.Remove(cacheTempPath) }()
+	if _, err := cacheFile.Write(normalized); err != nil {
+		_ = cacheFile.Close()
+		slog.Warn("face_tool: 写入规范化缓存失败", "emotion", emotion, "err", err)
+		return &core.ToolResult{Text: fmt.Sprintf("已生成【%s】图片，但暂时无法保存到形象缓存；请重试。", emotion)}, nil
+	}
+	if err := cacheFile.Close(); err != nil {
+		slog.Warn("face_tool: 关闭规范化缓存失败", "emotion", emotion, "err", err)
+		return &core.ToolResult{Text: fmt.Sprintf("已生成【%s】图片，但暂时无法保存到形象缓存；请重试。", emotion)}, nil
+	}
+	cachePath := filepath.Join(t.baseDir, emotion+".png")
+	if err := os.Rename(cacheTempPath, cachePath); err != nil {
+		slog.Warn("face_tool: 更新形象缓存失败", "emotion", emotion, "err", err)
+		return &core.ToolResult{Text: fmt.Sprintf("已生成【%s】图片，但暂时无法保存到形象缓存；请重试。", emotion)}, nil
 	}
 	return &core.ToolResult{
 		Text:      fmt.Sprintf("已生成并发送呆呆的【%s】图片", emotion),
-		ImageData: data,
+		ImageData: normalized,
 	}, nil
 }

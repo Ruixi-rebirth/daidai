@@ -292,11 +292,7 @@ func (m *MemoryEngine) RecallEpisodic(ctx context.Context, event *entity.Sensory
 	if err == nil && len(facts) > 0 {
 		var lines []string
 		for _, f := range facts {
-			label := "全局"
-			if f.ScopeType == "group" {
-				label = "本群"
-			}
-			lines = append(lines, fmt.Sprintf("- [ID: %d][%s] %s", f.ID, label, boundedFactContent(f.Content)))
+			lines = append(lines, fmt.Sprintf("- [ID: %d][%s] %s", f.ID, f.ScopeLabel(), boundedFactContent(f.Content)))
 		}
 		if event.SenderName != "" {
 			sections = append(sections, fmt.Sprintf("【当前对话用户 (%s) 的特征与长期记忆】：\n%s", event.SenderName, strings.Join(lines, "\n")))
@@ -429,7 +425,7 @@ func (m *MemoryEngine) Commit(ctx context.Context, event *entity.SensoryEvent, r
 	var userMsgID, botMsgID int64
 	if userText != "" {
 		var err error
-		userMsgID, err = dbMgr.LogMessage(ctx, event.Platform, chatType, event.ChannelID, event.SenderID, event.SenderName, userText, false, "")
+		userMsgID, err = dbMgr.LogMessage(ctx, event.Platform, chatType, event.ChannelID, event.SenderID, event.SenderName, userText, false, "", event.RawMessageID)
 		if err != nil {
 			slog.Warn("memory: 保存用户消息失败", "platform", event.Platform, "channel", event.ChannelID, "err", err)
 		}
@@ -437,7 +433,7 @@ func (m *MemoryEngine) Commit(ctx context.Context, event *entity.SensoryEvent, r
 
 	if replyText != "" {
 		var err error
-		botMsgID, err = dbMgr.LogMessage(ctx, event.Platform, chatType, event.ChannelID, "daidai", "呆呆", replyText, true, event.SenderID)
+		botMsgID, err = dbMgr.LogMessage(ctx, event.Platform, chatType, event.ChannelID, "daidai", "呆呆", replyText, true, event.SenderID, "")
 		if err != nil {
 			slog.Warn("memory: 保存机器人回复失败", "platform", event.Platform, "channel", event.ChannelID, "err", err)
 		}
@@ -460,7 +456,7 @@ func (m *MemoryEngine) Commit(ctx context.Context, event *entity.SensoryEvent, r
 		evCopy.VisionSummary = visionSummary
 		if evCopy.ReplyContext != nil {
 			replyCopy := *evCopy.ReplyContext
-			replyCopy.Content = core.TruncateRunes(replyCopy.Content, core.MaxQuotedMessageRunes, "\n[引用消息过长，后续内容已截断]")
+			replyCopy.Content = entity.SanitizeQuotedMessageContent(replyCopy.Content)
 			evCopy.ReplyContext = &replyCopy
 		}
 		go func(ev entity.SensoryEvent, uText, rText string, uID, bID int64) {
@@ -487,7 +483,7 @@ func (m *MemoryEngine) Commit(ctx context.Context, event *entity.SensoryEvent, r
 			if needExtract {
 				m.consolidateUserFacts(bgCtx, &ev, rText)
 			} else if emb != nil && ev.SenderID != "" {
-				m.backfillUserFactEmbeddings(bgCtx, ev.Platform, ev.SenderID)
+				m.backfillUserFactEmbeddings(bgCtx, &ev)
 			}
 		}(evCopy, userText, replyText, userMsgID, botMsgID)
 	}
@@ -515,20 +511,20 @@ func (m *MemoryEngine) Shutdown(ctx context.Context) error {
 	}
 }
 
-func (m *MemoryEngine) backfillUserFactEmbeddings(ctx context.Context, platform, userID string) {
+func (m *MemoryEngine) backfillUserFactEmbeddings(ctx context.Context, event *entity.SensoryEvent) {
 	dbMgr := m.getDB()
 	emb := m.getEmbedder()
-	if dbMgr == nil || emb == nil || platform == "" || userID == "" {
+	if dbMgr == nil || emb == nil || event == nil || event.Platform == "" || event.SenderID == "" {
 		return
 	}
-	unlock := m.lockUser(platform, userID)
+	unlock := m.lockUser(event.Platform, event.SenderID)
 	defer unlock()
 
-	activeFacts, err := dbMgr.ListActiveFacts(ctx, platform, userID)
+	visibleFacts, err := dbMgr.ListVisibleFacts(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup)
 	if err != nil {
 		return
 	}
-	for _, f := range activeFacts {
+	for _, f := range confirmedFacts(visibleFacts) {
 		if ctx.Err() != nil {
 			return
 		}
@@ -537,7 +533,7 @@ func (m *MemoryEngine) backfillUserFactEmbeddings(ctx context.Context, platform,
 				if ctx.Err() != nil {
 					return
 				}
-				_ = dbMgr.UpdateFactEmbedding(ctx, platform, f.ID, f.Content, vec)
+				_ = dbMgr.UpdateFactEmbedding(ctx, event.Platform, f.ID, f.Content, vec)
 			}
 		}
 	}
@@ -583,6 +579,7 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 	if err != nil {
 		return
 	}
+	activeFacts = confirmedFacts(activeFacts)
 
 	emb := m.getEmbedder()
 	// 顺带为尚未生成向量的存量事实异步补齐向量
@@ -611,11 +608,7 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 
 	var existingLines []string
 	for _, f := range relevantFacts {
-		label := "全局"
-		if f.ScopeType == "group" {
-			label = "本群"
-		}
-		existingLines = append(existingLines, fmt.Sprintf("[ID: %d][%s] %s", f.ID, label, boundedFactContent(f.Content)))
+		existingLines = append(existingLines, fmt.Sprintf("[ID: %d][%s] %s", f.ID, f.ScopeLabel(), boundedFactContent(f.Content)))
 	}
 	existingBlock := "（暂无已记录事实）"
 	if len(existingLines) > 0 {
@@ -624,16 +617,12 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 
 	var turnBuilder strings.Builder
 	if event.ReplyContext != nil && strings.TrimSpace(event.ReplyContext.Content) != "" {
-		quotedContent := strings.TrimSpace(event.ReplyContext.Content)
-		if entity.IsSensitiveAuthCommand(quotedContent) {
-			quotedContent = "[OAuth authorization code redacted]"
-		}
-		quotedContent = core.TruncateRunes(quotedContent, core.MaxQuotedMessageRunes, "\n[引用消息过长，后续内容已截断]")
-		turnBuilder.WriteString("引用前文: " + quotedContent + "\n")
+		quotedContent := entity.SanitizeQuotedMessageContent(event.ReplyContext.Content)
+		turnBuilder.WriteString("用户引用的消息（说话人可能不是当前用户，仅供语境参考）: " + quotedContent + "\n")
 	}
 	turnBuilder.WriteString("用户发言: " + strings.TrimSpace(event.Content))
 	if event.VisionSummary != "" {
-		turnBuilder.WriteString("\n用户附图摘要: " + event.VisionSummary)
+		turnBuilder.WriteString("\n用户附图摘要（仅供语境参考，不能单独证明内容属于当前用户）: " + event.VisionSummary)
 	}
 	if r := []rune(strings.TrimSpace(replyText)); len(r) > 0 {
 		if len(r) > 240 {
@@ -646,7 +635,7 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 请根据【用户已知事实列表】与【本轮对话】，判断是否有关于该用户的长期个人特征、身份背景、技术栈、生活偏好、宠物、重要计划或近况变化值得记录或修正。
 
 严格规则：
-1. 只提取关于【用户本人】的长期有效事实，绝不提取呆呆的特征、临时命令输出、一次性寒暄或代码报错细节。
+1. 只有【本轮用户发言】中当前发送者明确表达或明确认领的内容，才能作为其个人事实的证据。引用消息中的说话人可能是其他人，图片摘要也可能描述他人或外部内容；二者只能作语境参考，不能单独证明事实属于当前用户。呆呆的回复同样不能作为事实证据。只提取关于【用户本人】的长期有效事实，绝不提取呆呆的特征、临时命令输出、一次性寒暄或代码报错细节。
 2. 对照【用户已知事实列表】：
    - 只能使用【用户已知事实列表】中当前用户可见的事实；群聊只会收到“当前用户在本群记录的个人事实”，只允许更新或删除这些事实，不得读取或修改私聊中的全局事实；
    - 若新信息与当前可修改范围内的某条旧事实属同一维度且发生变更或补充，输出 UPDATE 并填写对应 fact_id 与合并后的完整精炼陈述；
@@ -1073,7 +1062,7 @@ func (m *MemoryEngine) RecallProfile(ctx context.Context, platform, userID, quer
 	if err != nil || len(activeFacts) == 0 {
 		return nil, err
 	}
-	return rankProfileFacts(ctx, query, activeFacts, maxFacts), nil
+	return rankProfileFacts(ctx, query, confirmedFacts(activeFacts), maxFacts), nil
 }
 
 // RecallProfileForEvent 只注入当前会话可见范围内的长期事实。
@@ -1089,7 +1078,17 @@ func (m *MemoryEngine) RecallProfileForEvent(ctx context.Context, event *entity.
 	if err != nil || len(facts) == 0 {
 		return nil, err
 	}
-	return rankProfileFacts(ctx, query, facts, maxFacts), nil
+	return rankProfileFacts(ctx, query, confirmedFacts(facts), maxFacts), nil
+}
+
+func confirmedFacts(facts []*core.Fact) []*core.Fact {
+	confirmed := make([]*core.Fact, 0, len(facts))
+	for _, fact := range facts {
+		if fact != nil && !fact.ScopeUnknown {
+			confirmed = append(confirmed, fact)
+		}
+	}
+	return confirmed
 }
 
 func rankProfileFacts(ctx context.Context, query string, activeFacts []*core.Fact, maxFacts int) []*core.Fact {
@@ -1145,7 +1144,7 @@ func factScope(event *entity.SensoryEvent) (string, string) {
 }
 
 func sameFactScope(fact *core.Fact, event *entity.SensoryEvent) bool {
-	if fact == nil {
+	if fact == nil || fact.ScopeUnknown {
 		return false
 	}
 	scopeType, scopeID := factScope(event)

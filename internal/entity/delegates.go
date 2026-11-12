@@ -2,13 +2,18 @@ package entity
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"daidai/internal/core"
+	"daidai/internal/db"
 )
 
 // WorkerInfo 工作者摘要信息 (供大脑认知与 Tool 参数自省)
@@ -42,16 +47,44 @@ func workspacesOverlap(a, b string) bool {
 	return err == nil && (rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))))
 }
 
+func touchTicket(t *Ticket) {
+	now := time.Now()
+	if !now.After(t.UpdatedAt) || now.UnixMilli() <= t.UpdatedAt.UnixMilli() {
+		now = t.UpdatedAt.Add(time.Millisecond)
+	}
+	t.UpdatedAt = now
+}
+
 // Delegates 抽象工单与多工作者调度系统 (保持确定性注册顺序与全局并发资源保护)
 type Delegates struct {
-	mu            sync.RWMutex
-	tickets       map[string]*Ticket
-	workers       map[string]Worker
-	order         []string
-	defaultWorker string
-	maxConcurrent int
-	nextTicketID  uint64
-	workspaceUses map[string]int
+	mu               sync.RWMutex
+	tickets          map[string]*Ticket
+	workers          map[string]Worker
+	order            []string
+	defaultWorker    string
+	maxConcurrent    int
+	executionTimeout time.Duration
+	nextTicketID     uint64
+	workspaceUses    map[string]int
+	ticketDB         *db.Manager
+	ticketPlatform   string
+}
+
+// AttachTicketStore restores history and marks formerly active work as interrupted.
+func (d *Delegates) AttachTicketStore(ctx context.Context, manager *db.Manager, platform string) error {
+	if manager == nil || strings.TrimSpace(platform) == "" {
+		return fmt.Errorf("ticket store and platform are required")
+	}
+	if err := manager.InterruptActiveAgentTickets(ctx, platform); err != nil {
+		return fmt.Errorf("恢复工单历史失败: %w", err)
+	}
+	d.mu.Lock()
+	d.ticketDB = manager
+	d.ticketPlatform = platform
+	d.mu.Unlock()
+	// Active tickets are deliberately not resumed after restart because a worker
+	// may have completed external side effects before the process stopped.
+	return nil
 }
 
 // NewDelegates 实例化工单与工作者调度系统 (默认全局最大并发为 1)
@@ -65,10 +98,11 @@ func NewDelegatesWithLimit(maxConcurrent int, workers ...Worker) *Delegates {
 		maxConcurrent = 1
 	}
 	d := &Delegates{
-		tickets:       make(map[string]*Ticket),
-		workers:       make(map[string]Worker),
-		maxConcurrent: maxConcurrent,
-		workspaceUses: make(map[string]int),
+		tickets:          make(map[string]*Ticket),
+		workers:          make(map[string]Worker),
+		maxConcurrent:    maxConcurrent,
+		executionTimeout: 30 * time.Minute,
+		workspaceUses:    make(map[string]int),
 	}
 	for _, w := range workers {
 		d.Register(w)
@@ -84,6 +118,24 @@ func (d *Delegates) SetMaxConcurrent(n int) {
 		n = 1
 	}
 	d.maxConcurrent = n
+}
+
+// SetExecutionTimeout configures the per-ticket hard timeout. A zero duration
+// disables the scheduler deadline; parent cancellation and /stop still apply.
+func (d *Delegates) SetExecutionTimeout(timeout time.Duration) error {
+	if timeout < 0 {
+		return fmt.Errorf("工单执行超时不能为负数")
+	}
+	d.mu.Lock()
+	d.executionTimeout = timeout
+	d.mu.Unlock()
+	return nil
+}
+
+func (d *Delegates) ExecutionTimeout() time.Duration {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.executionTimeout
 }
 
 // MaxConcurrent 获取当前全局最大并发工单数
@@ -169,26 +221,43 @@ func (d *Delegates) WorkerNames() []string {
 
 // CreateTicket 创建并记录新工单 (保留空的 workspace 以允许下游 Worker 使用其配置的 DefaultDir)
 func (d *Delegates) CreateTicket(requesterID, channelID, goal, model, workspace, workerName string, allowSensitive ...bool) *Ticket {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	d.mu.RLock()
+	platform := d.ticketPlatform
+	d.mu.RUnlock()
+	return d.CreateTicketForPlatform(platform, requesterID, channelID, goal, model, workspace, workerName, allowSensitive...)
+}
 
-	// 清理已完结的历史工单，避免长期运行内存无界增长
+// CreateTicketForPlatform creates a ticket scoped to the platform that received
+// the request. This keeps status queries and cancellation isolated when channel
+// identifiers overlap across adapters.
+func (d *Delegates) CreateTicketForPlatform(platform, requesterID, channelID, goal, model, workspace, workerName string, allowSensitive ...bool) *Ticket {
+	d.mu.Lock()
+
+	// 清理已可靠持久化的终态工单，保留只有内存副本的结果。
 	if len(d.tickets) > 200 {
 		for id, old := range d.tickets {
-			if old.Status != TicketRunning && old.Status != TicketStopping && old.Status != TicketPending {
+			if old.Status != TicketRunning && old.Status != TicketStopping && old.Status != TicketPending && old.persistenceWarning == "" {
 				delete(d.tickets, id)
 			}
 		}
 	}
 
 	d.nextTicketID++
-	ticketID := fmt.Sprintf("tkt_%d", d.nextTicketID)
+	var randomID [8]byte
+	randomSuffix := ""
+	if _, err := rand.Read(randomID[:]); err != nil {
+		randomSuffix = fmt.Sprintf("%x", d.nextTicketID)
+	} else {
+		randomSuffix = hex.EncodeToString(randomID[:])
+	}
+	ticketID := fmt.Sprintf("tkt_%x_%s", time.Now().UnixMilli(), randomSuffix)
 
 	canSeeSensitive := len(allowSensitive) > 0 && allowSensitive[0]
 	t := &Ticket{
 		ID:             ticketID,
 		Goal:           goal,
 		RequesterID:    requesterID,
+		Platform:       strings.TrimSpace(platform),
 		ChannelID:      channelID,
 		Worker:         strings.TrimSpace(workerName),
 		Workspace:      strings.TrimSpace(workspace),
@@ -201,10 +270,251 @@ func (d *Delegates) CreateTicket(requesterID, channelID, goal, model, workspace,
 	}
 
 	d.tickets[ticketID] = t
+	copy := *t
+	d.mu.Unlock()
+	if !d.persistTicket(copy) {
+		d.mu.Lock()
+		delete(d.tickets, ticketID)
+		d.mu.Unlock()
+		return nil
+	}
 	// Do not expose the scheduler-owned mutable record. Callers may keep or
 	// modify this snapshot without racing with cancellation or state updates.
-	copy := *t
 	return &copy
+}
+
+// SetTicketAdditionalDirs grants the selected worker access to explicit
+// input directories for a pending ticket. These paths are runtime-only and
+// are intentionally not persisted with ticket history.
+func (d *Delegates) SetTicketAdditionalDirs(ticketID string, dirs []string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	ticket := d.tickets[ticketID]
+	if ticket == nil {
+		return fmt.Errorf("工单不存在")
+	}
+	if ticket.Status != TicketPending {
+		return fmt.Errorf("工单已不在待执行状态")
+	}
+	cleaned := make([]string, 0, len(dirs))
+	seen := make(map[string]struct{}, len(dirs))
+	for _, dir := range dirs {
+		dir = strings.TrimSpace(dir)
+		if dir == "" {
+			continue
+		}
+		absDir, err := filepath.Abs(filepath.Clean(dir))
+		if err != nil {
+			return fmt.Errorf("解析工单输入目录失败: %w", err)
+		}
+		if _, ok := seen[absDir]; ok {
+			continue
+		}
+		seen[absDir] = struct{}{}
+		cleaned = append(cleaned, absDir)
+	}
+	ticket.AdditionalDirs = cleaned
+	return nil
+}
+
+// FailPendingTicket closes a ticket that could not be prepared for execution.
+// It does not alter tickets already started, stopped, or otherwise finalized.
+func (d *Delegates) FailPendingTicket(ticketID, reason string) bool {
+	d.mu.Lock()
+	ticket := d.tickets[ticketID]
+	if ticket == nil || ticket.Status != TicketPending {
+		d.mu.Unlock()
+		return false
+	}
+	ticket.Status = TicketFailed
+	ticket.Output = strings.TrimSpace(reason)
+	touchTicket(ticket)
+	snapshot := *ticket
+	d.mu.Unlock()
+	if d.persistTicket(snapshot) {
+		return true
+	}
+	d.mu.Lock()
+	if current := d.tickets[ticketID]; current != nil && current.Status == TicketFailed && current.UpdatedAt.Equal(snapshot.UpdatedAt) {
+		current.persistenceWarning = "准备阶段失败状态未能写入 SQLite；当前状态只保存在运行中的进程内。"
+	}
+	d.mu.Unlock()
+	return false
+}
+
+func (d *Delegates) persistTicket(snapshot Ticket) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return d.persistTicketContext(ctx, snapshot)
+}
+
+func (d *Delegates) persistTicketContext(ctx context.Context, snapshot Ticket) bool {
+	d.mu.RLock()
+	manager, defaultPlatform := d.ticketDB, d.ticketPlatform
+	d.mu.RUnlock()
+	platform := strings.TrimSpace(snapshot.Platform)
+	if platform == "" {
+		platform = defaultPlatform
+	}
+	if manager == nil || platform == "" {
+		return true
+	}
+	record := db.AgentTicket{ID: snapshot.ID, RequesterID: snapshot.RequesterID, ChannelID: snapshot.ChannelID,
+		Goal: snapshot.Goal, Worker: snapshot.Worker, Workspace: snapshot.Workspace, Model: snapshot.Model,
+		Status: string(snapshot.Status), Output: snapshot.Output, AllowSensitive: snapshot.AllowSensitive,
+		CreatedAt: snapshot.CreatedAt, UpdatedAt: snapshot.UpdatedAt}
+	err := manager.SaveAgentTicket(ctx, platform, record)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if current := d.tickets[snapshot.ID]; current != nil && current.UpdatedAt.Equal(snapshot.UpdatedAt) {
+		if err != nil {
+			current.persistenceWarning = "工单状态未能写入 SQLite；当前结果只保存在运行中的进程内。"
+		} else {
+			current.persistenceWarning = ""
+		}
+	}
+	if err != nil {
+		slog.Error("delegate ticket persistence failed", "ticketID", snapshot.ID, "err", err)
+		return false
+	}
+	return true
+}
+
+// TicketsFor returns only the caller's history in the current conversation.
+func (d *Delegates) TicketsFor(ctx context.Context, platform, requesterID, channelID string, limit int) ([]*Ticket, error) {
+	d.mu.RLock()
+	manager := d.ticketDB
+	d.mu.RUnlock()
+	if manager == nil {
+		return d.memoryTicketsFor(platform, requesterID, channelID, limit), fmt.Errorf("工单历史存储未配置")
+	}
+	records, err := manager.ListAgentTickets(ctx, platform, requesterID, channelID, limit)
+	if err != nil {
+		return d.memoryTicketsFor(platform, requesterID, channelID, limit), err
+	}
+	byID := make(map[string]*Ticket, len(records))
+	for _, record := range records {
+		byID[record.ID] = &Ticket{ID: record.ID, Platform: platform, RequesterID: record.RequesterID,
+			ChannelID: record.ChannelID, Goal: record.Goal, Worker: record.Worker,
+			Workspace: record.Workspace, Model: record.Model, Status: TicketStatus(record.Status),
+			Output: record.Output, AllowSensitive: record.AllowSensitive,
+			CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt}
+	}
+	d.mu.RLock()
+	for id, t := range d.tickets {
+		if t.Platform != platform || t.RequesterID != requesterID || t.ChannelID != channelID {
+			continue
+		}
+		cp := *t
+		cp.Output = ""
+		byID[id] = &cp
+	}
+	d.mu.RUnlock()
+	tickets := make([]*Ticket, 0, len(byID))
+	for _, ticket := range byID {
+		tickets = append(tickets, ticket)
+	}
+	sort.Slice(tickets, func(i, j int) bool {
+		if tickets[i].CreatedAt.Equal(tickets[j].CreatedAt) {
+			return tickets[i].ID > tickets[j].ID
+		}
+		return tickets[i].CreatedAt.After(tickets[j].CreatedAt)
+	})
+	tickets = prioritizeActiveTickets(tickets, limit)
+	var persistenceErr bool
+	d.mu.RLock()
+	for _, t := range d.tickets {
+		if t.Platform == platform && t.RequesterID == requesterID && t.ChannelID == channelID && t.persistenceWarning != "" {
+			persistenceErr = true
+			break
+		}
+	}
+	d.mu.RUnlock()
+	if persistenceErr {
+		return tickets, fmt.Errorf("部分工单最新状态尚未持久化")
+	}
+	return tickets, nil
+}
+
+func (d *Delegates) memoryTicketsFor(platform, requesterID, channelID string, limit int) []*Ticket {
+	d.mu.RLock()
+	tickets := make([]*Ticket, 0)
+	for _, t := range d.tickets {
+		if t.Platform != platform || t.RequesterID != requesterID || t.ChannelID != channelID {
+			continue
+		}
+		cp := *t
+		cp.Output = ""
+		tickets = append(tickets, &cp)
+	}
+	d.mu.RUnlock()
+	sort.Slice(tickets, func(i, j int) bool {
+		if tickets[i].CreatedAt.Equal(tickets[j].CreatedAt) {
+			return tickets[i].ID > tickets[j].ID
+		}
+		return tickets[i].CreatedAt.After(tickets[j].CreatedAt)
+	})
+	return prioritizeActiveTickets(tickets, limit)
+}
+
+func prioritizeActiveTickets(tickets []*Ticket, limit int) []*Ticket {
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	selected := make([]*Ticket, 0, limit)
+	selectedIDs := make(map[string]struct{}, len(tickets))
+	for _, ticket := range tickets {
+		if ticket.Status != TicketPending && ticket.Status != TicketRunning && ticket.Status != TicketStopping {
+			continue
+		}
+		if len(selected) >= limit {
+			break
+		}
+		selected = append(selected, ticket)
+		selectedIDs[ticket.ID] = struct{}{}
+	}
+	for _, ticket := range tickets {
+		if len(selected) >= limit {
+			break
+		}
+		if _, exists := selectedIDs[ticket.ID]; exists {
+			continue
+		}
+		selected = append(selected, ticket)
+		selectedIDs[ticket.ID] = struct{}{}
+	}
+	sort.Slice(selected, func(i, j int) bool {
+		if selected[i].CreatedAt.Equal(selected[j].CreatedAt) {
+			return selected[i].ID > selected[j].ID
+		}
+		return selected[i].CreatedAt.After(selected[j].CreatedAt)
+	})
+	return selected
+}
+
+func (d *Delegates) TicketFor(ctx context.Context, platform, requesterID, channelID, ticketID string) (*Ticket, error) {
+	d.mu.RLock()
+	manager := d.ticketDB
+	if t, ok := d.tickets[ticketID]; ok && t.Platform == platform && t.RequesterID == requesterID && t.ChannelID == channelID {
+		cp := *t
+		d.mu.RUnlock()
+		if cp.persistenceWarning != "" {
+			return &cp, fmt.Errorf("%s", cp.persistenceWarning)
+		}
+		return &cp, nil
+	}
+	d.mu.RUnlock()
+	if manager == nil {
+		return nil, fmt.Errorf("工单历史存储未配置")
+	}
+	record, err := manager.GetAgentTicket(ctx, platform, requesterID, channelID, ticketID)
+	if err != nil || record == nil {
+		return nil, err
+	}
+	return &Ticket{ID: record.ID, Platform: platform, RequesterID: record.RequesterID, ChannelID: record.ChannelID,
+		Goal: record.Goal, Worker: record.Worker, Workspace: record.Workspace, Model: record.Model,
+		Status: TicketStatus(record.Status), Output: record.Output, AllowSensitive: record.AllowSensitive,
+		CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt}, nil
 }
 
 // GetTicket 查询工单状态
@@ -231,17 +541,69 @@ func (d *Delegates) ActiveTickets() []*Ticket {
 			list = append(list, &cp)
 		}
 	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].CreatedAt.Equal(list[j].CreatedAt) {
+			return list[i].ID < list[j].ID
+		}
+		return list[i].CreatedAt.Before(list[j].CreatedAt)
+	})
+	return list
+}
+
+func (d *Delegates) ActiveTicketsFor(platform, requesterID, channelID string) []*Ticket {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	var list []*Ticket
+	for _, t := range d.tickets {
+		if t.Platform != platform || t.RequesterID != requesterID || t.ChannelID != channelID {
+			continue
+		}
+		if t.Status == TicketRunning || t.Status == TicketStopping || t.Status == TicketPending {
+			cp := *t
+			list = append(list, &cp)
+		}
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].CreatedAt.Equal(list[j].CreatedAt) {
+			return list[i].ID < list[j].ID
+		}
+		return list[i].CreatedAt.Before(list[j].CreatedAt)
+	})
 	return list
 }
 
 // AbortByChannel 请求中断指定会话通道中的运行工单，并取消尚未启动的工单。
-func (d *Delegates) AbortByChannel(channelID string) int {
+func (d *Delegates) AbortByChannel(platform, channelID string) int {
+	return d.abortTickets(func(t *Ticket) bool { return t.Platform == platform && t.ChannelID == channelID })
+}
+
+func (d *Delegates) AbortByRequester(platform, channelID, requesterID string) int {
+	return d.abortTickets(func(t *Ticket) bool {
+		return t.Platform == platform && t.ChannelID == channelID && t.RequesterID == requesterID
+	})
+}
+
+func (d *Delegates) abortTickets(matches func(*Ticket) bool) int {
+	return d.abortTicketsContext(context.Background(), matches)
+}
+
+func (d *Delegates) abortTicketsContext(ctx context.Context, matches func(*Ticket) bool) int {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	d.mu.Lock()
 
 	aborted := 0
 	var cancelFuncs []context.CancelFunc
+	type ticketState struct {
+		id        string
+		status    TicketStatus
+		updatedAt time.Time
+	}
+	var changed []ticketState
 	for _, t := range d.tickets {
-		if t.ChannelID != channelID || (t.Status != TicketRunning && t.Status != TicketPending) {
+		if !matches(t) || (t.Status != TicketRunning && t.Status != TicketPending) {
 			continue
 		}
 		wasRunning := t.Status == TicketRunning
@@ -254,48 +616,47 @@ func (d *Delegates) AbortByChannel(channelID string) int {
 		} else {
 			t.Status = TicketAborted
 		}
-		t.UpdatedAt = time.Now()
+		touchTicket(t)
+		changed = append(changed, ticketState{id: t.ID, status: t.Status, updatedAt: t.UpdatedAt})
 		aborted++
 	}
 	d.mu.Unlock()
 	for _, cancel := range cancelFuncs {
 		cancel()
+	}
+	// Persist after cancellation so a busy SQLite database cannot delay stopping
+	// the child process. A newer state may be written first; SQLite rejects stale snapshots.
+	var snapshots []Ticket
+	d.mu.RLock()
+	for _, state := range changed {
+		t := d.tickets[state.id]
+		if t == nil || t.Status != state.status || !t.UpdatedAt.Equal(state.updatedAt) {
+			continue
+		}
+		snapshots = append(snapshots, *t)
+	}
+	d.mu.RUnlock()
+	persistCtx, cancelPersist := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelPersist()
+	for _, snapshot := range snapshots {
+		d.persistTicketContext(persistCtx, snapshot)
 	}
 	return aborted
 }
 
 // AbortAll 请求中断所有运行工单，并取消尚未启动的工单。
 func (d *Delegates) AbortAll() int {
-	d.mu.Lock()
+	return d.abortTickets(func(*Ticket) bool { return true })
+}
 
-	aborted := 0
-	var cancelFuncs []context.CancelFunc
-	for _, t := range d.tickets {
-		if t.Status != TicketRunning && t.Status != TicketPending {
-			continue
-		}
-		wasRunning := t.Status == TicketRunning
-		if t.CancelFunc != nil {
-			cancelFuncs = append(cancelFuncs, t.CancelFunc)
-			t.CancelFunc = nil
-		}
-		if wasRunning {
-			t.Status = TicketStopping
-		} else {
-			t.Status = TicketAborted
-		}
-		t.UpdatedAt = time.Now()
-		aborted++
-	}
-	d.mu.Unlock()
-	for _, cancel := range cancelFuncs {
-		cancel()
-	}
-	return aborted
+// AbortAllContext sends cancellation immediately and persists state within the
+// caller's shutdown deadline.
+func (d *Delegates) AbortAllContext(ctx context.Context) int {
+	return d.abortTicketsContext(ctx, func(*Ticket) bool { return true })
 }
 
 // ResetSession 重置指定通道在指定工作空间下的所有 Worker 内部会话状态 (例如 AGY 的 ConversationID)
-func (d *Delegates) ResetSession(channelID, workspace string) {
+func (d *Delegates) ResetSession(channelID, workspace string) error {
 	d.mu.RLock()
 	workers := make([]Worker, 0, len(d.order))
 	for _, name := range d.order {
@@ -306,10 +667,19 @@ func (d *Delegates) ResetSession(channelID, workspace string) {
 	d.mu.RUnlock()
 
 	for _, w := range workers {
+		if r, ok := w.(interface {
+			ResetSession(channelID, cwd string) error
+		}); ok {
+			if err := r.ResetSession(channelID, workspace); err != nil {
+				return fmt.Errorf("重置工作者 %s 会话失败: %w", w.Name(), err)
+			}
+			continue
+		}
 		if r, ok := w.(interface{ ResetSession(channelID, cwd string) }); ok {
 			r.ResetSession(channelID, workspace)
 		}
 	}
+	return nil
 }
 
 // CheckCapacity 检查是否具备接纳新工单的并发容量与工作空间互斥条件
@@ -470,14 +840,18 @@ func (d *Delegates) ExecuteTicket(ctx context.Context, t *Ticket) (string, error
 	}
 	if err := ctx.Err(); err != nil {
 		t.Status = TicketAborted
-		t.UpdatedAt = time.Now()
+		touchTicket(t)
+		snapshot := *t
 		d.mu.Unlock()
+		d.persistTicket(snapshot)
 		return "", err
 	}
 	if err := d.checkCapacityLocked(t); err != nil {
 		t.Status = TicketFailed
-		t.UpdatedAt = time.Now()
+		touchTicket(t)
+		snapshot := *t
 		d.mu.Unlock()
+		d.persistTicket(snapshot)
 		return "", err
 	}
 
@@ -487,49 +861,112 @@ func (d *Delegates) ExecuteTicket(ctx context.Context, t *Ticket) (string, error
 	}
 	worker := d.workers[workerName]
 
-	execCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	var execCtx context.Context
+	var cancel context.CancelFunc
+	if d.executionTimeout > 0 {
+		execCtx, cancel = context.WithTimeout(ctx, d.executionTimeout)
+	} else {
+		execCtx, cancel = context.WithCancel(ctx)
+	}
 	defer cancel()
 
 	t.CancelFunc = cancel
 	t.Status = TicketRunning
-	t.UpdatedAt = time.Now()
+	touchTicket(t)
+	runningSnapshot := *t
 	workerTicket := *t
+	workerTicket.ExecutionTimeout = d.executionTimeout
 	// Worker 只接收该次执行的不可变快照，避免 /stop 并发更新调度状态时
 	// 与 Worker 读取共享 Ticket 产生数据竞争。
 	workerTicket.CancelFunc = nil
 	d.mu.Unlock()
+	d.persistTicket(runningSnapshot)
 
-	output, err := executeWorker(execCtx, worker, &workerTicket)
+	var output string
+	var err error
+	d.mu.Lock()
+	shouldStartWorker := t.Status == TicketRunning && execCtx.Err() == nil
+	d.mu.Unlock()
+	if shouldStartWorker {
+		output, err = executeWorker(execCtx, worker, &workerTicket)
+	} else {
+		err = execCtx.Err()
+		if err == nil {
+			err = context.Canceled
+		}
+	}
 	if !t.AllowSensitive {
 		output = core.RedactSensitiveIPs(output)
 	}
 
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	t.CancelFunc = nil
+	t.Output = output
 	if t.Status == TicketAborted || t.Status == TicketStopping || execCtx.Err() == context.Canceled {
 		t.Status = TicketAborted
-		t.UpdatedAt = time.Now()
-		return "", context.Canceled
+		touchTicket(t)
+		snapshot := *t
+		d.mu.Unlock()
+		if !d.persistTicket(snapshot) {
+			snapshot.persistenceWarning = "工单状态未能写入 SQLite；当前结果只保存在运行中的进程内。"
+		}
+		result := d.ticketModelOutput(output, &snapshot)
+		return result, context.Canceled
 	}
 	if execCtx.Err() == context.DeadlineExceeded {
 		t.Status = TicketFailed
-		t.UpdatedAt = time.Now()
-		return "", context.DeadlineExceeded
+		touchTicket(t)
+		snapshot := *t
+		d.mu.Unlock()
+		if !d.persistTicket(snapshot) {
+			snapshot.persistenceWarning = "工单状态未能写入 SQLite；当前结果只保存在运行中的进程内。"
+		}
+		result := d.ticketModelOutput(output, &snapshot)
+		return result, context.DeadlineExceeded
 	}
 
 	if err != nil {
 		if t.Status != TicketAborted {
 			t.Status = TicketFailed
 		}
-		t.UpdatedAt = time.Now()
-		return "", err
+		touchTicket(t)
+		snapshot := *t
+		d.mu.Unlock()
+		if !d.persistTicket(snapshot) {
+			snapshot.persistenceWarning = "工单状态未能写入 SQLite；当前结果只保存在运行中的进程内。"
+		}
+		result := d.ticketModelOutput(output, &snapshot)
+		return result, err
 	}
 
 	t.Status = TicketCompleted
 	t.Output = output
-	t.UpdatedAt = time.Now()
-	return output, nil
+	touchTicket(t)
+	snapshot := *t
+	d.mu.Unlock()
+	if !d.persistTicket(snapshot) {
+		snapshot.persistenceWarning = "工单状态未能写入 SQLite；当前结果只保存在运行中的进程内。"
+	}
+	result := d.ticketModelOutput(output, &snapshot)
+	return result, nil
+}
+
+func (d *Delegates) ticketModelOutput(output string, ticket *Ticket) string {
+	limit := 6000
+	ticketID := ""
+	marker := "\n[结果过长；完整输出已保存，可用 /task %s 分页查看]"
+	if ticket != nil {
+		ticketID = ticket.ID
+	}
+	if ticket != nil && ticket.persistenceWarning != "" {
+		limit = 5600
+		marker = "\n[结果过长；当前进程可用 /task %s 分页查看，重启后可能丢失]"
+	}
+	result := core.TruncateRunes(output, limit, fmt.Sprintf(marker, ticketID))
+	if ticket != nil && ticket.persistenceWarning != "" {
+		result += "\n\n【持久化警告】" + ticket.persistenceWarning
+	}
+	return result
 }
 
 func executeWorker(ctx context.Context, worker Worker, ticket *Ticket) (output string, err error) {

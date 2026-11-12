@@ -49,6 +49,7 @@ type ChatMessage struct {
 
 // ChatOptions 模型生成参数
 type ChatOptions struct {
+	// Temperature is an explicit value whenever ChatOptions is non-nil; zero is valid.
 	Temperature float32
 	MaxTokens   int
 	ReadOnly    bool // 标记受限访客请求，供路由层与提供方选择受限执行路径；不单独构成权限边界

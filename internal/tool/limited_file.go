@@ -1,28 +1,24 @@
 package tool
 
 import (
+	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
-	"strings"
 
 	"daidai/internal/core"
+	"daidai/internal/media"
 	"golang.org/x/sys/unix"
 )
 
 const maxGeneratedImageBytes = core.MaxImageBytes
 
-func validImageData(data []byte) bool {
-	if len(data) == 0 {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(strings.SplitN(http.DetectContentType(data), ";", 2)[0])) {
-	case "image/jpeg", "image/png", "image/gif", "image/webp":
-		return true
-	default:
-		return false
-	}
+func normalizeImageData(ctx context.Context, data []byte) ([]byte, string, error) {
+	return media.NormalizeImageData(ctx, data)
+}
+
+func imageContentType(data []byte) string {
+	return media.ContentType(data)
 }
 
 func readFileLimited(path string, maxBytes int64) ([]byte, error) {

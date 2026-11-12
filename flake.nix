@@ -24,6 +24,7 @@
               curl
               jq
               typst
+              ffmpeg
               chromium
               wgcf
               wireproxy
@@ -49,7 +50,7 @@
             nativeBuildInputs = [ pkgs.makeWrapper ];
             postInstall = ''
               wrapProgram $out/bin/daidai \
-                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.typst pkgs.chromium pkgs.wgcf pkgs.wireproxy ]} \
+                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.typst pkgs.ffmpeg pkgs.chromium pkgs.wgcf pkgs.wireproxy ]} \
                 --set-default TYPST_FONT_PATHS "${pkgs.maple-mono.CN}/share/fonts/truetype:${pkgs.source-han-sans}/share/fonts/truetype"
             '';
           };

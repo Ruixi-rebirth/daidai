@@ -50,7 +50,7 @@ func TestModelSwitchTool_Flow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query current: %v", err)
 	}
-	if !strings.Contains(currRes.Text, "deepseek-chat") || !strings.Contains(currRes.Text, "API 通道") {
+	if !strings.Contains(currRes.Text, "deepseek-chat") || !strings.Contains(currRes.Text, "通道：API") {
 		t.Fatalf("current output unexpected: %s", currRes.Text)
 	}
 

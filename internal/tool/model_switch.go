@@ -47,21 +47,6 @@ func (t *ModelSwitchTool) Parameters() map[string]any {
 		channelProp["enum"] = channels
 	}
 
-	models := t.router.ListModels()
-	var modelSummaries []string
-	for _, m := range models {
-		if len(m.SupportedEfforts) > 0 {
-			modelSummaries = append(modelSummaries, fmt.Sprintf("%s (%s, 思考强度: %s)", m.ID, m.Channel, strings.Join(m.SupportedEfforts, "/")))
-		} else {
-			modelSummaries = append(modelSummaries, fmt.Sprintf("%s (%s)", m.ID, m.Channel))
-		}
-	}
-
-	modelDesc := "目标模型 ID 或名称关键字"
-	if len(modelSummaries) > 0 {
-		modelDesc = "目标模型 ID 或名称关键字。当前实时探测到的可用模型池: " + strings.Join(modelSummaries, "；")
-	}
-
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -72,7 +57,7 @@ func (t *ModelSwitchTool) Parameters() map[string]any {
 			},
 			"model": map[string]any{
 				"type":        "string",
-				"description": modelDesc,
+				"description": "目标模型 ID 或名称关键字；如果用户提到的模型不明确，先用 list 查询当前可用模型及其 ID，再按用户意图切换",
 			},
 			"channel": channelProp,
 			"effort": map[string]any{
@@ -116,11 +101,11 @@ func (t *ModelSwitchTool) Execute(ctx context.Context, rawArgs json.RawMessage) 
 
 	switch action {
 	case "current":
-		return t.handleCurrent(), nil
+		return redactModelStatus(ctx, t.handleCurrent()), nil
 	case "usage":
-		return t.handleUsage(ctx, channel), nil
+		return redactModelStatus(ctx, t.handleUsage(ctx, channel)), nil
 	case "list":
-		return t.handleList(ctx, channel), nil
+		return redactModelStatus(ctx, t.handleList(ctx, channel)), nil
 	case "switch":
 		ev := entity.SensoryEventFromContext(ctx)
 		if ev == nil || t.immune == nil {
@@ -129,7 +114,7 @@ func (t *ModelSwitchTool) Execute(ctx context.Context, rawArgs json.RawMessage) 
 		if err := t.immune.VerifyDelegationPerm(ev.Role); err != nil {
 			return &core.ToolResult{Text: err.Error()}, nil
 		}
-		return t.handleSwitch(model, channel, effort), nil
+		return t.handleSwitch(ctx, model, channel, effort), nil
 	default:
 		return &core.ToolResult{
 			Text: fmt.Sprintf("未知操作 %q，支持的操作为 current, list, switch, usage", action),
@@ -141,9 +126,23 @@ func (t *ModelSwitchTool) handleUsage(ctx context.Context, channelFilter string)
 	return t.handleList(ctx, channelFilter)
 }
 
+func redactModelStatus(ctx context.Context, result *core.ToolResult) *core.ToolResult {
+	if result == nil {
+		return nil
+	}
+	if event := entity.SensoryEventFromContext(ctx); event == nil || !event.IsPartnerPrivate() {
+		result.Text = core.RedactSensitiveIPs(result.Text)
+	}
+	return result
+}
+
 func (t *ModelSwitchTool) handleCurrent() *core.ToolResult {
+	status := strings.TrimSpace(t.router.FormatCurrentStatus())
+	if status == "" {
+		status = "当前没有激活的模型。请检查 API 或 AGY 通道配置，以及模型发现和认证日志。"
+	}
 	return &core.ToolResult{
-		Text: t.router.FormatCurrentStatus(),
+		Text: status,
 	}
 }
 
@@ -152,11 +151,14 @@ func (t *ModelSwitchTool) handleList(ctx context.Context, channelFilter string) 
 	// models. Tool definition generation uses the cached pool and does not
 	// trigger network or CLI discovery on every conversation turn.
 	t.router.RefreshModels(ctx)
-	models := t.router.ListModelsContext(ctx)
+	models := t.router.CachedModels()
 	curr := t.router.CurrentMind()
 
 	channelsMap := make(map[string][]llm.ModelInfo)
-	var channelOrder []string
+	channelOrder := t.router.Channels()
+	for _, ch := range channelOrder {
+		channelsMap[ch] = nil
+	}
 
 	for _, m := range models {
 		ch := m.Channel
@@ -179,9 +181,9 @@ func (t *ModelSwitchTool) handleList(ctx context.Context, channelFilter string) 
 
 	var sb strings.Builder
 	if filter != "" {
-		fmt.Fprintf(&sb, "【实时探测可用心智模型池 · %s 通道】\n\n", filter)
+		fmt.Fprintf(&sb, "【当前心智模型池 · %s 通道】\n\n", filter)
 	} else {
-		sb.WriteString("【实时探测可用心智模型池】\n\n")
+		sb.WriteString("【当前心智模型池】\n\n")
 	}
 
 	for _, ch := range channelOrder {
@@ -193,12 +195,24 @@ func (t *ModelSwitchTool) handleList(ctx context.Context, channelFilter string) 
 		case "API":
 			sb.WriteString("- 通道属性：OpenAI 兼容协议高可用端点（按 Token 计费）\n")
 		}
+		if status, ok := t.router.ModelDiscoveryStatus(ch); ok && status.Failed {
+			if status.LastSuccess.IsZero() {
+				sb.WriteString("- 模型发现最近失败；以下模型来自已配置或缓存信息，当前是否可用尚未确认。\n")
+			} else {
+				fmt.Fprintf(&sb, "- 模型发现最近失败（%s）；以下清单保留自最近一次成功发现，当前是否可用尚未确认。\n",
+					status.LastAttempt.Local().Format("2006-01-02 15:04:05"))
+			}
+		}
 
 		if usageText, err := t.router.QueryChannelUsage(ctx, ch); err == nil && usageText != "" {
 			sb.WriteString("\n" + usageText + "\n\n")
 		}
 
 		sb.WriteString("可用模型列表：\n")
+		if len(chModels) == 0 {
+			sb.WriteString("- 当前没有可列出的模型。请检查该通道的配置、认证和模型发现日志。\n\n")
+			continue
+		}
 		for _, m := range chModels {
 			activeTag := ""
 			if strings.EqualFold(curr.Channel, ch) && curr.Model == m.ID {
@@ -232,7 +246,15 @@ func (t *ModelSwitchTool) handleList(ctx context.Context, channelFilter string) 
 	}
 }
 
-func (t *ModelSwitchTool) handleSwitch(model, channel, effort string) *core.ToolResult {
+func (t *ModelSwitchTool) handleSwitch(ctx context.Context, model, channel, effort string) *core.ToolResult {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	t.router.RefreshModels(ctx)
+	if err := ctx.Err(); err != nil {
+		return &core.ToolResult{Text: "模型池刷新已取消，未执行切换。"}
+	}
+
 	res, err := t.router.SwitchMind(llm.SwitchRequest{
 		Target:  model,
 		Channel: channel,
@@ -267,7 +289,11 @@ func (t *ModelSwitchTool) handleSwitch(model, channel, effort string) *core.Tool
 		}
 	}
 
+	message := "【心智模型切换成功】\n" + res.Message
+	if status, ok := t.router.ModelDiscoveryStatus(res.Channel); ok && status.Failed {
+		message += "\n注意：该通道本次模型发现失败，当前模型清单来自配置或上次成功记录；模型设置已切换，但目标模型当前是否可调用尚未确认。"
+	}
 	return &core.ToolResult{
-		Text: "【心智模型切换成功】\n" + res.Message,
+		Text: message,
 	}
 }

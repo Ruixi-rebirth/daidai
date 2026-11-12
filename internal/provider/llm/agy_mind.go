@@ -69,6 +69,17 @@ func NewAGYMindProvider(cfg AGYMindConfig) *AGYMindProvider {
 
 // DiscoverModels 通过执行 `<command> models` 子命令实时探测当前 CLI 支持的模型池与思考强度
 func (p *AGYMindProvider) DiscoverModels(ctx context.Context) []ModelInfo {
+	models, err := p.DiscoverModelsWithError(ctx)
+	if err != nil {
+		slog.Warn("agy_mind: 动态模型探测失败", "err", err)
+	}
+	return models
+}
+
+func (p *AGYMindProvider) DiscoverModelsWithError(ctx context.Context) ([]ModelInfo, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	p.mu.RLock()
 	command := p.command
 	channel := p.channelName
@@ -92,27 +103,26 @@ func (p *AGYMindProvider) DiscoverModels(ctx context.Context) []ModelInfo {
 	cmd.Stdout = outBuf
 	cmd.Stderr = errBuf
 	if err := cmd.Run(); err != nil {
-		slog.Warn("agy_mind: 动态执行 models 探测失败", "command", command, "err", err)
-		return nil
+		return nil, fmt.Errorf("run %s models: %w", command, err)
 	}
 	if outBuf.Truncated() {
-		slog.Warn("agy_mind: models 探测输出超过 1 MiB 上限", "command", command)
-		return nil
+		return nil, fmt.Errorf("%s models output exceeds 1 MiB limit", command)
 	}
 
 	models := ParseCLIModelsOutput(outBuf.String(), channel)
-	if len(models) > 0 {
-		p.mu.Lock()
-		if p.model == "" {
-			p.model = models[0].ID
-		}
-		if p.effort == "" && models[0].DefaultEffort != "" {
-			p.effort = models[0].DefaultEffort
-		}
-		p.mu.Unlock()
-		slog.Info("agy_mind: 成功从 CLI 动态探测可用模型列表", "command", command, "count", len(models))
+	if len(models) == 0 {
+		return nil, fmt.Errorf("%s models returned no recognizable models", command)
 	}
-	return models
+	p.mu.Lock()
+	if p.model == "" {
+		p.model = models[0].ID
+	}
+	if p.effort == "" && models[0].DefaultEffort != "" {
+		p.effort = models[0].DefaultEffort
+	}
+	p.mu.Unlock()
+	slog.Info("agy_mind: 成功从 CLI 动态探测可用模型列表", "command", command, "count", len(models))
+	return models, nil
 }
 
 type agyUsageBucket struct {
@@ -147,6 +157,17 @@ func FormatAGYUsageOutput(raw []byte) (string, error) {
 	var env agyUsageEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return "", fmt.Errorf("解析 AGY 配额 JSON 失败: %w", err)
+	}
+	status := strings.ToUpper(strings.TrimSpace(env.Status))
+	if status != "" && status != "SUCCESS" {
+		detail := strings.TrimSpace(env.Response)
+		if detail == "" {
+			detail = status
+		}
+		if runes := []rune(detail); len(runes) > 4000 {
+			detail = string(runes[:4000]) + "…"
+		}
+		return "", fmt.Errorf("AGY 配额查询返回非成功状态 %q: %s", status, detail)
 	}
 
 	groups := env.Command.Data.Groups
@@ -189,6 +210,9 @@ func FormatAGYUsageOutput(raw []byte) (string, error) {
 
 // GetUsage 查询 AGY 底层当前各大配额池的实时剩余使用量与重置倒计时 (实现 UsageDiscoverer)
 func (p *AGYMindProvider) GetUsage(ctx context.Context) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	p.mu.RLock()
 	command := p.command
 	cwd := p.workingDir
@@ -259,15 +283,28 @@ func ParseCLIModelsOutput(rawOutput, channel string) []ModelInfo {
 		rawID := fields[0]
 		displayName := strings.TrimSpace(line[len(rawID):])
 
-		baseID, effort := SplitModelAndEffort(rawID)
+		baseID := rawID
+		effort := ""
+		openParen := strings.LastIndex(displayName, "(")
+		if openParen > 0 && strings.HasSuffix(displayName, ")") {
+			effortLabel := strings.TrimSpace(displayName[openParen+1 : len(displayName)-1])
+			if isSupportedEffortLabel(effortLabel) {
+				candidateID, candidateEffort := SplitModelAndEffort(rawID)
+				if candidateEffort != "" && strings.EqualFold(candidateEffort, effortLabel) {
+					baseID = candidateID
+					effort = candidateEffort
+					displayName = strings.TrimSpace(displayName[:openParen])
+				}
+			}
+		}
 		if baseID == "" {
 			continue
 		}
 
-		// 剥离展示名称末尾的 "(Medium)" / "(High)" / "(Low)" 等后缀
-		if effort != "" {
-			if pIdx := strings.LastIndex(displayName, "("); pIdx > 0 && strings.HasSuffix(displayName, ")") {
-				displayName = strings.TrimSpace(displayName[:pIdx])
+		if openParen := strings.LastIndex(displayName, "("); openParen > 0 && strings.HasSuffix(displayName, ")") {
+			parentheticalID := strings.TrimSpace(displayName[openParen+1 : len(displayName)-1])
+			if strings.EqualFold(parentheticalID, baseID) {
+				displayName = strings.TrimSpace(displayName[:openParen])
 			}
 		}
 		if displayName == "" {
@@ -308,6 +345,15 @@ func ParseCLIModelsOutput(rawOutput, channel string) []ModelInfo {
 		result = append(result, *byID[id])
 	}
 	return result
+}
+
+func isSupportedEffortLabel(label string) bool {
+	switch strings.ToLower(strings.TrimSpace(label)) {
+	case "low", "medium", "high", "xhigh", "max":
+		return true
+	default:
+		return false
+	}
 }
 
 // SetModel 动态设置当前模型

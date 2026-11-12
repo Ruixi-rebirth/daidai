@@ -11,6 +11,7 @@ import (
 	"daidai/internal/config"
 	"daidai/internal/core"
 	"daidai/internal/entity"
+	"daidai/internal/media"
 	"daidai/internal/provider/llm"
 )
 
@@ -28,6 +29,7 @@ type HandsConfig struct {
 	Delegates       *entity.Delegates
 	Immune          *entity.ImmuneSystem
 	Workspaces      *entity.WorkspaceManager
+	AttachmentInbox *media.Inbox
 	EnableNixSearch bool
 	OCIConfig       *config.OCIConfig
 	OCIClient       *OCIClient
@@ -40,7 +42,8 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 	}
 	h.Register(NewRenderTool())
 	h.Register(NewSysInfoTool())
-	h.Register(NewMemoryTool(nil))
+	h.Register(NewMemoryTool(nil, cfg.Router))
+	h.Register(NewChatSummaryTool(nil, cfg.Router))
 	h.Register(NewWebSearchToolWithCommand(cfg.Router, cfg.AGYCommand))
 	h.Register(NewReadLinkTool())
 	h.Register(NewScreenshotTool())
@@ -55,7 +58,7 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 		h.Register(NewModelSwitchTool(cfg.Router, cfg.Immune))
 	}
 	if cfg.Delegates != nil {
-		h.Register(NewDelegateToolWithWorkspace(cfg.Delegates, cfg.Immune, cfg.Workspaces))
+		h.Register(NewDelegateToolWithInbox(cfg.Delegates, cfg.Immune, cfg.Workspaces, cfg.AttachmentInbox))
 		h.Register(NewFaceToolWithCommand(cfg.Delegates, cfg.AGYCommand, filepath.Join("data", "assets", "faces"), cfg.Immune))
 		outDir := filepath.Join("data", "workspace", "sandbox")
 		if cfg.Workspaces != nil {
@@ -121,7 +124,14 @@ func (h *HandsRegistry) Definitions() []core.ToolDefinition {
 	return defs
 }
 
-func (h *HandsRegistry) Execute(ctx context.Context, name string, rawArgs json.RawMessage) (*core.ToolResult, error) {
+func (h *HandsRegistry) Execute(ctx context.Context, name string, rawArgs json.RawMessage) (result *core.ToolResult, execErr error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			result = nil
+			execErr = fmt.Errorf("tool %q failed internally", name)
+			slog.Error("hands: 工具执行发生 panic", "name", name, "panic", recovered)
+		}
+	}()
 	if ctx == nil {
 		return nil, fmt.Errorf("hands: tool execution requires a context")
 	}

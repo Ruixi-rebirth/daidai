@@ -72,12 +72,17 @@ func (t *WorkspaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*
 
 	var channelID string
 	role := entity.RoleGuest
-	if event := entity.SensoryEventFromContext(ctx); event != nil {
+	event := entity.SensoryEventFromContext(ctx)
+	if event != nil {
 		channelID = event.ChannelID
 		role = event.Role
 	}
 
-	return &core.ToolResult{
+	result := &core.ToolResult{
 		Text: t.workspaces.ExecuteAction(channelID, role, t.immune, args.Action, args.Target, t.delegates),
-	}, nil
+	}
+	if event == nil || !event.IsPartnerPrivate() {
+		result.Text = core.RedactSensitiveIPs(result.Text)
+	}
+	return result, nil
 }

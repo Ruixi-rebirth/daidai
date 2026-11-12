@@ -32,12 +32,18 @@ func (k SessionKey) String() string {
 type SessionHandler func(mergedEvent *core.SensoryEvent)
 
 type queuedEvent struct {
-	event        *core.SensoryEvent
-	generation   uint64
-	afterControl <-chan struct{}
+	event            *core.SensoryEvent
+	generation       uint64
+	senderGeneration uint64
+	afterControl     <-chan struct{}
 }
 
 const maxMergedEventsPerTurn = 64
+
+const (
+	maxConcurrentControlEvents = 64
+	maxConcurrentStopEvents    = 8
+)
 
 // DebounceConfig 防抖配置
 type DebounceConfig struct {
@@ -48,17 +54,18 @@ type DebounceConfig struct {
 
 // sessionWorker 单个会话的 Actor 调度器
 type sessionWorker struct {
-	manager    *DebounceManager
-	key        SessionKey
-	config     DebounceConfig
-	handler    SessionHandler
-	msgCh      chan queuedEvent
-	processCh  chan queuedEvent
-	queued     atomic.Int32
-	pushers    atomic.Int32
-	generation atomic.Uint64
-	closeCh    chan struct{}
-	closeOnce  sync.Once
+	manager           *DebounceManager
+	key               SessionKey
+	config            DebounceConfig
+	handler           SessionHandler
+	msgCh             chan queuedEvent
+	processCh         chan queuedEvent
+	queued            atomic.Int32
+	pushers           atomic.Int32
+	generation        atomic.Uint64
+	senderGenerations map[string]uint64 // accessed under manager.mu; bounded by actor lifetime
+	closeCh           chan struct{}
+	closeOnce         sync.Once
 }
 
 func (w *sessionWorker) close() {
@@ -74,6 +81,8 @@ type DebounceManager struct {
 	workers         sync.Map // map[SessionKey]*sessionWorker
 	mu              sync.Mutex
 	controlBarriers map[SessionKey]chan struct{}
+	controlSlots    chan struct{}
+	stopSlots       chan struct{}
 	stopped         bool
 	wg              sync.WaitGroup
 }
@@ -90,8 +99,10 @@ func NewDebounceManager(cfg DebounceConfig, handler SessionHandler) *DebounceMan
 		cfg.MaxMergedRunes = core.MaxUserMessageRunes
 	}
 	return &DebounceManager{
-		config:  cfg,
-		handler: handler,
+		config:       cfg,
+		handler:      handler,
+		controlSlots: make(chan struct{}, maxConcurrentControlEvents),
+		stopSlots:    make(chan struct{}, maxConcurrentStopEvents),
 	}
 }
 
@@ -105,8 +116,21 @@ func (m *DebounceManager) Push(event *core.SensoryEvent) bool {
 		m.mu.Unlock()
 		return false
 	}
-	// 以 "/" 开头的控制指令（如 /stop, /status, /help）零延迟直通，不进入合并窗口以免被前序普通文本吞没
-	if strings.HasPrefix(strings.TrimSpace(event.Content), "/") && len(event.Images) == 0 {
+	// 已识别的控制指令零延迟直通，避免被防抖窗口吞并；同条消息上的附件仍只保留待确认元数据。
+	// 未知斜杠文本仍走普通会话 FIFO。
+	if isImmediateControlEvent(event.Content) {
+		trimmedCommand := strings.TrimSpace(event.Content)
+		controlSlots := m.controlSlots
+		if trimmedCommand == "/stop" {
+			controlSlots = m.stopSlots
+		}
+		select {
+		case controlSlots <- struct{}{}:
+		default:
+			m.mu.Unlock()
+			slog.Warn("debounce: 即时控制事件处理已满，要求上游恢复投递", "command", controlCommandName(trimmedCommand))
+			return false
+		}
 		var barrier chan struct{}
 		var previousBarrier <-chan struct{}
 		barrierKey := SessionKey{Platform: event.Platform, IsGroup: event.IsGroup, ChannelID: event.ChannelID}
@@ -119,6 +143,16 @@ func (m *DebounceManager) Push(event *core.SensoryEvent) bool {
 				return true
 			})
 		}
+		if invalidatesPendingSenderTurns(event.Content) && (event.Role == core.RolePartner || event.Role == core.RoleCollaborator) {
+			workerKey := SessionKey{Platform: event.Platform, IsGroup: event.IsGroup, ChannelID: event.ChannelID}
+			if value, ok := m.workers.Load(workerKey); ok {
+				worker := value.(*sessionWorker)
+				if worker.senderGenerations == nil {
+					worker.senderGenerations = make(map[string]uint64)
+				}
+				worker.senderGenerations[event.SenderID]++
+			}
+		}
 		if requiresControlBarrier(event.Content) && (event.Role == core.RolePartner || event.Role == core.RoleCollaborator) {
 			if m.controlBarriers == nil {
 				m.controlBarriers = make(map[SessionKey]chan struct{})
@@ -130,12 +164,15 @@ func (m *DebounceManager) Push(event *core.SensoryEvent) bool {
 		handler := m.handler
 		if handler != nil || barrier != nil {
 			m.wg.Add(1)
+		} else {
+			<-controlSlots
 		}
 		m.mu.Unlock()
 		if handler != nil || barrier != nil {
 			go func() {
 				defer m.wg.Done()
 				defer func() {
+					defer func() { <-controlSlots }()
 					if recovered := recover(); recovered != nil {
 						slog.Error("debounce: control event handler panicked", "session", keyOf(event).String(), "panic", recovered)
 					}
@@ -167,13 +204,14 @@ func (m *DebounceManager) Push(event *core.SensoryEvent) bool {
 	if !ok {
 		if val, ok = m.workers.Load(key); !ok {
 			worker = &sessionWorker{
-				manager:   m,
-				key:       key,
-				config:    m.config,
-				handler:   m.handler,
-				msgCh:     make(chan queuedEvent, 32),
-				processCh: make(chan queuedEvent, 32),
-				closeCh:   make(chan struct{}),
+				manager:           m,
+				key:               key,
+				config:            m.config,
+				handler:           m.handler,
+				msgCh:             make(chan queuedEvent, 32),
+				processCh:         make(chan queuedEvent, 32),
+				senderGenerations: make(map[string]uint64),
+				closeCh:           make(chan struct{}),
 			}
 			m.workers.Store(key, worker)
 			m.wg.Add(2)
@@ -197,7 +235,7 @@ func (m *DebounceManager) Push(event *core.SensoryEvent) bool {
 	} else {
 		worker = val.(*sessionWorker)
 	}
-	queued := queuedEvent{event: event, generation: worker.generation.Load(), afterControl: m.controlBarriers[key]}
+	queued := queuedEvent{event: event, generation: worker.generation.Load(), senderGeneration: worker.senderGenerations[event.SenderID], afterControl: m.controlBarriers[key]}
 	worker.pushers.Add(1)
 	m.mu.Unlock()
 
@@ -213,13 +251,48 @@ func (m *DebounceManager) Push(event *core.SensoryEvent) bool {
 	return accepted
 }
 
+func isImmediateControlEvent(content string) bool {
+	command := strings.TrimSpace(content)
+	switch command {
+	case "继续", "/continue",
+		"/tasks", "/status", "/sysinfo", "/usage", "/model", "/models",
+		"/agy login", "/agy auth", "/agy login force", "/agy login --force",
+		"/agy status", "/agy logout", "/stop",
+		"/reset", "/new", "/clear", "/ws clear", "/ws reset",
+		"/pwd", "/workspaces", "/ws", "/ws exit", "/workspaces exit",
+		"/ws clean", "/clean", "/help", "/task":
+		return true
+	}
+	if strings.HasPrefix(command, "/task ") || strings.HasPrefix(command, "/cd ") || command == "/cd" ||
+		strings.HasPrefix(command, "/ws rm ") || strings.HasPrefix(command, "/workspaces rm ") {
+		return true
+	}
+	// Authorization-code parsing is case-insensitive in SuperAgent.
+	lowerCommand := strings.ToLower(command)
+	return strings.HasPrefix(lowerCommand, "/agy code ") || strings.HasPrefix(lowerCommand, "/agy auth ")
+}
+
+func controlCommandName(command string) string {
+	if command == "/stop" {
+		return command
+	}
+	if end := strings.IndexByte(command, ' '); end >= 0 {
+		return command[:end]
+	}
+	return command
+}
+
 func invalidatesPendingTurns(content string) bool {
 	switch strings.TrimSpace(content) {
-	case "/stop", "/reset", "/new", "/clear", "/ws clear", "/ws reset":
+	case "/reset", "/new", "/clear", "/ws clear", "/ws reset":
 		return true
 	default:
 		return false
 	}
+}
+
+func invalidatesPendingSenderTurns(content string) bool {
+	return strings.TrimSpace(content) == "/stop"
 }
 
 func requiresControlBarrier(content string) bool {
@@ -247,6 +320,16 @@ func (w *sessionWorker) dispatchQueued(event queuedEvent) {
 	}
 }
 
+func (w *sessionWorker) isCurrent(event queuedEvent) bool {
+	w.manager.mu.Lock()
+	defer w.manager.mu.Unlock()
+	if event.generation != w.generation.Load() {
+		return false
+	}
+	current := w.senderGenerations[event.event.SenderID]
+	return event.senderGeneration == current
+}
+
 func (w *sessionWorker) processLoop() {
 	defer w.manager.wg.Done()
 	for {
@@ -267,11 +350,13 @@ func (w *sessionWorker) processLoop() {
 				return
 			default:
 			}
-			if event.generation != w.generation.Load() {
+			if !w.isCurrent(event) {
 				w.queued.Add(-1)
 				continue
 			}
-			w.handle(event.event)
+			queuedEvent := event
+			queuedEvent.event.StillValid = func() bool { return w.isCurrent(queuedEvent) }
+			w.handle(queuedEvent.event)
 		}
 	}
 }
@@ -346,11 +431,11 @@ func (w *sessionWorker) loop(onIdleCleanup func() bool) {
 					return
 				}
 			}
-			if queued.generation != w.generation.Load() {
+			if !w.isCurrent(queued) {
 				continue
 			}
 			ev := queued.event
-			if len(pendingEvents) > 0 && pendingEvents[0].generation != queued.generation {
+			if len(pendingEvents) > 0 && (pendingEvents[0].generation != queued.generation || pendingEvents[0].senderGeneration != queued.senderGeneration) {
 				pendingEvents = nil
 				pendingRunes = 0
 				if timer != nil {
@@ -449,8 +534,9 @@ func (w *sessionWorker) loop(onIdleCleanup func() bool) {
 			if len(pendingEvents) == 0 {
 				continue
 			}
-			if pendingEvents[0].generation != w.generation.Load() {
+			if !w.isCurrent(pendingEvents[0]) {
 				pendingEvents = nil
+				pendingRunes = 0
 				continue
 			}
 
@@ -484,7 +570,8 @@ func mergeQueuedEvents(events []queuedEvent) queuedEvent {
 	for _, event := range events {
 		plain = append(plain, event.event)
 	}
-	return queuedEvent{event: mergeEvents(plain), generation: events[len(events)-1].generation}
+	last := events[len(events)-1]
+	return queuedEvent{event: mergeEvents(plain), generation: last.generation, senderGeneration: last.senderGeneration}
 }
 
 func sameReplyContext(a, b *core.SensoryEvent) bool {
@@ -518,6 +605,7 @@ func mergeEvents(events []*core.SensoryEvent) *core.SensoryEvent {
 
 	var textParts []string
 	var allImages []*core.Attachment
+	var allFiles []*core.Attachment
 
 	for _, ev := range events {
 		if ev.Content != "" {
@@ -526,10 +614,80 @@ func mergeEvents(events []*core.SensoryEvent) *core.SensoryEvent {
 		if ev.ReplyContext != nil {
 			merged.ReplyContext = ev.ReplyContext
 		}
-		allImages = append(allImages, ev.Images...)
+		merged.PendingFiles = ev.PendingFiles
+		merged.PendingImages = ev.PendingImages
+		merged.OmittedImages += ev.OmittedImages
+		merged.OmittedFiles += ev.OmittedFiles
+		if ev.OmittedPendingImages > merged.OmittedPendingImages {
+			merged.OmittedPendingImages = ev.OmittedPendingImages
+		}
+		if ev.OmittedPendingFiles > merged.OmittedPendingFiles {
+			merged.OmittedPendingFiles = ev.OmittedPendingFiles
+		}
+		remainingImages := core.MaxVisionImagesPerRequest - len(allImages)
+		if remainingImages > 0 {
+			if len(ev.Images) > remainingImages {
+				allImages = append(allImages, ev.Images[:remainingImages]...)
+				merged.OmittedImages += len(ev.Images) - remainingImages
+			} else {
+				allImages = append(allImages, ev.Images...)
+			}
+		} else {
+			merged.OmittedImages += len(ev.Images)
+		}
+		remainingFiles := core.MaxIncomingFilesPerRequest - len(allFiles)
+		if remainingFiles > 0 {
+			if len(ev.Files) > remainingFiles {
+				allFiles = append(allFiles, ev.Files[:remainingFiles]...)
+				merged.OmittedFiles += len(ev.Files) - remainingFiles
+			} else {
+				allFiles = append(allFiles, ev.Files...)
+			}
+		} else {
+			merged.OmittedFiles += len(ev.Files)
+		}
 	}
 
 	merged.Content = strings.Join(textParts, "\n")
 	merged.Images = allImages
+	merged.Files = allFiles
+	if len(allImages) > 0 && len(merged.PendingImages) > 0 {
+		currentURLs := make(map[string]struct{}, len(allImages))
+		for _, attachment := range allImages {
+			if attachment != nil && attachment.URL != "" {
+				currentURLs[attachment.URL] = struct{}{}
+			}
+		}
+		pendingImages := merged.PendingImages[:0]
+		for _, attachment := range merged.PendingImages {
+			if attachment == nil {
+				continue
+			}
+			if _, duplicated := currentURLs[attachment.URL]; duplicated {
+				continue
+			}
+			pendingImages = append(pendingImages, attachment)
+		}
+		merged.PendingImages = pendingImages
+	}
+	if len(allFiles) > 0 && len(merged.PendingFiles) > 0 {
+		currentURLs := make(map[string]struct{}, len(allFiles))
+		for _, attachment := range allFiles {
+			if attachment != nil && attachment.URL != "" {
+				currentURLs[attachment.URL] = struct{}{}
+			}
+		}
+		pendingFiles := merged.PendingFiles[:0]
+		for _, attachment := range merged.PendingFiles {
+			if attachment == nil {
+				continue
+			}
+			if _, duplicated := currentURLs[attachment.URL]; duplicated {
+				continue
+			}
+			pendingFiles = append(pendingFiles, attachment)
+		}
+		merged.PendingFiles = pendingFiles
+	}
 	return merged
 }

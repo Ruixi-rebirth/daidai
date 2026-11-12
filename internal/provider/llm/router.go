@@ -30,6 +30,18 @@ type ModelDiscoverer interface {
 	DiscoverModels(ctx context.Context) []ModelInfo
 }
 
+// ModelDiscoveryWithError lets providers distinguish an empty model pool from
+// a transient discovery failure while retaining ModelDiscoverer compatibility.
+type ModelDiscoveryWithError interface {
+	DiscoverModelsWithError(ctx context.Context) ([]ModelInfo, error)
+}
+
+type ModelDiscoveryStatus struct {
+	LastAttempt time.Time
+	LastSuccess time.Time
+	Failed      bool
+}
+
 // UsageDiscoverer 支持查询通道配额与实时用量信息的驱动接口
 type UsageDiscoverer interface {
 	GetUsage(ctx context.Context) (string, error)
@@ -81,14 +93,16 @@ type SwitchResult struct {
 
 // MindRouter 异构多心智开放路由器 (实现 core.LLMProvider，支持动态模型自发现)
 type MindRouter struct {
-	mu              sync.RWMutex
-	statePath       string
-	fallbackChannel string
-	active          ActiveMindState
-	providers       map[string]core.LLMProvider
-	models          []ModelInfo
-	providerVersion uint64
-	refreshVersion  uint64
+	mu                    sync.RWMutex
+	statePath             string
+	fallbackChannel       string
+	active                ActiveMindState
+	providers             map[string]core.LLMProvider
+	models                []ModelInfo
+	discoveryStatus       map[string]ModelDiscoveryStatus
+	providerVersion       uint64
+	refreshVersion        uint64
+	appliedRefreshVersion map[string]uint64
 }
 
 // MindRouterConfig 路由器初始化参数
@@ -104,6 +118,7 @@ func NewMindRouter(cfg MindRouterConfig) *MindRouter {
 		fallbackChannel: strings.ToUpper(strings.TrimSpace(cfg.FallbackChannel)),
 		providers:       make(map[string]core.LLMProvider),
 		models:          make([]ModelInfo, 0),
+		discoveryStatus: make(map[string]ModelDiscoveryStatus),
 	}
 
 	if r.statePath == "" {
@@ -128,12 +143,30 @@ func (r *MindRouter) RegisterChannel(reg ChannelRegistration) {
 	}
 
 	models := reg.Models
+	discoveryAttempted := false
+	discoveryFailed := false
 	if len(models) == 0 {
-		if disc, ok := reg.Provider.(ModelDiscoverer); ok {
+		if disc, ok := reg.Provider.(ModelDiscoveryWithError); ok {
+			discoveryAttempted = true
+			var err error
+			models, err = disc.DiscoverModelsWithError(context.Background())
+			discoveryFailed = err != nil
+			if err != nil {
+				slog.Warn("model router: 初始模型探测失败", "channel", channelKey, "err", err)
+			}
+		} else if disc, ok := reg.Provider.(ModelDiscoverer); ok {
+			discoveryAttempted = true
 			models = disc.DiscoverModels(context.Background())
+			discoveryFailed = len(models) == 0
+			if discoveryFailed {
+				slog.Warn("model router: 初始模型探测未返回可用模型，保留已有清单", "channel", channelKey)
+			}
 		}
 	}
-	models = cloneModelInfos(models)
+	models = normalizeModelInfos(models, channelKey)
+	if discoveryAttempted && len(models) == 0 {
+		discoveryFailed = true
+	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -143,20 +176,31 @@ func (r *MindRouter) RegisterChannel(reg ChannelRegistration) {
 
 	// Re-registering a channel replaces its model pool instead of accumulating
 	// stale or duplicate entries from the previous provider instance.
-	keptModels := r.models[:0]
-	for _, existing := range r.models {
-		if !strings.EqualFold(existing.Channel, channelKey) {
-			keptModels = append(keptModels, existing)
+	if discoveryAttempted {
+		status := r.discoveryStatus[channelKey]
+		status.LastAttempt = time.Now()
+		status.Failed = discoveryFailed
+		if !discoveryFailed {
+			status.LastSuccess = status.LastAttempt
 		}
+		r.discoveryStatus[channelKey] = status
+	} else {
+		// An explicit model pool is authoritative; do not retain a failure
+		// status from a previous discoverable provider registered on this key.
+		delete(r.discoveryStatus, channelKey)
 	}
-	r.models = keptModels
-
-	for _, m := range models {
-		m.Channel = channelKey
-		if m.Name == "" {
-			m.Name = m.ID
+	if !discoveryFailed {
+		keptModels := r.models[:0]
+		for _, existing := range r.models {
+			if !strings.EqualFold(existing.Channel, channelKey) {
+				keptModels = append(keptModels, existing)
+			}
 		}
-		r.models = append(r.models, m)
+		r.models = append(keptModels, models...)
+	} else {
+		if !hasModelsForChannel(r.models, channelKey) {
+			r.models = appendUniqueModels(r.models, models, channelKey)
+		}
 	}
 
 	if r.active.Channel == "" || r.active.Model == "" {
@@ -173,7 +217,7 @@ func (r *MindRouter) RegisterChannel(reg ChannelRegistration) {
 	}
 
 	if r.active.Channel == channelKey {
-		if len(models) > 0 {
+		if !discoveryFailed && len(models) > 0 {
 			var matched *ModelInfo
 			for i := range models {
 				if strings.EqualFold(models[i].ID, r.active.Model) {
@@ -215,11 +259,20 @@ func (r *MindRouter) CurrentMind() ActiveMindState {
 	return r.active
 }
 
+// HasConfiguredRoute reports whether the selected model is registered and backed by a provider.
+func (r *MindRouter) HasConfiguredRoute() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.active.Model != "" && r.providers[r.active.Channel] != nil
+}
+
 // FormatCurrentStatus 格式化当前激活的心智运行状态摘要
 func (r *MindRouter) FormatCurrentStatus() string {
 	r.mu.RLock()
 	curr := r.active
-	models := r.models
+	models := cloneModelInfos(r.models)
+	fallbackChannel := r.fallbackChannel
+	fallbackAvailable := r.providers[fallbackChannel] != nil
 	r.mu.RUnlock()
 
 	if curr.Model == "" && curr.Channel == "" {
@@ -229,17 +282,22 @@ func (r *MindRouter) FormatCurrentStatus() string {
 	modelName := curr.Model
 	for _, m := range models {
 		if m.ID == curr.Model && (curr.Channel == "" || strings.EqualFold(m.Channel, curr.Channel)) {
-			modelName = m.Name
+			if strings.TrimSpace(m.Name) != "" {
+				modelName = m.Name
+			}
 			break
 		}
 	}
 
 	var sb strings.Builder
-	sb.WriteString("【当前心智运行状态】\n")
-	fmt.Fprintf(&sb, "- 激活模型：%s (`%s`)\n", modelName, curr.Model)
-	fmt.Fprintf(&sb, "- 通信通道：%s 通道\n", curr.Channel)
+	sb.WriteString("🧠 当前模型路由\n")
+	fmt.Fprintf(&sb, "🤖 激活模型：%s\n", modelName)
+	fmt.Fprintf(&sb, "🔌 通道：%s\n", curr.Channel)
 	if curr.Effort != "" {
-		fmt.Fprintf(&sb, "- 思考强度：%s\n", curr.Effort)
+		fmt.Fprintf(&sb, "💭 思考强度：%s\n", curr.Effort)
+	}
+	if fallbackAvailable && !strings.EqualFold(curr.Channel, fallbackChannel) {
+		fmt.Fprintf(&sb, "🔁 首选通道调用失败时，可能将本轮内容交由 %s 通道处理；这不会改变首选设置。\n", fallbackChannel)
 	}
 	return strings.TrimSpace(sb.String())
 }
@@ -249,8 +307,27 @@ func (r *MindRouter) ListModels() []ModelInfo {
 	return r.ListModelsContext(context.Background())
 }
 
+// CachedModels returns the current discovery snapshot without refreshing it.
+// Tool schemas use this method so prompt construction never starts an
+// unbounded network or CLI discovery call.
+func (r *MindRouter) CachedModels() []ModelInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return cloneModelInfos(r.models)
+}
+
+func (r *MindRouter) ModelDiscoveryStatus(channel string) (ModelDiscoveryStatus, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	status, ok := r.discoveryStatus[strings.ToUpper(strings.TrimSpace(channel))]
+	return status, ok
+}
+
 // ListModelsContext 列出模型定义，并在需要时使用调用方的上下文刷新模型池。
 func (r *MindRouter) ListModelsContext(ctx context.Context) []ModelInfo {
+	if ctx == nil {
+		return r.CachedModels()
+	}
 	r.mu.RLock()
 	needRefresh := len(r.models) == 0
 	r.mu.RUnlock()
@@ -273,8 +350,97 @@ func cloneModelInfos(models []ModelInfo) []ModelInfo {
 	return cloned
 }
 
+// normalizeModelInfos removes duplicate IDs within one provider while merging
+// metadata such as effort options that may arrive in separate discovery rows.
+func normalizeModelInfos(models []ModelInfo, channel string) []ModelInfo {
+	result := make([]ModelInfo, 0, len(models))
+	indexes := make(map[string]int, len(models))
+	for _, model := range models {
+		model.ID = strings.TrimSpace(model.ID)
+		model.Name = strings.TrimSpace(model.Name)
+		if model.ID == "" {
+			continue
+		}
+		model.Channel = channel
+		if model.Name == "" {
+			model.Name = model.ID
+		}
+		key := strings.ToLower(model.ID)
+		index, exists := indexes[key]
+		if !exists {
+			model.SupportedEfforts = uniqueEfforts(model.SupportedEfforts)
+			result = append(result, model)
+			indexes[key] = len(result) - 1
+			continue
+		}
+
+		merged := &result[index]
+		merged.SupportsEffort = merged.SupportsEffort || model.SupportsEffort
+		merged.SupportedEfforts = uniqueEfforts(append(merged.SupportedEfforts, model.SupportedEfforts...))
+		if len(merged.SupportedEfforts) > 0 {
+			merged.SupportsEffort = true
+		}
+		if merged.DefaultEffort == "" {
+			merged.DefaultEffort = model.DefaultEffort
+		}
+		if merged.Description == "" {
+			merged.Description = model.Description
+		}
+		if (merged.Name == merged.ID || merged.Name == "") && model.Name != "" {
+			merged.Name = model.Name
+		}
+	}
+	return result
+}
+
+func uniqueEfforts(efforts []string) []string {
+	result := make([]string, 0, len(efforts))
+	seen := make(map[string]struct{}, len(efforts))
+	for _, effort := range efforts {
+		effort = strings.TrimSpace(effort)
+		if effort == "" {
+			continue
+		}
+		key := strings.ToLower(effort)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, effort)
+	}
+	return result
+}
+
+func appendUniqueModels(models, candidates []ModelInfo, channel string) []ModelInfo {
+	for _, candidate := range candidates {
+		found := false
+		for _, existing := range models {
+			if strings.EqualFold(existing.Channel, channel) && strings.EqualFold(existing.ID, candidate.ID) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			models = append(models, candidate)
+		}
+	}
+	return models
+}
+
+func hasModelsForChannel(models []ModelInfo, channel string) bool {
+	for _, model := range models {
+		if strings.EqualFold(model.Channel, channel) {
+			return true
+		}
+	}
+	return false
+}
+
 // RefreshModels 重新触发所有已挂载通道的模型探测并刷新模型池
 func (r *MindRouter) RefreshModels(ctx context.Context) {
+	if ctx == nil || ctx.Err() != nil {
+		return
+	}
 	r.mu.Lock()
 	r.refreshVersion++
 	refreshVersion := r.refreshVersion
@@ -292,37 +458,96 @@ func (r *MindRouter) RefreshModels(ctx context.Context) {
 		return providers[i].channel < providers[j].channel
 	})
 
-	refreshedModels := make(map[string][]ModelInfo)
+	type discoveryResult struct {
+		channel string
+		models  []ModelInfo
+		failed  bool
+		replace bool
+	}
+	results := make(chan discoveryResult, len(providers))
+	discoveryCount := 0
 	for _, entry := range providers {
 		if ctx.Err() != nil {
 			return
 		}
 		disc, ok := entry.provider.(ModelDiscoverer)
-		if !ok {
+		discWithError, reportsError := entry.provider.(ModelDiscoveryWithError)
+		if !ok && !reportsError {
 			continue
 		}
-		for _, m := range disc.DiscoverModels(ctx) {
-			m.Channel = entry.channel
-			if m.Name == "" {
-				m.Name = m.ID
+		discoveryCount++
+		go func(channel string, discoverer ModelDiscoverer, discovererWithError ModelDiscoveryWithError, reportsError bool) {
+			var models []ModelInfo
+			var err error
+			replace := false
+			failed := false
+			if reportsError {
+				models, err = discovererWithError.DiscoverModelsWithError(ctx)
+				failed = err != nil
+				if err != nil {
+					slog.Warn("model router: 模型池探测失败，保留已有清单", "channel", channel, "err", err)
+				}
+			} else {
+				models = discoverer.DiscoverModels(ctx)
 			}
-			m.SupportedEfforts = append([]string(nil), m.SupportedEfforts...)
-			refreshedModels[entry.channel] = append(refreshedModels[entry.channel], m)
+			models = normalizeModelInfos(models, channel)
+			if len(models) == 0 {
+				failed = true
+				slog.Warn("model router: 模型池探测未返回可用模型，保留已有清单", "channel", channel)
+			} else {
+				replace = err == nil
+			}
+			results <- discoveryResult{channel: channel, models: models, failed: failed, replace: replace}
+		}(entry.channel, disc, discWithError, reportsError)
+	}
+	discovered := make(map[string]discoveryResult, discoveryCount)
+	for received := 0; received < discoveryCount; {
+		select {
+		case result := <-results:
+			received++
+			discovered[result.channel] = result
+		case <-ctx.Done():
+			return
 		}
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// A newer refresh or channel registration has made this snapshot stale.
-	if refreshVersion != r.refreshVersion || providerVersion != r.providerVersion {
+	// Channel registration invalidates the entire snapshot, but successful model
+	// discovery is merged per channel so one provider's failure cannot discard
+	// another provider's useful result from an older overlapping refresh.
+	if providerVersion != r.providerVersion {
 		return
 	}
-	if len(refreshedModels) == 0 {
+	if r.appliedRefreshVersion == nil {
+		r.appliedRefreshVersion = make(map[string]uint64)
+	}
+	for channel := range discovered {
+		if refreshVersion < r.appliedRefreshVersion[channel] {
+			delete(discovered, channel)
+		}
+	}
+	if len(discovered) == 0 {
 		return
 	}
-
-	// Replace only channels that returned a non-empty model list. This preserves
-	// explicit model pools for non-discovering providers and transient failures.
+	refreshedModels := make(map[string][]ModelInfo, len(discovered))
+	for channel, result := range discovered {
+		status := r.discoveryStatus[channel]
+		status.LastAttempt = time.Now()
+		status.Failed = result.failed
+		if !result.failed {
+			status.LastSuccess = status.LastAttempt
+		} else if !hasModelsForChannel(r.models, channel) {
+			r.models = appendUniqueModels(r.models, result.models, channel)
+		}
+		r.discoveryStatus[channel] = status
+		r.appliedRefreshVersion[channel] = refreshVersion
+		if result.replace {
+			refreshedModels[channel] = result.models
+		}
+	}
+	// Replace only channels whose discovery succeeded. This preserves explicit
+	// model pools for non-discovering providers and cached entries on failures.
 	var updatedModels []ModelInfo
 	for _, existing := range r.models {
 		if _, refreshed := refreshedModels[existing.Channel]; !refreshed {
@@ -333,7 +558,27 @@ func (r *MindRouter) RefreshModels(ctx context.Context) {
 		updatedModels = append(updatedModels, refreshedModels[entry.channel]...)
 	}
 	r.models = updatedModels
-
+	if (r.active.Channel == "" || r.active.Model == "") && len(r.models) > 0 {
+		selected := -1
+		for index, model := range r.models {
+			if strings.EqualFold(model.Channel, r.fallbackChannel) {
+				selected = index
+				break
+			}
+		}
+		if selected < 0 {
+			selected = 0
+		}
+		model := r.models[selected]
+		r.active = ActiveMindState{
+			Channel:   model.Channel,
+			Model:     model.ID,
+			Effort:    model.DefaultEffort,
+			UpdatedAt: time.Now().Format(time.RFC3339),
+		}
+		r.saveActiveStateLocked(model.Channel)
+		r.syncProviderLocked(model.Channel, model.ID, model.DefaultEffort)
+	}
 	if activeModels := refreshedModels[r.active.Channel]; len(activeModels) > 0 {
 		var matched *ModelInfo
 		for i := range activeModels {
@@ -374,6 +619,9 @@ func (r *MindRouter) Channels() []string {
 
 // QueryChannelUsage 查询指定通道或当前激活通道的配额与实时用量
 func (r *MindRouter) QueryChannelUsage(ctx context.Context, channel string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	chKey := strings.ToUpper(strings.TrimSpace(channel))
 	if chKey == "" {
 		curr := r.CurrentMind()
@@ -401,9 +649,8 @@ func (r *MindRouter) ResolveModelAndEffort(rawModel, fallbackModel, fallbackEffo
 		return fallbackModel, fallbackEffort
 	}
 
-	cleanTarget, extractedEffort := SplitModelAndEffort(rawModel)
-
 	r.mu.RLock()
+	cleanTarget, extractedEffort := r.splitKnownModelAndEffort(rawModel)
 	candidates := r.findCandidatesLocked(cleanTarget, "")
 	r.mu.RUnlock()
 
@@ -445,8 +692,8 @@ func (r *MindRouter) ResolveModelAndEffortForChannel(rawModel, fallbackModel, fa
 	if channel == "" {
 		return "", "", fmt.Errorf("model execution channel cannot be empty")
 	}
-	cleanTarget, requestedEffort := SplitModelAndEffort(rawModel)
 	r.mu.RLock()
+	cleanTarget, requestedEffort := r.splitKnownModelAndEffort(rawModel)
 	candidates := r.findCandidatesLocked(cleanTarget, channel)
 	allCandidates := candidates
 	if len(candidates) == 0 {
@@ -580,7 +827,7 @@ func (r *MindRouter) SwitchMind(req SwitchRequest) (*SwitchResult, error) {
 		}, nil
 	}
 
-	cleanTarget, extractedEffort := SplitModelAndEffort(targetRaw)
+	cleanTarget, extractedEffort := r.splitKnownModelAndEffort(targetRaw)
 	if effortReq == "" && extractedEffort != "" {
 		effortReq = extractedEffort
 	}
@@ -695,6 +942,19 @@ func (r *MindRouter) findCandidatesLocked(query string, channelFilter string) []
 	return subMatches
 }
 
+// splitKnownModelAndEffort gives a discovered full model ID precedence over a
+// trailing effort suffix, since valid provider IDs can themselves end in
+// strings such as "-high" or "-low".
+func (r *MindRouter) splitKnownModelAndEffort(raw string) (string, string) {
+	raw = strings.TrimSpace(raw)
+	for _, model := range r.models {
+		if strings.EqualFold(model.ID, raw) {
+			return raw, ""
+		}
+	}
+	return SplitModelAndEffort(raw)
+}
+
 // SplitModelAndEffort 拆分模型名称末尾可能附带的标准思考强度后缀 (如 "gemini-4-argon-high" -> "gemini-4-argon", "high")
 func SplitModelAndEffort(raw string) (string, string) {
 	raw = strings.TrimSpace(raw)
@@ -804,6 +1064,12 @@ func (r *MindRouter) ChatWithTools(
 	tools []core.ToolDefinition,
 	opts *core.ChatOptions,
 ) (*core.ChatResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	r.mu.RLock()
 	channel := r.active.Channel
 	model := r.active.Model

@@ -728,7 +728,7 @@ func ValidateTrustedMediaURL(rawURL string) error {
 		return fmt.Errorf("invalid media url: %w", err)
 	}
 	u.Scheme = strings.ToLower(u.Scheme)
-	if u.Scheme != "https" && u.Scheme != "http" {
+	if u.Scheme != "https" {
 		return fmt.Errorf("unsupported url scheme: %s", u.Scheme)
 	}
 	if u.User != nil {
@@ -857,6 +857,15 @@ func isForbiddenTargetIP(ip net.IP) bool {
 	// 自动将 IPv4-mapped IPv6 (如 ::ffff:127.0.0.1) 还原为标准 IPv4
 	addr = addr.Unmap()
 	if addr.Is6() && !globalIPv6Unicast.Contains(addr) {
+		return true
+	}
+	// Prevent a public URL from routing back to this host through its public
+	// interface or NAT address. These addresses are registered at startup and
+	// may also be discovered asynchronously by the direct-egress probe.
+	ipGuardMu.RLock()
+	_, isHostIP := sensitiveIPs[addr.String()]
+	ipGuardMu.RUnlock()
+	if isHostIP {
 		return true
 	}
 	for _, prefix := range forbiddenCIDRs {

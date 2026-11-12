@@ -76,11 +76,34 @@ func (p *OpenAIProvider) Name() string {
 
 // DiscoverModels 通过标准 OpenAI 协议 GET /models 端点动态探测当前 API 服务商支持的模型列表
 func (p *OpenAIProvider) DiscoverModels(ctx context.Context) []ModelInfo {
+	models, err := p.DiscoverModelsWithError(ctx)
+	if err != nil {
+		slog.Warn("api: 模型池探测失败", "err", err)
+	}
+	return models
+}
+
+func (p *OpenAIProvider) DiscoverModelsWithError(ctx context.Context) ([]ModelInfo, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	p.mu.RLock()
 	baseURL := strings.TrimRight(p.cfg.BaseURL, "/")
 	apiKey := p.cfg.APIKey
 	configuredModel := p.configuredModel
 	p.mu.RUnlock()
+
+	fallbackModels := make([]ModelInfo, 0, 1)
+	if configuredModel != "" {
+		fallbackModels = append(fallbackModels, ModelInfo{
+			ID:      configuredModel,
+			Channel: "API",
+			Name:    configuredModel,
+		})
+	}
+	if baseURL == "" {
+		return fallbackModels, fmt.Errorf("API model discovery has no base URL")
+	}
 
 	var models []ModelInfo
 	seen := make(map[string]struct{})
@@ -102,40 +125,57 @@ func (p *OpenAIProvider) DiscoverModels(ctx context.Context) []ModelInfo {
 		})
 	}
 
-	// 优先确保配置文件中显式指定的默认模型排在首位
-	if configuredModel != "" {
-		addModel(configuredModel)
-	}
-
-	if apiKey != "" && baseURL != "" {
+	if baseURL != "" {
 		discCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 		defer cancel()
 
 		req, err := http.NewRequestWithContext(discCtx, http.MethodGet, baseURL+"/models", nil)
-		if err == nil {
+		if err != nil {
+			return fallbackModels, fmt.Errorf("create /models request: %w", err)
+		}
+		if apiKey != "" {
 			req.Header.Set("Authorization", "Bearer "+apiKey)
-			resp, err := p.httpClient.Do(req)
-			if err == nil {
-				defer func() { _ = resp.Body.Close() }()
-				if resp.StatusCode == http.StatusOK {
-					body, readErr := core.ReadBounded(resp.Body, maxOpenAIResponseBytes)
-					var listResp struct {
-						Data []struct {
-							ID string `json:"id"`
-						} `json:"data"`
-					}
-					if readErr == nil && json.Unmarshal(body, &listResp) == nil {
-						for _, item := range listResp.Data {
-							addModel(item.ID)
-						}
-						slog.Info("api: 成功从远端 /models 动态探测可用模型列表", "count", len(models))
-					}
+		}
+		resp, err := p.httpClient.Do(req)
+		if err != nil {
+			return fallbackModels, fmt.Errorf("request /models: %w", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			return fallbackModels, fmt.Errorf("/models returned HTTP %d", resp.StatusCode)
+		}
+		body, err := core.ReadBounded(resp.Body, maxOpenAIResponseBytes)
+		if err != nil {
+			return fallbackModels, fmt.Errorf("read /models response: %w", err)
+		}
+		var listResp struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(body, &listResp); err != nil {
+			return fallbackModels, fmt.Errorf("decode /models response: %w", err)
+		}
+		for _, item := range listResp.Data {
+			addModel(item.ID)
+		}
+		if len(models) == 0 {
+			return fallbackModels, fmt.Errorf("/models returned no recognizable models")
+		}
+		for index := range models {
+			if strings.EqualFold(models[index].ID, configuredModel) {
+				if index > 0 {
+					configured := models[index]
+					copy(models[1:index+1], models[:index])
+					models[0] = configured
 				}
+				break
 			}
 		}
+		slog.Info("api: 成功从远端 /models 动态探测可用模型列表", "count", len(models))
 	}
 
-	return models
+	return models, nil
 }
 
 type openAIMessage struct {
@@ -150,13 +190,14 @@ type openAIChatRequest struct {
 	Model       string                `json:"model"`
 	Messages    []openAIMessage       `json:"messages"`
 	Tools       []core.ToolDefinition `json:"tools,omitempty"`
-	Temperature float32               `json:"temperature,omitempty"`
+	Temperature float32               `json:"temperature"`
 	MaxTokens   int                   `json:"max_tokens,omitempty"`
 }
 
 type openAIChatResponse struct {
 	Choices []struct {
-		Message struct {
+		FinishReason string `json:"finish_reason"`
+		Message      struct {
 			Role      string          `json:"role"`
 			Content   string          `json:"content"`
 			ToolCalls []core.ToolCall `json:"tool_calls,omitempty"`
@@ -192,9 +233,9 @@ func (p *OpenAIProvider) ChatWithTools(ctx context.Context, messages []core.Chat
 	temp := float32(0.7)
 	maxTokens := 2048
 	if opts != nil {
-		if opts.Temperature > 0 {
-			temp = opts.Temperature
-		}
+		// A non-nil options value explicitly carries its temperature, including
+		// zero for deterministic classification and routing requests.
+		temp = opts.Temperature
 		if opts.MaxTokens > 0 {
 			maxTokens = opts.MaxTokens
 		}
@@ -261,7 +302,12 @@ func (p *OpenAIProvider) ChatWithTools(ctx context.Context, messages []core.Chat
 		return nil, fmt.Errorf("empty choices returned by model")
 	}
 
-	firstChoice := chatResp.Choices[0].Message
+	choice := chatResp.Choices[0]
+	switch strings.ToLower(strings.TrimSpace(choice.FinishReason)) {
+	case "length", "max_tokens", "max_output_tokens":
+		return nil, fmt.Errorf("model response was truncated because it reached the output token limit")
+	}
+	firstChoice := choice.Message
 	return &core.ChatResponse{
 		Content:   firstChoice.Content,
 		ToolCalls: firstChoice.ToolCalls,

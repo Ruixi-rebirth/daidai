@@ -25,6 +25,7 @@ llm:
 
 agent:
   max_concurrent: 1
+  execution_timeout: 30m # 每张工单最长执行时间；设为 0 时仅由 /stop 或服务停机取消
   runners:
     - name: "agy"
       description: "Google Antigravity 工程执行器，可在所选工作目录中检索代码、编辑文件并运行命令；不提供操作系统级隔离"
@@ -38,3 +39,15 @@ plugins:
 
 memory:
   working_limit: 30
+
+oci:
+  enabled: false
+  private_key: ""
+  user_ocid: ""
+  tenancy_ocid: ""
+  region: ""
+  compartment_id: ""
+  daily_report_hour: 8
+  daily_report_minute: 30
+  cost_alert_delta: 1.0
+  timezone: "Asia/Singapore"

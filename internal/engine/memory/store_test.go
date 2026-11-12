@@ -126,7 +126,7 @@ func TestMemoryEngine_HybridBM25AndVectorRRF(t *testing.T) {
 	engine.SetEmbedder(&mockEmbedder{})
 	defer SetDefaultEmbedder(nil)
 
-	msgID, err := dbMgr.LogMessage(ctx, "qq", "group", "9999", "1001", "阿宅", "我们线上集群全部切到了 Cilium 和 eBPF", false, "")
+	msgID, err := dbMgr.LogMessage(ctx, "qq", "group", "9999", "1001", "阿宅", "我们线上集群全部切到了 Cilium 和 eBPF", false, "", "")
 	if err != nil {
 		t.Fatalf("LogMessage failed: %v", err)
 	}

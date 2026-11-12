@@ -14,7 +14,6 @@ import (
 	"syscall"
 	"time"
 	"unicode"
-	"unsafe"
 
 	"daidai/internal/core"
 	"daidai/internal/entity"
@@ -152,6 +151,14 @@ func readAGYTokenFile(path string) ([]byte, error) {
 	}
 	if info.Mode&unix.S_IFMT != unix.S_IFREG {
 		return nil, fmt.Errorf("AGY token path is not a regular file")
+	}
+	if info.Uid != uint32(os.Getuid()) {
+		return nil, fmt.Errorf("AGY token file is not owned by the current user")
+	}
+	if info.Mode&0077 != 0 {
+		if err := unix.Fchmod(fd, 0600); err != nil {
+			return nil, fmt.Errorf("secure AGY token file permissions: %w", err)
+		}
 	}
 	if info.Size < 0 || info.Size > maxAGYTokenFileBytes {
 		return nil, fmt.Errorf("AGY token file exceeds %d byte limit", maxAGYTokenFileBytes)
@@ -474,39 +481,4 @@ func (m *AGYAuthManager) cancelLocked() {
 		}
 		m.active = nil
 	}
-}
-
-// openPTY 使用 Linux 原生系统调用分配虚拟伪终端并设置超宽终端和非阻塞模式
-func openPTY(cols, rows uint16) (master, slave *os.File, err error) {
-	mFd, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, nil, fmt.Errorf("open /dev/ptmx failed: %w", err)
-	}
-
-	unlock := 0
-	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(mFd), uintptr(unix.TIOCSPTLCK), uintptr(unsafe.Pointer(&unlock))); errno != 0 {
-		_ = unix.Close(mFd)
-		return nil, nil, fmt.Errorf("ioctl TIOCSPTLCK failed: %v", errno)
-	}
-
-	var ptn int32
-	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(mFd), uintptr(unix.TIOCGPTN), uintptr(unsafe.Pointer(&ptn))); errno != 0 {
-		_ = unix.Close(mFd)
-		return nil, nil, fmt.Errorf("ioctl TIOCGPTN failed: %v", errno)
-	}
-
-	slavePath := fmt.Sprintf("/dev/pts/%d", ptn)
-	sFd, err := unix.Open(slavePath, unix.O_RDWR|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		_ = unix.Close(mFd)
-		return nil, nil, fmt.Errorf("open slave %s failed: %w", slavePath, err)
-	}
-
-	if cols > 0 && rows > 0 {
-		ws := unix.Winsize{Row: rows, Col: cols}
-		_ = unix.IoctlSetWinsize(sFd, unix.TIOCSWINSZ, &ws)
-	}
-	_ = unix.SetNonblock(mFd, true)
-
-	return os.NewFile(uintptr(mFd), "/dev/ptmx"), os.NewFile(uintptr(sFd), slavePath), nil
 }

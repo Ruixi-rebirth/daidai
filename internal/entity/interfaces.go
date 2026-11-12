@@ -27,7 +27,7 @@ type Hands interface {
 // guest model and when enforcing tool execution at the registry boundary.
 func GuestToolAllowed(name string) bool {
 	switch name {
-	case "render_card", "get_system_status", "manage_memory", "search_web", "read_link", "screenshot_web", "search_nix_package", "express_face":
+	case "render_card", "get_system_status", "manage_memory", "summarize_chat", "search_web", "read_link", "screenshot_web", "search_nix_package", "express_face":
 		return true
 	default:
 		return false

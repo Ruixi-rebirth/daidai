@@ -6,9 +6,10 @@ import (
 )
 
 const (
-	MaxUserMessageRunes   = 12000
-	MaxQuotedMessageRunes = 4000
-	MaxVisionSummaryRunes = 2000
+	MaxUserMessageRunes    = 12000
+	MaxQuotedMessageRunes  = 4000
+	MaxVisionSummaryRunes  = 2000
+	MaxSummaryMessageRunes = 400
 )
 
 type markdownFence struct {
@@ -106,6 +107,7 @@ func SplitMarkdownChunks(text string, limit int) []string {
 	currentRunes := 0
 
 	inCodeBlock := false
+	continuationPrefix := false
 	var codeFence markdownFence
 
 	flushChunk := func() {
@@ -120,10 +122,12 @@ func SplitMarkdownChunks(text string, limit int) []string {
 			current.WriteString(codeFence.opening)
 			current.WriteString("\n")
 			currentRunes = utf8.RuneCountInString(codeFence.opening) + 1
+			continuationPrefix = true
 		} else {
 			chunks = append(chunks, current.String())
 			current.Reset()
 			currentRunes = 0
+			continuationPrefix = false
 		}
 	}
 
@@ -131,15 +135,35 @@ func SplitMarkdownChunks(text string, limit int) []string {
 		lineRunes := utf8.RuneCountInString(line)
 
 		openingFence, opensFence := parseMarkdownFence(line)
+		if opensFence && !inCodeBlock && lineRunes+openingFence.length+2 >= limit {
+			// A fence header that leaves no room for both a body rune and its
+			// closing marker cannot be balanced within this message limit.
+			opensFence = false
+		}
 		closesFence := inCodeBlock && closesMarkdownFence(line, codeFence)
 		closeReserve := 0
-		if inCodeBlock {
+		if inCodeBlock && !closesFence {
 			closeReserve = codeFence.length + 1 // newline and matching closing fence
-		} else if opensFence {
+		} else if opensFence && !inCodeBlock {
 			closeReserve = openingFence.length + 1
 		}
-		if currentRunes+lineRunes+1+closeReserve > limit && currentRunes > 0 {
+		separatorRunes := 0
+		if currentRunes > 0 && !continuationPrefix {
+			separatorRunes = 1
+		}
+		if currentRunes+lineRunes+separatorRunes+closeReserve > limit && currentRunes > 0 {
 			flushChunk()
+			if closesFence {
+				// flushChunk already closed the previous chunk's code block and
+				// reopened it for continuation. The source closing fence ends that
+				// block here, so discard the reopened empty block and consume it.
+				current.Reset()
+				currentRunes = 0
+				continuationPrefix = false
+				inCodeBlock = false
+				codeFence = markdownFence{}
+				continue
+			}
 		}
 
 		if opensFence && !inCodeBlock {
@@ -150,12 +174,51 @@ func SplitMarkdownChunks(text string, limit int) []string {
 			codeFence = markdownFence{}
 		}
 
-		if currentRunes > 0 && !strings.HasSuffix(current.String(), "\n") {
+		separatorRunes = 0
+		if currentRunes > 0 && !continuationPrefix {
+			separatorRunes = 1
+		}
+		if currentRunes+lineRunes+separatorRunes+closeReserve > limit && !opensFence && !closesFence {
+			remaining := []rune(line)
+			for len(remaining) > 0 {
+				separatorRunes = 0
+				if currentRunes > 0 && !continuationPrefix {
+					separatorRunes = 1
+				}
+				capacity := limit - currentRunes - separatorRunes - closeReserve
+				if capacity <= 0 && currentRunes > 0 {
+					flushChunk()
+					continue
+				}
+				if capacity <= 0 {
+					capacity = limit
+				}
+				take := len(remaining)
+				if take > capacity {
+					take = capacity
+				}
+				if separatorRunes > 0 {
+					current.WriteString("\n")
+					currentRunes++
+				}
+				current.WriteString(string(remaining[:take]))
+				currentRunes += take
+				remaining = remaining[take:]
+				if len(remaining) > 0 {
+					flushChunk()
+				}
+			}
+			continuationPrefix = false
+			continue
+		}
+
+		if currentRunes > 0 && !continuationPrefix {
 			current.WriteString("\n")
 			currentRunes++
 		}
 		current.WriteString(line)
 		currentRunes += lineRunes
+		continuationPrefix = false
 	}
 
 	if currentRunes > 0 {

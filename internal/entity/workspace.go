@@ -135,7 +135,11 @@ func NewWorkspaceManager(defaultDir string, dbMgr *db.Manager) *WorkspaceManager
 // NewWorkspaceManagerForPlatform 按指定平台实例化工作空间中枢
 func NewWorkspaceManagerForPlatform(platform, defaultDir string, dbMgr *db.Manager) *WorkspaceManager {
 	def := ResolveSandboxDir(defaultDir)
-	_ = os.MkdirAll(def, 0755)
+	if err := os.MkdirAll(def, 0700); err != nil {
+		slog.Error("workspace: 创建默认工作区失败", "path", def, "err", err)
+	} else if err := os.Chmod(def, 0700); err != nil {
+		slog.Error("workspace: 收紧默认工作区权限失败", "path", def, "err", err)
+	}
 
 	if dbMgr == nil {
 		dbMgr = db.DefaultManager()
@@ -284,12 +288,15 @@ func (wm *WorkspaceManager) CleanSandbox() error {
 		return fmt.Errorf("安全拒绝：仅允许清理专用 sandbox 目录 (%s)", sandbox)
 	}
 	sandbox = cleanSandbox
+	if err := os.MkdirAll(sandbox, 0700); err != nil {
+		return fmt.Errorf("创建默认工作区失败: %w", err)
+	}
+	if err := os.Chmod(sandbox, 0700); err != nil {
+		return fmt.Errorf("收紧默认工作区权限失败: %w", err)
+	}
 
 	entries, err := os.ReadDir(sandbox)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return os.MkdirAll(sandbox, 0755)
-		}
 		return err
 	}
 
@@ -333,12 +340,17 @@ func (wm *WorkspaceManager) getCurrent(channelID string) (string, string, error)
 	wm.mu.RUnlock()
 
 	if ok && cached != "" {
-		if resolved, err := canonicalWorkspacePath(cached); err == nil {
-			if st, statErr := os.Stat(resolved); statErr == nil && st.IsDir() {
+		resolved, pathErr := canonicalWorkspacePath(cached)
+		if pathErr == nil {
+			st, statErr := os.Stat(resolved)
+			if statErr == nil && st.IsDir() {
 				wm.mu.Lock()
 				wm.cache[channelID] = resolved
 				wm.mu.Unlock()
 				return resolved, filepath.Base(resolved), nil
+			}
+			if statErr != nil && !os.IsNotExist(statErr) {
+				return "", "", fmt.Errorf("检查缓存工作区失败: %w", statErr)
 			}
 		}
 		wm.mu.Lock()
@@ -355,29 +367,35 @@ func (wm *WorkspaceManager) getCurrent(channelID string) (string, string, error)
 		if active != nil && active.Path != "" {
 			cleanActive, pathErr := canonicalWorkspacePath(active.Path)
 			if pathErr != nil || (strings.EqualFold(active.ProjectName, "sandbox") && cleanActive != wm.defaultDir) {
-				_ = wm.db.RemoveChannelWorkspace(wm.platform, channelID, active.Path)
+				if removeErr := wm.db.RemoveChannelWorkspace(wm.platform, channelID, active.Path); removeErr != nil {
+					return "", "", fmt.Errorf("清理无效活动工作区失败: %w", removeErr)
+				}
 			} else if st, sErr := os.Stat(cleanActive); sErr == nil && st.IsDir() {
 				wm.mu.Lock()
 				wm.cache[channelID] = cleanActive
 				wm.mu.Unlock()
 				return cleanActive, filepath.Base(cleanActive), nil
-			} else {
+			} else if sErr == nil || os.IsNotExist(sErr) {
 				// 物理目录已不存在，自动自愈剔除失效记录
-				_ = wm.db.RemoveChannelWorkspace(wm.platform, channelID, active.Path)
+				if removeErr := wm.db.RemoveChannelWorkspace(wm.platform, channelID, active.Path); removeErr != nil {
+					return "", "", fmt.Errorf("清理失效活动工作区失败: %w", removeErr)
+				}
+			} else {
+				return "", "", fmt.Errorf("检查活动工作区失败: %w", sErr)
 			}
 		}
 	}
 
 	// 兜底并自动激活默认目录
 	def := wm.defaultDir
+	if wm.db != nil {
+		if err := wm.db.SetActiveWorkspace(wm.platform, channelID, def, filepath.Base(def)); err != nil {
+			return "", "", fmt.Errorf("保存默认工作区状态失败: %w", err)
+		}
+	}
 	wm.mu.Lock()
 	wm.cache[channelID] = def
 	wm.mu.Unlock()
-	if wm.db != nil {
-		if err := wm.db.SetActiveWorkspace(wm.platform, channelID, def, filepath.Base(def)); err != nil {
-			slog.Warn("workspace: 保存默认工作区状态失败", "channelID", channelID, "err", err)
-		}
-	}
 	return def, filepath.Base(def), nil
 }
 
@@ -429,10 +447,22 @@ func (wm *WorkspaceManager) Switch(channelID, target string) (string, error) {
 					if !strings.EqualFold(entry.ProjectName, resolved) {
 						continue
 					}
-					if st, err := os.Stat(entry.Path); err == nil && st.IsDir() {
+					canonicalPath, pathErr := canonicalWorkspacePath(entry.Path)
+					if pathErr != nil {
+						if removeErr := wm.db.RemoveChannelWorkspace(wm.platform, channelID, entry.Path); removeErr != nil {
+							return "", fmt.Errorf("清理无效工作空间书签失败: %w", removeErr)
+						}
+						continue
+					}
+					st, statErr := os.Stat(canonicalPath)
+					if statErr == nil && st.IsDir() {
 						matched = append(matched, WorkspaceBookmark{Path: entry.Path, ProjectName: entry.ProjectName})
+					} else if statErr == nil || os.IsNotExist(statErr) {
+						if removeErr := wm.db.RemoveChannelWorkspace(wm.platform, channelID, entry.Path); removeErr != nil {
+							return "", fmt.Errorf("清理失效工作空间书签失败: %w", removeErr)
+						}
 					} else {
-						_ = wm.db.RemoveChannelWorkspace(wm.platform, channelID, entry.Path)
+						return "", fmt.Errorf("检查工作空间书签失败: %w", statErr)
 					}
 				}
 			}
@@ -593,25 +623,28 @@ func (wm *WorkspaceManager) ListBookmarkedChecked(channelID string) (currentPath
 			return currentPath, nil, fmt.Errorf("读取工作空间书签失败: %w", listErr)
 		}
 		hasCurrent := false
-		home, _ := os.UserHomeDir()
-		cleanHome := ""
-		if home != "" {
-			cleanHome = filepath.Clean(home)
-		}
 		for _, e := range entries {
-			cleanPath := filepath.Clean(e.Path)
-			if cleanPath == "/" || (cleanHome != "" && cleanPath == cleanHome) {
-				_ = wm.db.RemoveChannelWorkspace(wm.platform, channelID, e.Path)
+			canonicalPath, pathErr := canonicalWorkspacePath(e.Path)
+			if pathErr != nil {
+				if removeErr := wm.db.RemoveChannelWorkspace(wm.platform, channelID, e.Path); removeErr != nil {
+					return currentPath, nil, fmt.Errorf("清理无效工作空间书签失败: %w", removeErr)
+				}
 				continue
 			}
-			if !wm.IsSandbox(cleanPath) {
-				if st, err := os.Stat(cleanPath); err != nil || !st.IsDir() {
-					_ = wm.db.RemoveChannelWorkspace(wm.platform, channelID, e.Path)
+			if !wm.IsSandbox(canonicalPath) {
+				st, statErr := os.Stat(canonicalPath)
+				if statErr != nil && !os.IsNotExist(statErr) {
+					return currentPath, nil, fmt.Errorf("检查工作空间书签失败: %w", statErr)
+				}
+				if statErr != nil || !st.IsDir() {
+					if removeErr := wm.db.RemoveChannelWorkspace(wm.platform, channelID, e.Path); removeErr != nil {
+						return currentPath, nil, fmt.Errorf("清理失效工作空间书签失败: %w", removeErr)
+					}
 					continue
 				}
 			}
 
-			isCurr := (e.Path == currentPath)
+			isCurr := filepath.Clean(canonicalPath) == filepath.Clean(currentPath)
 			if isCurr {
 				hasCurrent = true
 			}

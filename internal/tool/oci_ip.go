@@ -103,9 +103,11 @@ type globalpingMeasurement struct {
 	Status  string `json:"status"`
 	Results []struct {
 		Result struct {
-			Stats struct {
-				RCV float64 `json:"rcv"`
-				AVG float64 `json:"avg"`
+			Status        string `json:"status"`
+			FailureSource string `json:"failureSource"`
+			Stats         *struct {
+				RCV *float64 `json:"rcv"`
+				AVG *float64 `json:"avg"`
 			} `json:"stats"`
 		} `json:"result"`
 	} `json:"results"`
@@ -432,8 +434,7 @@ func checkGlobalpingTCP(ctx context.Context, client *http.Client, ip string) (st
 	requestBody := map[string]any{
 		"type":      "ping",
 		"target":    ip,
-		"locations": []map[string]string{{"country": "CN"}},
-		"limit":     3,
+		"locations": []map[string]any{{"country": "CN", "limit": 3}},
 		"measurementOptions": map[string]any{
 			"protocol": "TCP",
 			"port":     443,
@@ -496,16 +497,25 @@ func checkGlobalpingTCP(ctx context.Context, client *http.Client, ip string) (st
 		if measurement.Status == "in-progress" || measurement.Status == "in_progress" {
 			continue
 		}
-		if measurement.Status == "" || len(measurement.Results) == 0 {
+		if measurement.Status != "finished" || len(measurement.Results) == 0 {
 			return "国内探针结果无效", 0, fmt.Errorf("globalping 测量已结束但没有有效探测结果")
 		}
 
 		var reachable int
+		completed := 0
 		var totalLatency float64
 		for _, result := range measurement.Results {
-			if result.Result.Stats.RCV > 0 {
+			stats := result.Result.Stats
+			if result.Result.Status != "finished" || stats == nil || stats.RCV == nil {
+				return fmt.Sprintf("国内探针结果不完整 (%d/%d 节点完成)", completed, len(measurement.Results)), 0,
+					fmt.Errorf("globalping 有探针未完成或缺少有效统计，不能据此判断国内连通性 (status=%q, failureSource=%q)", result.Result.Status, result.Result.FailureSource)
+			}
+			completed++
+			if *stats.RCV > 0 {
 				reachable++
-				totalLatency += result.Result.Stats.AVG
+				if stats.AVG != nil {
+					totalLatency += *stats.AVG
+				}
 			}
 		}
 		if reachable == 0 {
@@ -557,13 +567,17 @@ func (t *OCIIPTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 
 	switch action {
 	case "status":
-		return t.handleStatus(ctx)
+		result, err := t.handleStatus(ctx)
+		return redactOCIIPResult(ctx, result), err
 	case "cleanup":
-		return t.handleCleanup(ctx, strings.TrimSpace(args.IP))
+		result, err := t.handleCleanup(ctx, strings.TrimSpace(args.IP))
+		return redactOCIIPResult(ctx, result), err
 	case "check":
-		return t.handleCheck(ctx, strings.TrimSpace(args.IP))
+		result, err := t.handleCheck(ctx, strings.TrimSpace(args.IP))
+		return redactOCIIPResult(ctx, result), err
 	case "bind":
-		return t.handleBind(ctx, strings.TrimSpace(args.IP), args.DeleteOld)
+		result, err := t.handleBind(ctx, strings.TrimSpace(args.IP), args.DeleteOld)
+		return redactOCIIPResult(ctx, result), err
 	case "roll":
 		noAbuser := true
 		if args.NoAbuser != nil {
@@ -576,10 +590,22 @@ func (t *OCIIPTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 			}
 			maxRisk = *args.MaxRisk
 		}
-		return t.handleRoll(ctx, args.Prefix, maxRisk, noAbuser)
+		result, err := t.handleRoll(ctx, args.Prefix, maxRisk, noAbuser)
+		return redactOCIIPResult(ctx, result), err
 	default:
 		return nil, fmt.Errorf("unknown action: %s", action)
 	}
+}
+
+func redactOCIIPResult(ctx context.Context, result *core.ToolResult) *core.ToolResult {
+	if result == nil {
+		return nil
+	}
+	if event := entity.SensoryEventFromContext(ctx); event == nil || !event.IsPartnerPrivate() {
+		result.Text = core.RedactSensitiveIPs(result.Text)
+		result.FallbackText = core.RedactSensitiveIPs(result.FallbackText)
+	}
+	return result
 }
 
 func (t *OCIIPTool) handleStatus(ctx context.Context) (*core.ToolResult, error) {
@@ -949,6 +975,16 @@ func (t *OCIIPTool) handleBind(ctx context.Context, targetIP string, deleteOld b
 	}
 
 	// 4. 绑定新 IP
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if oldPubID == "" {
+			return nil, fmt.Errorf("换绑已取消，新 IP 尚未绑定: %w", ctxErr)
+		}
+		rollbackDetail, restored := t.restorePublicIP(oldPubID, privID)
+		if restored {
+			return nil, fmt.Errorf("换绑已取消，新 IP 尚未绑定，已恢复旧 IP %s: %w", oldPubIP, ctxErr)
+		}
+		return nil, fmt.Errorf("换绑已取消，新 IP 尚未绑定；恢复旧 IP %s 失败 (%s)，请立即检查主网卡公网 IP: %w", oldPubIP, rollbackDetail, ctxErr)
+	}
 	bindURL := fmt.Sprintf("https://iaas.%s.oraclecloud.com/20160918/publicIps/%s", t.client.region, targetObj.ID)
 	bResp, _, err := t.client.Do(ctx, http.MethodPut, bindURL, map[string]string{"privateIpId": privID})
 	var bindErr error
