@@ -418,6 +418,13 @@ func (a *SuperAgent) Start(ctx context.Context) error {
 		name = a.Persona.Name
 	}
 	slog.Info("Daidai SuperAgent 正在苏醒...", "name", name)
+	if a.Delegates != nil {
+		if err := a.Delegates.StartQueue(runCtx, a.notifyTicketCompletion); err != nil {
+			runCancel()
+			a.runCancel = nil
+			return err
+		}
+	}
 
 	if err := a.Channels.StartAll(runCtx, func(event *SensoryEvent) {
 		procTimeout := a.processingTimeout()
@@ -435,6 +442,9 @@ func (a *SuperAgent) Start(ctx context.Context) error {
 		a.Process(procCtx, event)
 	}); err != nil {
 		runCancel()
+		if a.Delegates != nil {
+			_ = a.Delegates.StopQueue(context.Background())
+		}
 		var startupErr interface{ rollbackFailed() bool }
 		if !errors.As(err, &startupErr) || !startupErr.rollbackFailed() {
 			a.runCancel = nil
@@ -445,24 +455,7 @@ func (a *SuperAgent) Start(ctx context.Context) error {
 }
 
 func (a *SuperAgent) processingTimeout() time.Duration {
-	const defaultTimeout = 6 * time.Minute
-	const completionGrace = 5 * time.Minute
-	const maxDuration = time.Duration(1<<63 - 1)
-
-	if a.Delegates == nil {
-		return defaultTimeout
-	}
-	ticketTimeout := a.Delegates.ExecutionTimeout()
-	if ticketTimeout == 0 {
-		return 0
-	}
-	if ticketTimeout <= defaultTimeout-completionGrace {
-		return defaultTimeout
-	}
-	if ticketTimeout > maxDuration-completionGrace {
-		return maxDuration
-	}
-	return ticketTimeout + completionGrace
+	return 6 * time.Minute
 }
 
 // Stop 优雅休眠生命体
@@ -497,8 +490,11 @@ func (a *SuperAgent) Stop(ctx context.Context) error {
 		a.Delegates.AbortAllContext(ctx)
 	}
 	var stopErr error
+	if a.Delegates != nil {
+		stopErr = a.Delegates.StopQueue(ctx)
+	}
 	if a.Channels != nil {
-		stopErr = a.Channels.StopAll(ctx)
+		stopErr = errors.Join(stopErr, a.Channels.StopAll(ctx))
 	}
 	a.lifecycleMu.Lock()
 	if stopErr == nil {
@@ -968,14 +964,121 @@ func (a *SuperAgent) replyInfo(ctx context.Context, event *SensoryEvent, caption
 	}
 }
 
+func (a *SuperAgent) notifyTicketCompletion(ctx context.Context, ticket *Ticket, output string, execErr error) {
+	if ticket == nil || ctx == nil || ctx.Err() != nil || a.Channels == nil || errors.Is(execErr, context.Canceled) || ticket.Status == TicketAborted || ticket.Status == TicketStopping {
+		return
+	}
+	ackTimer := time.NewTimer(time.Second)
+	defer ackTimer.Stop()
+	select {
+	case <-ctx.Done():
+		return
+	case <-ackTimer.C:
+	}
+	state := "✅ 这件事处理好了"
+	switch ticket.Status {
+	case TicketFailed:
+		state = "⚠️ 这件事没能完整处理完"
+	case TicketAborted, TicketStopping:
+		state = "⏹️ 这件事已停下"
+	case TicketInterrupted:
+		state = "⚠️ 这件事因服务重启中断了"
+	}
+	if execErr != nil && ticket.Status != TicketAborted && ticket.Status != TicketStopping {
+		state = "⚠️ 这件事没能完整处理完"
+	}
+	result := strings.TrimSpace(ticket.Output)
+	if result == "" {
+		result = strings.TrimSpace(output)
+	}
+	var message strings.Builder
+	fmt.Fprintf(&message, "%s：%s\n编号：%s\n", state, core.TruncateRunes(strings.TrimSpace(ticket.Goal), 180, "…"), ticket.ID)
+	if result != "" {
+		fmt.Fprintf(&message, "\n%s\n", core.TruncateRunes(result, 700, "\n[后续结果已保存]"))
+	}
+	if ticket.Status != TicketCompleted {
+		message.WriteString("\n目前保留的阶段结果可用 `/task ")
+		message.WriteString(ticket.ID)
+		message.WriteString("` 查看；不会自动重跑。需要继续时，告诉我从哪个阶段接着做。")
+	} else {
+		message.WriteString("\n完整输出可用 `/task ")
+		message.WriteString(ticket.ID)
+		message.WriteString("` 查看。")
+	}
+	body := strings.TrimSpace(message.String())
+	if !ticket.AllowSensitive {
+		body = core.RedactSensitiveIPs(body)
+	}
+	utterance := &Utterance{
+		Platform:  ticket.Platform,
+		IsGroup:   ticket.IsGroup,
+		ChannelID: ticket.ChannelID,
+		Text:      body,
+		Proactive: true,
+	}
+	if ticket.IsGroup && ticket.RequesterID != "" {
+		utterance.MentionUserIDs = []string{ticket.RequesterID}
+	}
+	notificationKey := "agent-ticket:" + ticket.ID
+	queued := false
+	if ticket.RequesterID != "" && ticket.Platform != "" {
+		queueCtx, cancelQueue := context.WithTimeout(context.Background(), 3*time.Second)
+		_, queueErr := db.DefaultManager().EnqueuePendingNotification(queueCtx, ticket.Platform, ticket.RequesterID,
+			notificationKey, "agent_ticket", body)
+		cancelQueue()
+		if queueErr != nil {
+			slog.Warn("superagent: 工单通知未能加入延迟队列", "ticketID", ticket.ID, "err", queueErr)
+		} else {
+			queued = true
+		}
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	err := a.Channels.Transmit(sendCtx, utterance)
+	cancel()
+	if err == nil {
+		a.commitProactiveBotReply(ticket.Platform, ticket.IsGroup, ticket.ChannelID, ticket.RequesterID, body)
+		if queued {
+			deleteCtx, cancelDelete := context.WithTimeout(context.Background(), 3*time.Second)
+			if deleteErr := db.DefaultManager().DeletePendingNotificationByKey(deleteCtx, ticket.Platform, ticket.RequesterID, notificationKey); deleteErr != nil {
+				slog.Warn("superagent: 已发送工单通知但未能清除待发送副本", "ticketID", ticket.ID, "err", deleteErr)
+			}
+			cancelDelete()
+		}
+		return
+	}
+	slog.Warn("superagent: 工单完成通知主动发送失败", "ticketID", ticket.ID, "platform", ticket.Platform, "channel", ticket.ChannelID, "err", err)
+	if !queued {
+		slog.Warn("superagent: 工单完成通知没有持久化的延迟副本", "ticketID", ticket.ID)
+	}
+}
+
+func (a *SuperAgent) commitProactiveBotReply(platform string, isGroup bool, channelID, senderID, text string) {
+	committer, ok := a.Cognition.(interface {
+		CommitDeliveredReply(context.Context, *SensoryEvent, string)
+	})
+	if !ok || strings.TrimSpace(text) == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	committer.CommitDeliveredReply(ctx, &SensoryEvent{
+		Platform:       platform,
+		IsGroup:        isGroup,
+		ChannelID:      channelID,
+		SenderID:       senderID,
+		OccurredAt:     time.Now(),
+		ReplyDelivered: true,
+	}, text)
+}
+
 func (a *SuperAgent) deliverPendingNotifications(ctx context.Context, event *SensoryEvent) {
-	if event == nil || !event.IsPartnerPrivate() || event.RawMessageID == "" {
+	if event == nil || event.IsGroup || event.RawMessageID == "" || (event.Role != RolePartner && event.Role != RoleCollaborator) {
 		return
 	}
 	unlock := a.lockPendingNotification(event.Platform, event.SenderID)
 	defer unlock()
 	loadCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	notifications, err := db.DefaultManager().ListPendingNotifications(loadCtx, event.Platform, event.SenderID, 1)
+	notifications, err := db.DefaultManager().ListPendingNotifications(loadCtx, event.Platform, event.SenderID, 10)
 	cancel()
 	if err != nil {
 		slog.Warn("superagent: 读取待发送通知失败", "err", err)
@@ -984,13 +1087,24 @@ func (a *SuperAgent) deliverPendingNotifications(ctx context.Context, event *Sen
 	if len(notifications) == 0 {
 		return
 	}
-	notice := notifications[0]
+	var notice db.PendingNotification
+	for _, candidate := range notifications {
+		if event.IsPartnerPrivate() || candidate.Category == "agent_ticket" {
+			notice = candidate
+			break
+		}
+	}
+	if notice.ID == 0 {
+		return
+	}
 	caption := "📨 延迟送达的通知"
 	switch notice.Category {
 	case "oci_daily":
 		caption = "📊 延迟送达的 OCI 账单日报"
 	case "oci_alert":
 		caption = "⚠️ 延迟送达的 OCI 资源告警"
+	case "agent_ticket":
+		caption = "🛠️ 延迟送达的工单通知"
 	}
 	sendCtx, cancelSend := context.WithTimeout(ctx, 25*time.Second)
 	complete, remainingBody, err := a.transmitPendingNotification(sendCtx, event, caption, notice.Body)
@@ -1008,6 +1122,9 @@ func (a *SuperAgent) deliverPendingNotifications(ctx context.Context, event *Sen
 			slog.Info("superagent: 通知已分段送达，剩余内容保留待下次私聊", "notificationID", notice.ID, "remainingBytes", len(remainingBody))
 		}
 		return
+	}
+	if notice.Category == "agent_ticket" {
+		a.commitProactiveBotReply(event.Platform, false, event.ChannelID, event.SenderID, notice.Body)
 	}
 	if err := db.DefaultManager().DeletePendingNotification(deleteCtx, event.Platform, event.SenderID, notice.ID); err != nil {
 		slog.Error("superagent: 通知已发送但无法从待发队列删除", "notificationID", notice.ID, "err", err)

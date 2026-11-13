@@ -45,7 +45,7 @@ func slashCommandRegistry(a *SuperAgent) []slashCommand {
 	return []slashCommand{
 		{section: "对话与会话", usage: "/help", help: "显示指令帮助卡", match: exact("/help"), handle: a.handleHelpCommand},
 		{section: "对话与会话", usage: "/continue", help: "续发未发送完的长回复", match: exact("/continue", "继续"), handle: a.handleContinueCommand},
-		{section: "对话与会话", usage: "/stop", help: "中断你发起的思考和工单", access: "仅核心搭档/协作者", match: exact("/stop"), handle: a.handleStopCommand},
+		{section: "对话与会话", usage: "/stop [工单编号]", help: "中断当前思考、全部后台工单或指定工单", access: "仅核心搭档/协作者", match: exact("/stop"), handle: a.handleStopCommand},
 		{section: "对话与会话", usage: "/reset · /new · /clear", help: "重开当前会话并清除近期历史", access: "仅核心搭档/协作者", match: exact("/reset", "/new", "/clear", "/ws clear", "/ws reset"), handle: a.handleResetCommand},
 		{section: "状态与模型", usage: "/status · /sysinfo", help: "查看运行状态、系统指标与活跃工单", match: exact("/status", "/sysinfo"), handle: a.handleStatusCommand},
 		{section: "状态与模型", usage: "/model", help: "查看当前对话使用的模型；此命令不会切换模型", access: "仅核心搭档/协作者", match: exact("/model"), handle: a.handleModelCommand},
@@ -183,7 +183,7 @@ func (a *SuperAgent) handleTaskCommand(ctx context.Context, event *SensoryEvent,
 		return
 	}
 	goal := core.TruncateRunes(strings.TrimSpace(ticket.Goal), 300, "…")
-	detail := fmt.Sprintf("【工单 %s · %s · 第 %d/%d 页】\n目标：%s\n更新时间：%s\n\n%s", ticket.ID, ticket.Status, page, pageCount, goal, ticket.UpdatedAt.Format("2006-01-02 15:04:05"), pages[page-1])
+	detail := fmt.Sprintf("【工单 %s · %s · 第 %d/%d 页】\n目标：%s\n更新时间：%s\n\n%s", ticket.ID, ticketStatusLabel(ticket.Status), page, pageCount, goal, ticket.UpdatedAt.Format("2006-01-02 15:04:05"), pages[page-1])
 	if err != nil {
 		detail += "\n\n[警告：此工单最新状态尚未可靠写入 SQLite，当前显示的是进程内快照]"
 	}
@@ -214,7 +214,7 @@ func (a *SuperAgent) handleTasksCommand(ctx context.Context, event *SensoryEvent
 	lines := make([]string, 0, len(tickets))
 	for _, ticket := range tickets {
 		goal := core.TruncateRunes(strings.TrimSpace(ticket.Goal), 100, "…")
-		lines = append(lines, fmt.Sprintf("- %s [%s] %s：%s", ticket.ID, ticket.Status, ticket.UpdatedAt.Format("2006-01-02 15:04"), goal))
+		lines = append(lines, fmt.Sprintf("- %s [%s] %s：%s", ticket.ID, ticketStatusLabel(ticket.Status), ticket.UpdatedAt.Format("2006-01-02 15:04"), goal))
 	}
 	reply := "【当前会话的近期工单】\n" + strings.Join(lines, "\n")
 	if err != nil {
@@ -246,7 +246,7 @@ func (a *SuperAgent) handleStatusCommand(ctx context.Context, event *SensoryEven
 			} else {
 				var lines []string
 				for _, ticket := range active {
-					lines = append(lines, fmt.Sprintf("- %s [%s · %s]: %s (已持续 %s)", ticket.ID, ticket.Worker, ticket.Status, ticket.Goal, time.Since(ticket.CreatedAt).Truncate(time.Second)))
+					lines = append(lines, fmt.Sprintf("- %s [%s · %s]: %s (已持续 %s)", ticket.ID, ticket.Worker, ticketStatusLabel(ticket.Status), ticket.Goal, time.Since(ticket.CreatedAt).Truncate(time.Second)))
 				}
 				sections = append(sections, fmt.Sprintf("后台工程工单 (%d 个活跃):\n%s", len(active), strings.Join(lines, "\n")))
 			}
@@ -300,9 +300,40 @@ func (a *SuperAgent) checkModelCommandPermission(ctx context.Context, event *Sen
 	return a.Cognition != nil
 }
 
-func (a *SuperAgent) handleStopCommand(ctx context.Context, event *SensoryEvent, _ string) {
+func (a *SuperAgent) handleStopCommand(ctx context.Context, event *SensoryEvent, content string) {
 	if err := a.delegationPermissionError(event.Role); err != nil {
 		a.replyText(ctx, event, err.Error())
+		return
+	}
+	parts := strings.Fields(strings.TrimSpace(content))
+	if len(parts) > 1 {
+		if len(parts) != 2 || a.Delegates == nil {
+			a.replyText(ctx, event, "用法：/stop [工单编号]")
+			return
+		}
+		ticket, _ := a.Delegates.TicketFor(ctx, event.Platform, event.SenderID, event.ChannelID, parts[1])
+		if ticket == nil {
+			a.replyText(ctx, event, "当前会话中没有找到这张工单。")
+			return
+		}
+		if ticket.Status != TicketPending && ticket.Status != TicketRunning && ticket.Status != TicketStopping {
+			a.replyText(ctx, event, fmt.Sprintf("这张工单已经结束，状态：%s。", ticketStatusLabel(ticket.Status)))
+			return
+		}
+		if a.Delegates.AbortTicketForRequester(ticket.ID, event.Platform, event.ChannelID, event.SenderID) > 0 {
+			if ticket.Status == TicketPending {
+				a.replyText(ctx, event, "已取消这张排队中的工单。")
+			} else {
+				a.replyText(ctx, event, "已请求停止这张工单；工作者退出后会释放执行容量。")
+			}
+			return
+		}
+		current, ok := a.Delegates.GetTicket(ticket.ID)
+		if ok && current.Status == TicketStopping {
+			a.replyText(ctx, event, "这张工单正在停止；工作者退出后会释放执行容量。")
+			return
+		}
+		a.replyText(ctx, event, "这张工单当前无法取消，请用 /task 查看最新状态。")
 		return
 	}
 	stoppedThinking := a.cancelThinkingRequester(event)
@@ -564,4 +595,25 @@ func (a *SuperAgent) handleCDCommand(ctx context.Context, event *SensoryEvent, c
 		target = "~"
 	}
 	a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "switch", target, a.Delegates))
+}
+
+func ticketStatusLabel(status TicketStatus) string {
+	switch status {
+	case TicketPending:
+		return "排队中"
+	case TicketRunning:
+		return "执行中"
+	case TicketStopping:
+		return "正在停止"
+	case TicketCompleted:
+		return "已完成"
+	case TicketFailed:
+		return "未完成"
+	case TicketAborted:
+		return "已停止"
+	case TicketInterrupted:
+		return "重启时中断"
+	default:
+		return string(status)
+	}
 }

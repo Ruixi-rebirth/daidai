@@ -780,6 +780,19 @@ func (m *Manager) DeletePendingNotification(ctx context.Context, platform, recip
 	return err
 }
 
+func (m *Manager) DeletePendingNotificationByKey(ctx context.Context, platform, recipientID, dedupeKey string) error {
+	if strings.TrimSpace(recipientID) == "" || strings.TrimSpace(dedupeKey) == "" {
+		return fmt.Errorf("notification recipient and dedupe key are required")
+	}
+	db, err := m.GetConn(platform)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `DELETE FROM pending_notifications WHERE platform=? AND recipient_id=? AND dedupe_key=?`,
+		NormPlatform(platform), strings.TrimSpace(recipientID), strings.TrimSpace(dedupeKey))
+	return err
+}
+
 // UpdatePendingNotificationBody replaces the remaining payload after a
 // notification was delivered in bounded pages.
 func (m *Manager) UpdatePendingNotificationBody(ctx context.Context, platform, recipientID string, id int64, body string) error {

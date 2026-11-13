@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -15,6 +16,13 @@ import (
 	"daidai/internal/core"
 	"daidai/internal/db"
 )
+
+var errTicketCapacityUnavailable = errors.New("ticket execution capacity is temporarily unavailable")
+
+const maxQueuedAgentTickets = 100
+
+type queuedTicketCleanup func(*Ticket, string, error)
+type queuedTicketCompletion func(context.Context, *Ticket, string, error)
 
 // WorkerInfo 工作者摘要信息 (供大脑认知与 Tool 参数自省)
 type WorkerInfo struct {
@@ -68,6 +76,14 @@ type Delegates struct {
 	workspaceUses    map[string]int
 	ticketDB         *db.Manager
 	ticketPlatform   string
+	queueMu          sync.Mutex
+	queueCallbacks   map[string]queuedTicketCleanup
+	queueWake        chan struct{}
+	queueDone        chan struct{}
+	queueCancel      context.CancelFunc
+	queueStarted     bool
+	queueCompletion  queuedTicketCompletion
+	queueOrder       []string
 }
 
 // AttachTicketStore restores history and marks formerly active work as interrupted.
@@ -317,6 +333,243 @@ func (d *Delegates) SetTicketAdditionalDirs(ticketID string, dirs []string) erro
 	return nil
 }
 
+func (d *Delegates) SetTicketGroup(ticketID string, isGroup bool) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	ticket := d.tickets[ticketID]
+	if ticket == nil || ticket.Status != TicketPending {
+		return fmt.Errorf("工单不存在或已不在待执行状态")
+	}
+	ticket.IsGroup = isGroup
+	return nil
+}
+
+// StartQueue starts the in-process dispatcher. Pending work is deliberately
+// not restored after restart; AttachTicketStore marks it interrupted first.
+func (d *Delegates) StartQueue(ctx context.Context, onComplete func(context.Context, *Ticket, string, error)) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	d.queueMu.Lock()
+	if d.queueStarted {
+		d.queueMu.Unlock()
+		return fmt.Errorf("工单队列已启动")
+	}
+	queueCtx, cancel := context.WithCancel(ctx)
+	d.queueStarted = true
+	d.queueCancel = cancel
+	d.queueWake = make(chan struct{}, 1)
+	d.queueDone = make(chan struct{})
+	d.queueCallbacks = make(map[string]queuedTicketCleanup)
+	d.queueOrder = nil
+	d.queueCompletion = onComplete
+	done := d.queueDone
+	wake := d.queueWake
+	d.queueMu.Unlock()
+	go func() {
+		d.runQueue(queueCtx, wake)
+		d.queueMu.Lock()
+		d.queueStarted = false
+		d.queueCancel = nil
+		d.queueMu.Unlock()
+		close(done)
+	}()
+	return nil
+}
+
+// StopQueue cancels the dispatcher and waits for owned workers within ctx.
+func (d *Delegates) StopQueue(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	d.queueMu.Lock()
+	if !d.queueStarted {
+		d.queueMu.Unlock()
+		return nil
+	}
+	cancel := d.queueCancel
+	done := d.queueDone
+	d.queueMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// EnqueueTicket makes a persisted pending ticket eligible for background
+// execution. The optional cleanup runs exactly once after it leaves pending.
+func (d *Delegates) EnqueueTicket(ticketID string, cleanup func(*Ticket, string, error)) error {
+	d.mu.RLock()
+	ticket := d.tickets[ticketID]
+	valid := ticket != nil && ticket.Status == TicketPending
+	d.mu.RUnlock()
+	if !valid {
+		return fmt.Errorf("工单不存在或已不在待执行状态")
+	}
+	d.queueMu.Lock()
+	if !d.queueStarted {
+		d.queueMu.Unlock()
+		return fmt.Errorf("工单队列尚未启动")
+	}
+	if _, exists := d.queueCallbacks[ticketID]; exists {
+		d.queueMu.Unlock()
+		return fmt.Errorf("工单已在队列中")
+	}
+	if len(d.queueCallbacks) >= maxQueuedAgentTickets {
+		d.queueMu.Unlock()
+		return fmt.Errorf("工单等待队列已满（最多 %d 张），请稍后重试", maxQueuedAgentTickets)
+	}
+	d.queueCallbacks[ticketID] = cleanup
+	d.queueOrder = append(d.queueOrder, ticketID)
+	wake := d.queueWake
+	d.queueMu.Unlock()
+	select {
+	case wake <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func (d *Delegates) runQueue(ctx context.Context, wake <-chan struct{}) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	var active sync.WaitGroup
+	defer func() {
+		active.Wait()
+		d.cleanupQueuedOnStop(ctx)
+	}()
+
+	for {
+		dispatched := false
+		for _, ticket := range d.pendingQueuedTickets() {
+			started := make(chan struct{})
+			done := make(chan struct{})
+			active.Add(1)
+			go func(ticket *Ticket) {
+				defer active.Done()
+				output, err := d.executeTicket(ctx, ticket, func() { close(started) }, true)
+				if !errors.Is(err, errTicketCapacityUnavailable) {
+					d.finishQueuedTicket(ctx, ticket.ID, output, err)
+				}
+				close(done)
+			}(ticket)
+			select {
+			case <-started:
+				dispatched = true
+			case <-done:
+				// A terminal result was finalized, or capacity is temporarily busy.
+				if current, ok := d.GetTicket(ticket.ID); ok && current.Status != TicketPending {
+					dispatched = true
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+		if dispatched {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-wake:
+		case <-ticker.C:
+		}
+	}
+}
+
+func (d *Delegates) pendingQueuedTickets() []*Ticket {
+	d.queueMu.Lock()
+	ids := append([]string(nil), d.queueOrder...)
+	d.queueMu.Unlock()
+
+	d.mu.RLock()
+	tickets := make([]*Ticket, 0, len(ids))
+	for _, id := range ids {
+		if ticket := d.tickets[id]; ticket != nil && ticket.Status == TicketPending {
+			copy := *ticket
+			tickets = append(tickets, &copy)
+		}
+	}
+	d.mu.RUnlock()
+	return tickets
+}
+
+func (d *Delegates) removeQueuedOrderLocked(ticketID string) {
+	for i, id := range d.queueOrder {
+		if id == ticketID {
+			copy(d.queueOrder[i:], d.queueOrder[i+1:])
+			d.queueOrder = d.queueOrder[:len(d.queueOrder)-1]
+			return
+		}
+	}
+}
+
+func (d *Delegates) finishQueuedTicket(ctx context.Context, ticketID, output string, err error) {
+	d.queueMu.Lock()
+	cleanup, queued := d.queueCallbacks[ticketID]
+	if queued {
+		delete(d.queueCallbacks, ticketID)
+		d.removeQueuedOrderLocked(ticketID)
+	}
+	onComplete := d.queueCompletion
+	d.queueMu.Unlock()
+	if !queued {
+		return
+	}
+	select {
+	case d.queueWake <- struct{}{}:
+	default:
+	}
+	ticket, _ := d.GetTicket(ticketID)
+	if cleanup != nil {
+		cleanup(ticket, output, err)
+	}
+	if onComplete != nil {
+		onComplete(ctx, ticket, output, err)
+	}
+}
+
+func (d *Delegates) discardQueuedTicket(ticketID string, err error) {
+	d.queueMu.Lock()
+	cleanup, queued := d.queueCallbacks[ticketID]
+	if queued {
+		delete(d.queueCallbacks, ticketID)
+		d.removeQueuedOrderLocked(ticketID)
+	}
+	d.queueMu.Unlock()
+	if !queued {
+		return
+	}
+	select {
+	case d.queueWake <- struct{}{}:
+	default:
+	}
+	if cleanup != nil {
+		ticket, _ := d.GetTicket(ticketID)
+		cleanup(ticket, "", err)
+	}
+}
+
+func (d *Delegates) cleanupQueuedOnStop(ctx context.Context) {
+	d.queueMu.Lock()
+	pending := d.queueCallbacks
+	d.queueCallbacks = make(map[string]queuedTicketCleanup)
+	d.queueOrder = nil
+	d.queueMu.Unlock()
+	for id, cleanup := range pending {
+		if cleanup == nil {
+			continue
+		}
+		ticket, _ := d.GetTicket(id)
+		cleanup(ticket, "", ctx.Err())
+	}
+}
+
 // FailPendingTicket closes a ticket that could not be prepared for execution.
 // It does not alter tickets already started, stopped, or otherwise finalized.
 func (d *Delegates) FailPendingTicket(ticketID, reason string) bool {
@@ -406,7 +659,6 @@ func (d *Delegates) TicketsFor(ctx context.Context, platform, requesterID, chann
 			continue
 		}
 		cp := *t
-		cp.Output = ""
 		byID[id] = &cp
 	}
 	d.mu.RUnlock()
@@ -444,7 +696,6 @@ func (d *Delegates) memoryTicketsFor(platform, requesterID, channelID string, li
 			continue
 		}
 		cp := *t
-		cp.Output = ""
 		tickets = append(tickets, &cp)
 	}
 	d.mu.RUnlock()
@@ -584,6 +835,12 @@ func (d *Delegates) AbortByRequester(platform, channelID, requesterID string) in
 	})
 }
 
+func (d *Delegates) AbortTicketForRequester(ticketID, platform, channelID, requesterID string) int {
+	return d.abortTickets(func(t *Ticket) bool {
+		return t.ID == ticketID && t.Platform == platform && t.ChannelID == channelID && t.RequesterID == requesterID
+	})
+}
+
 func (d *Delegates) abortTickets(matches func(*Ticket) bool) int {
 	return d.abortTicketsContext(context.Background(), matches)
 }
@@ -640,6 +897,9 @@ func (d *Delegates) abortTicketsContext(ctx context.Context, matches func(*Ticke
 	defer cancelPersist()
 	for _, snapshot := range snapshots {
 		d.persistTicketContext(persistCtx, snapshot)
+		if snapshot.Status == TicketAborted {
+			d.discardQueuedTicket(snapshot.ID, context.Canceled)
+		}
 	}
 	return aborted
 }
@@ -795,8 +1055,13 @@ func (d *Delegates) checkCapacityLocked(t *Ticket) error {
 	}
 
 	targetWs := strings.TrimSpace(t.Workspace)
-	if targetWs == "" && len(d.workspaceUses) > 0 {
-		return fmt.Errorf("有直接工具正在使用工作区，当前工单未指定工作区路径，暂不能安全启动")
+	if targetWs == "" {
+		if len(d.workspaceUses) > 0 {
+			return fmt.Errorf("有直接工具正在使用工作区，当前工单未指定工作区路径，暂不能安全启动")
+		}
+		if len(running) > 0 {
+			return fmt.Errorf("有工单正在运行，当前工单未指定工作区路径，无法确认其默认目录是否重叠")
+		}
 	}
 	if targetWs != "" {
 		workspace := workspaceLeaseKey(targetWs)
@@ -806,7 +1071,7 @@ func (d *Delegates) checkCapacityLocked(t *Ticket) error {
 			}
 		}
 		for _, rt := range running {
-			if workspacesOverlap(workspace, rt.Workspace) {
+			if strings.TrimSpace(rt.Workspace) == "" || workspacesOverlap(workspace, rt.Workspace) {
 				return fmt.Errorf("工作空间冲突保护：工单 [%s] 在同一工作空间 %q 中仍占用执行权（状态：%s），请等待其退出以避免并发读写冲突", rt.ID, targetWs, rt.Status)
 			}
 		}
@@ -817,6 +1082,10 @@ func (d *Delegates) checkCapacityLocked(t *Ticket) error {
 
 // ExecuteTicket 驱动对应的 Worker 执行工单 (支持按 Worker 名字路由并强制执行全局并发控制)
 func (d *Delegates) ExecuteTicket(ctx context.Context, t *Ticket) (string, error) {
+	return d.executeTicket(ctx, t, nil, false)
+}
+
+func (d *Delegates) executeTicket(ctx context.Context, t *Ticket, onStarted func(), waitForCapacity bool) (string, error) {
 	if ctx == nil {
 		return "", fmt.Errorf("工单执行需要有效的 context")
 	}
@@ -846,20 +1115,28 @@ func (d *Delegates) ExecuteTicket(ctx context.Context, t *Ticket) (string, error
 		d.persistTicket(snapshot)
 		return "", err
 	}
+	workerName := t.Worker
+	if workerName == "" {
+		workerName = d.defaultWorker
+	}
+	worker := d.workers[workerName]
 	if err := d.checkCapacityLocked(t); err != nil {
+		if waitForCapacity && worker != nil {
+			d.mu.Unlock()
+			return "", errTicketCapacityUnavailable
+		}
 		t.Status = TicketFailed
+		reason := err.Error()
+		if !t.AllowSensitive {
+			reason = core.RedactSensitiveIPs(reason)
+		}
+		t.Output = reason
 		touchTicket(t)
 		snapshot := *t
 		d.mu.Unlock()
 		d.persistTicket(snapshot)
 		return "", err
 	}
-
-	workerName := t.Worker
-	if workerName == "" {
-		workerName = d.defaultWorker
-	}
-	worker := d.workers[workerName]
 
 	var execCtx context.Context
 	var cancel context.CancelFunc
@@ -880,6 +1157,9 @@ func (d *Delegates) ExecuteTicket(ctx context.Context, t *Ticket) (string, error
 	// 与 Worker 读取共享 Ticket 产生数据竞争。
 	workerTicket.CancelFunc = nil
 	d.mu.Unlock()
+	if onStarted != nil {
+		onStarted()
+	}
 	d.persistTicket(runningSnapshot)
 
 	var output string
@@ -915,13 +1195,17 @@ func (d *Delegates) ExecuteTicket(ctx context.Context, t *Ticket) (string, error
 	}
 	if execCtx.Err() == context.DeadlineExceeded {
 		t.Status = TicketFailed
+		t.Output = "工单达到执行时限，尚未完成。"
+		if output != "" {
+			t.Output += "\n\n" + output
+		}
 		touchTicket(t)
 		snapshot := *t
 		d.mu.Unlock()
 		if !d.persistTicket(snapshot) {
 			snapshot.persistenceWarning = "工单状态未能写入 SQLite；当前结果只保存在运行中的进程内。"
 		}
-		result := d.ticketModelOutput(output, &snapshot)
+		result := d.ticketModelOutput(snapshot.Output, &snapshot)
 		return result, context.DeadlineExceeded
 	}
 
@@ -929,13 +1213,22 @@ func (d *Delegates) ExecuteTicket(ctx context.Context, t *Ticket) (string, error
 		if t.Status != TicketAborted {
 			t.Status = TicketFailed
 		}
+		reason := err.Error()
+		if !t.AllowSensitive {
+			reason = core.RedactSensitiveIPs(reason)
+		}
+		reason = core.TruncateRunes(reason, 1000, "…")
+		t.Output = "工单未能完成：" + reason
+		if output != "" {
+			t.Output += "\n\n" + output
+		}
 		touchTicket(t)
 		snapshot := *t
 		d.mu.Unlock()
 		if !d.persistTicket(snapshot) {
 			snapshot.persistenceWarning = "工单状态未能写入 SQLite；当前结果只保存在运行中的进程内。"
 		}
-		result := d.ticketModelOutput(output, &snapshot)
+		result := d.ticketModelOutput(snapshot.Output, &snapshot)
 		return result, err
 	}
 

@@ -757,6 +757,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 	}
 	toolCtx := entity.WithSensoryEvent(ctx, event)
 	var lastToolText string
+	var queuedTicketAck string
 	var directCardData [][]byte
 	var directCardFallbackText string
 	imageOnlyReply := false
@@ -1014,12 +1015,26 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 			}
 			safeOut := safeTruncateOutput(outText, 4000)
 			lastToolText = safeOut
+			if len(resp.ToolCalls) == 1 && tc.Function.Name == "delegate_ticket" && strings.Contains(safeOut, "已排入后台队列") {
+				queuedTicketAck = safeOut
+			}
 			messages = append(messages, core.ChatMessage{
 				Role:       core.RoleTool,
 				ToolCallID: tc.ID,
 				Name:       tc.Function.Name,
 				Content:    safeOut,
 			})
+		}
+		if queuedTicketAck != "" {
+			return &entity.Utterance{
+				Platform:     event.Platform,
+				IsGroup:      event.IsGroup,
+				ChannelID:    event.ChannelID,
+				QuoteMsgID:   event.RawMessageID,
+				Text:         queuedTicketAck,
+				FallbackText: directCardFallbackText,
+				Images:       directCardData,
+			}, nil
 		}
 
 	}

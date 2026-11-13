@@ -3,12 +3,10 @@ package tool
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"daidai/internal/core"
 	"daidai/internal/entity"
@@ -51,7 +49,7 @@ func (t *DelegateTool) Description() string {
 	if t.delegates != nil && t.delegates.ExecutionTimeout() > 0 {
 		timeLimit = t.delegates.ExecutionTimeout().String()
 	}
-	return fmt.Sprintf("在当前或已纳管的工作空间中执行工程任务。单张工单的调度器时限为 %s；较长目标按可验证阶段推进，AGY 会续接同一会话和工作空间的上下文，不能把未完成阶段报告为整体完成。若本轮工具调用额度用尽，向用户说明已完成阶段、剩余阶段和明确续跑步骤。AGY 工作者会按配置直接访问该工作空间并可能修改其中的文件；这不是操作系统级隔离沙箱。当需要检查或修改项目、执行配置好的工作者任务时使用（普通网页检索请优先使用 search_web 工具）。附件只有在用户明确要求处理时才可交给 AGY：处理当前消息附件必须设置 include_current_attachments=true；处理此前发送的文件必须设置 include_pending_attachments=true。没有明确授权时不要把附件带入工单，意图不明先询问。", timeLimit)
+	return fmt.Sprintf("在当前或已纳管的工作空间中创建后台工程工单。调用会立即返回排队确认；队列按工作空间冲突和并发上限调度，执行时限 %s 从任务开始后计算，完成后机器人会主动通知并提供 /task 工单编号查看完整输出。任务不会因当前对话请求超时而停止；服务重启时未完成工单标记为中断，不会自动重跑。较长目标按可验证阶段推进，AGY 会续接同一会话和工作空间上下文，不能把未完成阶段报告为整体完成。AGY 工作者会按配置直接访问该工作空间并可能修改其中的文件；这不是操作系统级隔离沙箱。当需要检查或修改项目、执行配置好的工作者任务时使用（普通网页检索请优先使用 search_web 工具）。附件只有在用户明确要求处理时才可交给 AGY：处理当前消息附件必须设置 include_current_attachments=true；处理此前发送的文件必须设置 include_pending_attachments=true。没有明确授权时不要把附件带入工单，意图不明先询问。", timeLimit)
 }
 
 func (t *DelegateTool) Parameters() map[string]any {
@@ -293,6 +291,12 @@ func (t *DelegateTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*c
 			goal += fmt.Sprintf("\n- 文件 %q，格式 %q，路径 %q", attachment.Name, attachment.MimeType, attachment.Path)
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		if t.inbox != nil && attachmentDir != "" {
+			_ = t.inbox.Remove(attachmentDir)
+		}
+		return nil, err
+	}
 
 	allowSensitive := event.IsPartnerPrivate()
 	ticket := t.delegates.CreateTicketForPlatform(event.Platform, senderID, channelID, goal, args.Model, ws, args.Worker, allowSensitive)
@@ -323,73 +327,43 @@ func (t *DelegateTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*c
 			}
 			return &core.ToolResult{Text: "无法保护工单附件目录，工单未启动。"}, nil
 		}
-		defer func() {
+	}
+	cleanup := func(_ *entity.Ticket, _ string, _ error) {
+		if t.inbox != nil && attachmentScope != "" {
+			t.inbox.ForgetPending(attachmentScope, attachmentsToProcess)
+		}
+		if t.inbox != nil && attachmentDir != "" {
 			t.inbox.Deactivate(attachmentDir)
 			if err := t.inbox.Remove(attachmentDir); err != nil {
 				slog.Warn("delegate_tool: failed to remove completed attachment directory", "ticketID", ticket.ID, "err", err)
 			}
-		}()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		t.delegates.FailPendingTicket(ticket.ID, "创建请求已取消，工单未进入队列。")
+		cleanup(ticket, "", err)
+		return nil, err
+	}
+	if err := t.delegates.SetTicketGroup(ticket.ID, event.IsGroup); err != nil {
+		cleanup(ticket, "", err)
+		t.delegates.FailPendingTicket(ticket.ID, "无法保存工单会话类型，工单未启动。")
+		return &core.ToolResult{Text: "无法保存工单会话类型，工单未启动。"}, nil
 	}
 	slog.Info("delegate_tool: 已签发独立工程工单", "ticketID", ticket.ID, "goalBytes", len(ticket.Goal), "worker", args.Worker)
-
-	var progressTimer *time.Timer
-	var progressDone chan struct{}
-	if event.OnProgress != nil {
-		wsName := filepath.Base(ticket.Workspace)
-		if t.workspaces != nil && t.workspaces.IsSandbox(ticket.Workspace) {
-			wsName = "sandbox"
-		}
-		progressDone = make(chan struct{})
-		progressTimer = time.AfterFunc(3*time.Second, func() {
-			defer close(progressDone)
-			if ctx.Err() == nil {
-				message := fmt.Sprintf("正在后台处理 (%s)，工单编号：%s。任务完成后我会继续回复；也可以发送 `/task %s` 查看状态和结果。", wsName, ticket.ID, ticket.ID)
-				if event.IsGroup {
-					message = fmt.Sprintf("正在后台处理 (%s)，工单编号：%s。若任务超过 QQ 群聊的回复时限而没有收到完成结果，请发送 `/task %s` 查看状态和结果。", wsName, ticket.ID, ticket.ID)
-				}
-				event.OnProgress(message)
-			}
-		})
+	if err := t.delegates.EnqueueTicket(ticket.ID, cleanup); err != nil {
+		t.delegates.FailPendingTicket(ticket.ID, err.Error())
+		cleanup(ticket, "", err)
+		return &core.ToolResult{Text: "工单未能进入后台队列：" + err.Error()}, nil
 	}
-
-	output, execErr := t.delegates.ExecuteTicket(ctx, ticket)
-	if execErr == nil && attachmentScope != "" {
-		event.ProcessedAttachments = append(event.ProcessedAttachments, attachmentsToProcess...)
-	}
-	if progressTimer != nil && !progressTimer.Stop() {
-		// Stop 返回 false 表示回调已开始或已结束；等它退出，避免最终结果先于过期进度发出。
-		<-progressDone
-	}
-	if execErr != nil {
-		partialOutput := strings.TrimSpace(output)
-		errText := execErr.Error()
-		if !allowSensitive {
-			errText = core.RedactSensitiveIPs(errText)
-			partialOutput = core.RedactSensitiveIPs(partialOutput)
-		}
-		errText = core.TruncateRunes(errText, 1000, "\n[错误详情已截断]")
-		partialOutput = core.TruncateRunes(partialOutput, 4500, "\n[阶段输出已截断；完整结果请用 /task "+ticket.ID+"]")
-		slog.Warn("delegate_tool: 工单未能完成", "ticketID", ticket.ID, "err", errText)
-		if errors.Is(execErr, context.DeadlineExceeded) {
-			output = fmt.Sprintf("工单达到执行时限，尚未完成: %s", errText)
-		} else {
-			output = fmt.Sprintf("工单未能完成: %s", errText)
-		}
-		if partialOutput != "" {
-			output += "\n\n" + partialOutput
-		}
-		if !errors.Is(execErr, context.Canceled) {
-			output += "\n\n这张工单已停止，以上是目前保留的阶段结果；不会自动重跑。请明确告知是否要基于这些结果继续下一阶段。"
-		}
-	}
+	result := fmt.Sprintf("我先把这件事排进后台了，编号：%s。做完或遇到问题我会主动告诉你；发 `/task %s` 可以看进度和完整结果，`/stop %s` 可以只取消这件事，单独发 `/stop` 会取消你发起的全部后台任务。", ticket.ID, ticket.ID, ticket.ID)
 	if args.IncludeCurrentAttachments && event.OmittedFiles > 0 {
-		output += fmt.Sprintf("\n\n另有 %d 个当前消息附件未进入处理队列，本次结果不包含这些文件。请分批重发后再处理。", event.OmittedFiles)
+		result += fmt.Sprintf("当前消息另有 %d 个文件未能处理。", event.OmittedFiles)
 	}
 	if args.IncludePendingAttachments && event.OmittedPendingFiles > 0 {
-		output += fmt.Sprintf("\n\n另有 %d 个较早发送的附件已从待处理列表移除，本次结果不包含这些文件。请重新发送后再处理。", event.OmittedPendingFiles)
+		result += fmt.Sprintf("另有 %d 个较早文件已从待处理列表移除。", event.OmittedPendingFiles)
 	}
 
 	return &core.ToolResult{
-		Text: fmt.Sprintf("【工单 #%s 执行结果】：\n%s", ticket.ID, output),
+		Text: result,
 	}, nil
 }

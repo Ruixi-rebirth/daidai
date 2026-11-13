@@ -68,6 +68,7 @@ type Ticket struct {
 	RequesterID        string             `json:"requester_id"`
 	Platform           string             `json:"-"`
 	ChannelID          string             `json:"channel_id"`
+	IsGroup            bool               `json:"-"`                // runtime-only destination type for completion notifications
 	Worker             string             `json:"worker,omitempty"` // 指定执行的目标工作者名称 (留空则由路由器派发至主力 Worker)
 	Workspace          string             `json:"workspace"`        // Worker 执行时使用的工作目录；隔离级别由 Worker 配置决定
 	Model              string             `json:"model"`            // 指定模型标识 (留空沿用当前会话模型)
