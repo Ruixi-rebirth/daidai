@@ -126,9 +126,16 @@ type passiveReplyBudget struct {
 	expiresAt time.Time
 }
 
+type pendingGroupInterjection struct {
+	event     *entity.SensoryEvent
+	timer     *time.Timer
+	scheduled time.Time
+}
+
 const maxQQOutgoingParts = 5
 const passiveReplyBudgetSweepInterval = time.Minute
 const groupInterjectionCooldown = 5 * time.Minute
+const groupInterjectionQuietPeriod = 4 * time.Second
 
 func maxQQPassiveReplies(isGroup bool) int {
 	if isGroup {
@@ -358,6 +365,8 @@ type QQChannel struct {
 	groupInterjectionsMu     sync.Mutex
 	groupInterjections       map[string]time.Time
 	groupInterjectionSweepAt time.Time
+	pendingInterjectionsMu   sync.Mutex
+	pendingInterjections     map[string]*pendingGroupInterjection
 	historyRecorder          func(context.Context, *entity.SensoryEvent) error
 }
 
@@ -402,6 +411,72 @@ func (q *QQChannel) shouldConsiderGroupInterjection(groupID string) bool {
 		delete(q.groupInterjections, oldestID)
 	}
 	return true
+}
+
+func (q *QQChannel) scheduleGroupInterjection(groupID string, event *entity.SensoryEvent) {
+	if q == nil || event == nil || strings.TrimSpace(groupID) == "" || q.debounce == nil {
+		return
+	}
+	q.pendingInterjectionsMu.Lock()
+	defer q.pendingInterjectionsMu.Unlock()
+	if q.pendingInterjections == nil {
+		q.pendingInterjections = make(map[string]*pendingGroupInterjection)
+	}
+	if pending := q.pendingInterjections[groupID]; pending != nil {
+		pending.timer.Stop()
+		pending = &pendingGroupInterjection{event: event, scheduled: time.Now()}
+		q.pendingInterjections[groupID] = pending
+		pending.timer = time.AfterFunc(groupInterjectionQuietPeriod, func() {
+			q.dispatchPendingGroupInterjection(groupID, pending)
+		})
+		return
+	}
+	pending := &pendingGroupInterjection{event: event, scheduled: time.Now()}
+	pending.timer = time.AfterFunc(groupInterjectionQuietPeriod, func() {
+		q.dispatchPendingGroupInterjection(groupID, pending)
+	})
+	q.pendingInterjections[groupID] = pending
+	if len(q.pendingInterjections) > 4096 {
+		oldestID := ""
+		var oldestAt time.Time
+		for id, entry := range q.pendingInterjections {
+			if oldestID == "" || entry.scheduled.Before(oldestAt) {
+				oldestID, oldestAt = id, entry.scheduled
+			}
+		}
+		if oldest := q.pendingInterjections[oldestID]; oldest != nil {
+			oldest.timer.Stop()
+			delete(q.pendingInterjections, oldestID)
+		}
+	}
+}
+
+func (q *QQChannel) dispatchPendingGroupInterjection(groupID string, pending *pendingGroupInterjection) {
+	q.pendingInterjectionsMu.Lock()
+	if q.pendingInterjections[groupID] != pending {
+		q.pendingInterjectionsMu.Unlock()
+		return
+	}
+	delete(q.pendingInterjections, groupID)
+	q.pendingInterjectionsMu.Unlock()
+
+	if !q.shouldConsiderGroupInterjection(groupID) || q.debounce == nil {
+		return
+	}
+	event := pending.event
+	event.GroupInterjection = true
+	if !q.debounce.Push(event) {
+		slog.Warn("qq_channel: 群聊插话候选未能进入处理队列", "channelID", groupID, "msgID", event.RawMessageID)
+	}
+}
+
+func (q *QQChannel) cancelPendingGroupInterjection(groupID string) {
+	q.pendingInterjectionsMu.Lock()
+	if pending := q.pendingInterjections[groupID]; pending != nil {
+		pending.timer.Stop()
+		delete(q.pendingInterjections, groupID)
+	}
+	q.pendingInterjectionsMu.Unlock()
 }
 
 func (q *QQChannel) reservePassiveReplyBudget(msgID string, count, limit int, window time.Duration) (*passiveReplyBudget, int, bool, error) {
@@ -823,10 +898,7 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 			// Ordinary group messages are saved to formal group history. Attachments
 			// stay pending and slash commands never execute without an @ mention.
 			canInterject := len(images) == 0 && omittedImages == 0 && len(files) == 0 && omittedFiles == 0 && len(pendingImages) == 0 && len(pendingFiles) == 0 && omittedPendingImages == 0 && omittedPendingFiles == 0 && !strings.HasPrefix(content, "/") && content != "继续"
-			if canInterject {
-				canInterject = q.shouldConsiderGroupInterjection(convID)
-			}
-			accepted := q.IngestRaw(&entity.SensoryEvent{
+			observedEvent := &entity.SensoryEvent{
 				Platform:              "qq",
 				ChannelID:             convID,
 				IsGroup:               true,
@@ -839,12 +911,34 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 				RawMessageID:          msgID,
 				OccurredAt:            time.Now(),
 				GroupMessageObserved:  true,
-				GroupInterjection:     canInterject,
-			})
+			}
+			accepted := q.IngestRaw(observedEvent)
 			if accepted && q.dedup != nil {
 				q.dedup.Remember(msgID)
 			}
+			if accepted && canInterject {
+				candidate := &entity.SensoryEvent{
+					Platform:             observedEvent.Platform,
+					ChannelID:            observedEvent.ChannelID,
+					IsGroup:              observedEvent.IsGroup,
+					SenderID:             observedEvent.SenderID,
+					SenderName:           observedEvent.SenderName,
+					Role:                 observedEvent.Role,
+					Content:              observedEvent.Content,
+					ReplyContext:         observedEvent.ReplyContext,
+					RawMessageID:         observedEvent.RawMessageID,
+					HistoryRecordID:      observedEvent.HistoryRecordID,
+					OccurredAt:           observedEvent.OccurredAt,
+					GroupMessageObserved: true,
+				}
+				q.scheduleGroupInterjection(convID, candidate)
+			} else {
+				q.cancelPendingGroupInterjection(convID)
+			}
 			return accepted
+		}
+		if fullGroupEvent && botMentioned {
+			q.cancelPendingGroupInterjection(convID)
 		}
 		accepted := q.IngestRaw(&entity.SensoryEvent{
 			Platform:              "qq",
@@ -1121,6 +1215,12 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) error {
 
 func (q *QQChannel) Stop(ctx context.Context) error {
 	q.wsReady.Store(false)
+	q.pendingInterjectionsMu.Lock()
+	for groupID, pending := range q.pendingInterjections {
+		pending.timer.Stop()
+		delete(q.pendingInterjections, groupID)
+	}
+	q.pendingInterjectionsMu.Unlock()
 	if q.stopCancel != nil {
 		q.stopCancel()
 	}
