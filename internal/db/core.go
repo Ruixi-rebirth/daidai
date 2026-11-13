@@ -1971,7 +1971,7 @@ func insertFactSource(ctx context.Context, tx *sql.Tx, factID, messageID int64, 
 	}
 	result, err := tx.ExecContext(ctx, `INSERT INTO user_fact_sources (fact_id, message_id, linked_at)
 		SELECT ?, id, ? FROM messages
-		WHERE id = ? AND platform = ? AND user_id = ? AND chat_type = ? AND conv_id = ? AND is_bot = 0
+		WHERE id = ? AND platform = ? AND user_id = ? AND chat_type = ? AND (chat_type = 'private' OR conv_id = ?) AND is_bot = 0
 		ON CONFLICT(fact_id, message_id) DO NOTHING`,
 		factID, linkedAt, messageID, platform, userID, chatType, convID)
 	if err != nil {

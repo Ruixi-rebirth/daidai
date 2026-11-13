@@ -868,7 +868,6 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 		// 若未触发任何 Tool 调用，组装文本与（可能存在的）图像一并发送
 		if len(resp.ToolCalls) == 0 {
 			cleanText := sanitizeAssistantSpoken(resp.Content)
-			cleanText = core.TruncateRunes(cleanText, maxAssistantReplyRunes, "\n[回复过长，后续内容已截断]")
 			if imageOnlyReply {
 				cleanText = ""
 			}
@@ -1055,7 +1054,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 
 	finalText := ""
 	if fErr == nil && finalResp != nil && strings.TrimSpace(finalResp.Content) != "" {
-		finalText = core.TruncateRunes(sanitizeAssistantSpoken(finalResp.Content), maxAssistantReplyRunes, "\n[回复过长，后续内容已截断]")
+		finalText = sanitizeAssistantSpoken(finalResp.Content)
 	} else if lastToolText != "" {
 		finalText = "我已经拿到网页或工具结果，但总结和回答没能完成。要我重新处理并补上吗？"
 	} else {

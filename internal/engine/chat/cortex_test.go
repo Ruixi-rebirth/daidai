@@ -205,3 +205,23 @@ func TestCortex_GuestBlockedFromSwitchModelAndTicketProgress(t *testing.T) {
 		t.Fatalf("expected fast ticket (<3s) not to spam OnProgress, got %q", progressCalled)
 	}
 }
+
+type longReplyLLM struct {
+	mockLLMWithRenderTool
+	text string
+}
+
+func (m *longReplyLLM) ChatWithTools(context.Context, []core.ChatMessage, []core.ToolDefinition, *core.ChatOptions) (*core.ChatResponse, error) {
+	return &core.ChatResponse{Content: m.text}, nil
+}
+func TestLongReplyRetainsTail(t *testing.T) {
+	original := strings.Repeat("长回复正文", 1400) + "\n唯一尾部标记"
+	c := NewCortex(CortexConfig{LLM: &longReplyLLM{text: original}, Persona: entity.NewDefaultPersona()})
+	result, err := c.Think(context.Background(), &entity.SensoryEvent{Platform: "qq", ChannelID: "owner", SenderID: "owner", Role: entity.RolePartner, Content: "解释代码"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result == nil || result.Text != original {
+		t.Fatal("full model response was not preserved")
+	}
+}

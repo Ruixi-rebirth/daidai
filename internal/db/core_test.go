@@ -128,3 +128,28 @@ func TestManager_MessagesAndFactMutations(t *testing.T) {
 		t.Errorf("expected second workspace in list to be inactive projectA, got: %+v", list[1])
 	}
 }
+
+func TestPrivateFactSourceScope(t *testing.T) {
+	m := NewManager(t.TempDir())
+	defer m.Close()
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name, user, chat, conv string
+		valid                  bool
+	}{
+		{"own private", "owner", "private", "owner", true},
+		{"other user", "other", "private", "other", false},
+		{"group source", "owner", "group", "group1", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id, err := m.LogMessage(ctx, "qq", tc.chat, tc.conv, tc.user, "", "我喜欢阅读", false, "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = m.ApplyFactMutations(ctx, "qq", "owner", []FactMutation{{Action: "ADD", Fact: tc.name, SourceMessageID: id, ScopeType: "global"}})
+			if (err == nil) != tc.valid {
+				t.Fatalf("valid=%v, error=%v", tc.valid, err)
+			}
+		})
+	}
+}
