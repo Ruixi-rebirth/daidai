@@ -25,8 +25,9 @@ import (
 
 // Config 官方 QQ 通道配置 (WebSocket + OpenAPI v2)
 type Config struct {
-	AppID  string
-	Secret string
+	AppID       string
+	Secret      string
+	OwnerOpenID string
 }
 
 type dedupCache struct {
@@ -684,6 +685,36 @@ func (q *QQChannel) replyPrivateMessage(userID, messageID, text string) {
 	}
 }
 
+func (q *QQChannel) notifyOwnerOfPrivateAccessRequest(userID, displayName, message string) {
+	ownerID := strings.TrimSpace(q.cfg.OwnerOpenID)
+	if ownerID == "" || ownerID == strings.TrimSpace(userID) {
+		return
+	}
+	name := strings.TrimSpace(displayName)
+	if name == "" {
+		name = "未提供昵称"
+	}
+	message = core.TruncateRunes(strings.TrimSpace(message), 200, "…")
+	if message == "" {
+		message = "（空消息或附件消息）"
+	}
+	body := fmt.Sprintf("有新的 QQ 私聊权限申请\n昵称：%s\nOpenID：%s\n最近消息：%s\n\n如需授权，可直接告诉我“将 OpenID %s 加为协作者”。", core.TruncateRunes(name, 80, "…"), userID, message, userID)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	err := q.Transmit(ctx, &entity.Utterance{Platform: "qq", ChannelID: ownerID, Text: body, Proactive: true})
+	if err == nil {
+		cancel()
+		return
+	}
+	slog.Warn("qq_channel: 新私聊权限申请主动通知失败", "channelID", ownerID, "userID", userID, "err", err)
+	if q.accessRequests != nil {
+		dedupeKey := fmt.Sprintf("private-access:%s:%d", userID, time.Now().UnixNano())
+		if _, queueErr := q.accessRequests.EnqueuePendingNotification(ctx, "qq", ownerID, dedupeKey, "private_access_request", body); queueErr != nil {
+			slog.Warn("qq_channel: 新私聊权限申请通知入队失败", "channelID", ownerID, "userID", userID, "err", queueErr)
+		}
+	}
+	cancel()
+}
+
 func (q *QQChannel) reservePassiveReplyBudget(msgID string, count, limit int, window time.Duration) (*passiveReplyBudget, int, bool, error) {
 	if msgID == "" {
 		return nil, count, false, nil
@@ -1101,22 +1132,28 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 			if q.dedup != nil {
 				q.dedup.Remember(msgID)
 			}
+			shouldNotifyOwner := false
+			accessMessage := strings.TrimSpace(content)
+			if entity.IsSensitiveAuthCommand(accessMessage) {
+				accessMessage = "[敏感认证指令内容已隐藏]"
+			} else if accessMessage == "" {
+				accessMessage = attachmentHistoryNote(len(images), omittedImages, len(files), omittedFiles)
+			}
+			accessMessage = core.TruncateRunes(accessMessage, 500, "…")
 			if q.accessRequests != nil {
 				accessCtx, accessCancel := context.WithTimeout(context.Background(), 2*time.Second)
-				accessMessage := strings.TrimSpace(content)
-				if entity.IsSensitiveAuthCommand(accessMessage) {
-					accessMessage = "[敏感认证指令内容已隐藏]"
-				} else if accessMessage == "" {
-					accessMessage = attachmentHistoryNote(len(images), omittedImages, len(files), omittedFiles)
-				}
-				accessMessage = core.TruncateRunes(accessMessage, 500, "…")
-				if err := q.accessRequests.RecordPrivateAccessRequest(accessCtx, "qq", userID, senderName, accessMessage); err != nil {
-					slog.Warn("qq: 保存访客私聊申请失败", "userID", userID, "err", err)
+				var recordErr error
+				shouldNotifyOwner, recordErr = q.accessRequests.RecordPrivateAccessRequest(accessCtx, "qq", userID, senderName, accessMessage)
+				if recordErr != nil {
+					slog.Warn("qq: 保存访客私聊申请失败", "userID", userID, "err", recordErr)
 				}
 				accessCancel()
 			}
 			slog.Info("qq: 拒绝未授权访客私聊", "userID", userID, "senderName", senderName, "messageID", msgID)
 			q.replyPrivateMessage(userID, msgID, "暂未开通私聊权限")
+			if shouldNotifyOwner {
+				q.notifyOwnerOfPrivateAccessRequest(userID, senderName, accessMessage)
+			}
 			return true
 		}
 		botAddressed := botMentioned || (fullGroupEvent && !strings.HasPrefix(strings.TrimSpace(content), "/") && strings.Contains(content, "呆呆"))

@@ -426,18 +426,29 @@ func (m *Manager) ListUserRoles(ctx context.Context, platform string) ([]UserRol
 	return roles, rows.Err()
 }
 
-func (m *Manager) RecordPrivateAccessRequest(ctx context.Context, platform, userID, displayName, message string) error {
+func (m *Manager) RecordPrivateAccessRequest(ctx context.Context, platform, userID, displayName, message string) (bool, error) {
 	platform = NormPlatform(platform)
 	userID = strings.TrimSpace(userID)
 	if platform == "" || userID == "" {
-		return fmt.Errorf("platform and user ID are required")
+		return false, fmt.Errorf("platform and user ID are required")
 	}
 	conn, err := m.GetConn(platform)
 	if err != nil {
-		return err
+		return false, err
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var previousStatus string
+	err = tx.QueryRowContext(ctx, "SELECT status FROM private_access_requests WHERE platform = ? AND user_id = ?", platform, userID).Scan(&previousStatus)
+	newPendingRequest := errors.Is(err, sql.ErrNoRows) || previousStatus != "pending"
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
 	}
 	now := time.Now().UnixMilli()
-	_, err = conn.ExecContext(ctx, `INSERT INTO private_access_requests
+	_, err = tx.ExecContext(ctx, `INSERT INTO private_access_requests
 		(platform, user_id, display_name, last_message, first_seen_at, last_seen_at, request_count, status)
 		VALUES (?, ?, ?, ?, ?, ?, 1, 'pending')
 		ON CONFLICT(platform, user_id) DO UPDATE SET
@@ -445,9 +456,16 @@ func (m *Manager) RecordPrivateAccessRequest(ctx context.Context, platform, user
 		last_message = excluded.last_message,
 		last_seen_at = excluded.last_seen_at,
 		request_count = private_access_requests.request_count + 1,
+		first_seen_at = CASE WHEN private_access_requests.status = 'pending' THEN private_access_requests.first_seen_at ELSE excluded.first_seen_at END,
 		status = 'pending', reviewed_by = '', reviewed_at = NULL`,
 		platform, userID, strings.TrimSpace(displayName), message, now, now)
-	return err
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return newPendingRequest, nil
 }
 
 func (m *Manager) ListPendingPrivateAccessRequests(ctx context.Context, platform string, limit int) ([]PrivateAccessRequest, error) {

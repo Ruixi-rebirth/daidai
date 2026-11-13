@@ -311,8 +311,9 @@ func run() int {
 	var qqChannel *qq.QQChannel
 	if cfg.QQ.Enabled && cfg.QQ.AppID != "" && cfg.QQ.Secret != "" {
 		qqChannel = qq.NewQQChannel(qq.Config{
-			AppID:  cfg.QQ.AppID,
-			Secret: cfg.QQ.Secret,
+			AppID:       cfg.QQ.AppID,
+			Secret:      cfg.QQ.Secret,
+			OwnerOpenID: ownerOpenID,
 		}, immune)
 		qqChannel.SetAttachmentInbox(attachmentInbox)
 		qqChannel.SetAccessRequestStore(database)
