@@ -657,6 +657,16 @@ func continuationKey(senderID string, utterance *Utterance) thinkSessionKey {
 	}
 }
 
+func nonEmptyStrings(values []string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
 func (a *SuperAgent) setReplyContinuation(ctx context.Context, senderID string, utterance *Utterance, text string) {
 	if senderID == "" || utterance == nil || strings.TrimSpace(text) == "" {
 		return
@@ -1213,24 +1223,45 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			if event.Platform == "qq" && event.IsGroup && !event.GroupInterjection && len(utterance.MentionUserIDs) == 0 && event.SenderID != "" {
 				utterance.MentionUserIDs = []string{event.SenderID}
 			}
-			if event.Platform == "qq" && !event.GroupInterjection && !requestsTextOnly(event.Content) && !utterance.HasMedia() && strings.TrimSpace(utterance.Text) != "" {
+			if event.Platform == "qq" && !event.GroupInterjection && !utterance.InlineImages && !requestsTextOnly(event.Content) && strings.TrimSpace(utterance.Text) != "" {
 				type automaticCardRenderer interface {
 					ShouldAutoRenderReply(string) bool
-					RenderCardPages(context.Context, *SensoryEvent, string) ([][]byte, error)
+					RenderCardPages(context.Context, *SensoryEvent, string, int) ([][]byte, error)
 				}
-				if renderer, ok := a.Cognition.(automaticCardRenderer); ok && renderer.ShouldAutoRenderReply(utterance.Text) {
+				if renderer, ok := a.Cognition.(automaticCardRenderer); ok {
 					replyContent := utterance.Text
-					cardCtx, cancelCard := context.WithTimeout(thinkCtx, 45*time.Second)
-					images, renderErr := renderer.RenderCardPages(cardCtx, event, replyContent)
-					cancelCard()
-					if renderErr != nil || len(images) == 0 {
-						slog.Warn("superagent: 长回复卡片渲染失败，回退为文字", "platform", event.Platform, "channel", event.ChannelID, "err", renderErr)
-					} else {
-						utterance.FallbackText = replyContent
-						utterance.Text = ""
-						utterance.Images = images
-						utterance.InlineImages = true
-						slog.Info("superagent: 长回复已分页渲染为图片", "platform", event.Platform, "channel", event.ChannelID, "pages", len(images), "textBytes", len(replyContent))
+					if !event.IsPartnerPrivate() {
+						replyContent = core.RedactSensitiveIPs(replyContent)
+					}
+					if renderer.ShouldAutoRenderReply(replyContent) {
+						const maxInlineImages = 4
+						images := make([][]byte, 0, maxInlineImages)
+						for _, image := range utterance.Images {
+							if len(image) > 0 {
+								images = append(images, image)
+							}
+						}
+						if len(utterance.CardData) > 0 {
+							images = append(images, utterance.CardData)
+						}
+						availablePages := maxInlineImages - len(images)
+						if availablePages > 0 {
+							cardCtx, cancelCard := context.WithTimeout(thinkCtx, 45*time.Second)
+							pages, renderErr := renderer.RenderCardPages(cardCtx, event, replyContent, availablePages)
+							cancelCard()
+							if renderErr != nil || len(pages) == 0 {
+								slog.Warn("superagent: 长回复卡片渲染失败，回退为文字", "platform", event.Platform, "channel", event.ChannelID, "err", renderErr)
+							} else {
+								images = append(images, pages...)
+								fallbackParts := []string{strings.TrimSpace(utterance.FallbackText), replyContent}
+								utterance.FallbackText = strings.TrimSpace(strings.Join(nonEmptyStrings(fallbackParts), "\n\n"))
+								utterance.Text = ""
+								utterance.CardData = nil
+								utterance.Images = images
+								utterance.InlineImages = true
+								slog.Info("superagent: 长回复已分页渲染为图文消息", "platform", event.Platform, "channel", event.ChannelID, "pages", len(pages), "images", len(images), "textBytes", len(replyContent))
+							}
+						}
 					}
 				}
 			}
