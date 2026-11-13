@@ -86,8 +86,8 @@ func (a *SuperAgent) handleHelpCommand(ctx context.Context, event *SensoryEvent,
 		sectionLines[command.section] = append(sectionLines[command.section], fmt.Sprintf("- %s：%s", command.usage, command.help))
 	}
 	for _, name := range sectionNames {
-		emoji := map[string]string{"对话与会话": "💬", "状态与模型": "📊", "工程工单": "🧾", "工作空间": "📁", "AGY 认证（私聊）": "🔐"}[name]
-		sections = append(sections, fmt.Sprintf("### %s %s\n%s", emoji, name, strings.Join(sectionLines[name], "\n")))
+		icon := map[string]string{"对话与会话": "💬", "状态与模型": "📊", "工程工单": "🧾", "工作空间": "📁", "AGY 认证（私聊）": "🔐"}[name]
+		sections = append(sections, fmt.Sprintf("### %s %s\n%s", icon, name, strings.Join(sectionLines[name], "\n")))
 	}
 	helpText := fmt.Sprintf("# %s · 使用帮助\n\n%s\n\n想切换模型时，直接说“切换到 <模型名称>”，例如“切换到 Gemini 3.8 Flash”。\n\n部分工单、模型和工作空间操作需要相应权限；群聊控制指令请先 @ 呆呆。", a.Persona.Name, strings.Join(sections, "\n\n"))
 	if err := a.transmitInfoCard(ctx, event, "📖 指令速查", helpText); err != nil {

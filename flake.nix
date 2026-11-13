@@ -30,10 +30,11 @@
               wireproxy
               maple-mono.CN
               source-han-sans
+              twemoji-color-font
             ];
             shellHook = ''
               export CGO_ENABLED=0
-              export TYPST_FONT_PATHS="${pkgs.maple-mono.CN}/share/fonts/truetype:${pkgs.source-han-sans}/share/fonts/truetype"
+              export TYPST_FONT_PATHS="${pkgs.twemoji-color-font}/share/fonts/truetype:${pkgs.maple-mono.CN}/share/fonts/truetype:${pkgs.source-han-sans}/share/fonts/truetype"
               echo "✨ Daidai Go Refactor Environment Loaded ✨"
               echo "Go version: $(go version)"
               echo "Typst version: $(typst --version)"
@@ -51,7 +52,7 @@
             postInstall = ''
               wrapProgram $out/bin/daidai \
                 --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.typst pkgs.ffmpeg pkgs.chromium pkgs.wgcf pkgs.wireproxy ]} \
-                --set-default TYPST_FONT_PATHS "${pkgs.maple-mono.CN}/share/fonts/truetype:${pkgs.source-han-sans}/share/fonts/truetype"
+                --set-default TYPST_FONT_PATHS "${pkgs.twemoji-color-font}/share/fonts/truetype:${pkgs.maple-mono.CN}/share/fonts/truetype:${pkgs.source-han-sans}/share/fonts/truetype"
             '';
           };
           packages.daidai = self.packages.${system}.default;

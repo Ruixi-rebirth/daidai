@@ -41,7 +41,7 @@ func RenderCard(ctx context.Context, md string) ([]byte, error) {
 )
 
 #set text(
-  font: ("Maple Mono", "Source Han Sans SC"),
+  font: ("Twitter Color Emoji", "Maple Mono", "Source Han Sans SC"),
   size: 13.5pt,
   fill: rgb("#1f2328"),
   lang: "zh"
@@ -104,7 +104,7 @@ func RenderMemoryProfileCard(ctx context.Context, md string) ([]byte, error) {
 )
 
 #set text(
-  font: ("Maple Mono", "Source Han Sans SC"),
+  font: ("Twitter Color Emoji", "Maple Mono", "Source Han Sans SC"),
   size: 14pt,
   fill: rgb("#493a3e"),
   lang: "zh"
