@@ -131,7 +131,7 @@ func TestMemoryEngine_HybridBM25AndVectorRRF(t *testing.T) {
 		t.Fatalf("LogMessage failed: %v", err)
 	}
 	vec, _ := (&mockEmbedder{}).Embed(ctx, "Cilium eBPF")
-	_ = dbMgr.UpdateMessageEmbedding(ctx, "qq", msgID, vec)
+	_ = dbMgr.UpdateMessageEmbedding(ctx, "qq", msgID, vec, embeddingIdentity(&mockEmbedder{}))
 
 	// 查询词“容器网络方案”与原文“Cilium 和 eBPF”零字面重合，验证稠密向量 + RRF 双路混合成功召回
 	hits, err := SearchMessagesByBM25(ctx, dbMgr, "qq", "9999", "容器网络方案", 5)

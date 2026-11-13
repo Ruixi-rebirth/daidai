@@ -72,3 +72,10 @@ type LLMProvider interface {
 type EmbeddingProvider interface {
 	Embed(ctx context.Context, text string) ([]float32, error)
 }
+
+// IdentifiedEmbeddingProvider returns a stable, non-secret identity for the
+// exact model configuration used to create a vector.
+type IdentifiedEmbeddingProvider interface {
+	EmbeddingIdentity() string
+	EmbedIdentified(ctx context.Context, text string) ([]float32, string, error)
+}

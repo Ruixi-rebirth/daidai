@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -797,6 +796,53 @@ func (a *SuperAgent) transmitInfo(ctx context.Context, event *SensoryEvent, capt
 	return nil
 }
 
+func (a *SuperAgent) transmitInfoCard(ctx context.Context, event *SensoryEvent, caption, content string) error {
+	if event == nil {
+		return fmt.Errorf("cannot send information without an event")
+	}
+	if a.Channels == nil {
+		return fmt.Errorf("channel registry is not configured")
+	}
+	if !event.IsPartnerPrivate() {
+		content = core.RedactSensitiveIPs(content)
+	}
+	renderer, ok := a.Cognition.(interface {
+		RenderCard(context.Context, *SensoryEvent, string) ([]byte, error)
+	})
+	if !ok {
+		return a.transmitReplyText(ctx, event, content)
+	}
+	cardCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	card, err := renderer.RenderCard(cardCtx, event, content)
+	if err != nil || len(card) == 0 {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil {
+			slog.Warn("superagent: 指令帮助卡片渲染失败，回退为文字", "platform", event.Platform, "channel", event.ChannelID, "err", err)
+		}
+		return a.transmitReplyText(ctx, event, content)
+	}
+	utterance := &Utterance{
+		Platform:     event.Platform,
+		IsGroup:      event.IsGroup,
+		ChannelID:    event.ChannelID,
+		QuoteMsgID:   event.RawMessageID,
+		Text:         caption,
+		FallbackText: content,
+		CardData:     card,
+	}
+	if _, err := a.transmitUtterance(ctx, utterance, event.SenderID); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		slog.Warn("superagent: 指令帮助卡片发送失败，回退为文字", "platform", event.Platform, "channel", event.ChannelID, "err", err)
+		return a.transmitReplyText(ctx, event, content)
+	}
+	return nil
+}
+
 // transmitPendingNotification sends a durable notification without moving
 // unsent content into the process-local conversational continuation buffer.
 func (a *SuperAgent) transmitPendingNotification(ctx context.Context, event *SensoryEvent, caption, content string) (bool, string, error) {
@@ -1006,519 +1052,9 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 		}
 		return
 	}
-	if content == "继续" || content == "/continue" {
-		continueCtx, continueCancel := context.WithCancel(ctx)
-		cancellation := &thinkCancellation{key: thinkKey(event)}
-		a.sessionCancels.Store(cancellation, continueCancel)
-		defer func() {
-			a.sessionCancels.Delete(cancellation)
-			continueCancel()
-		}()
-		unlock := a.lockSession(event)
-		defer unlock()
-		if continueCtx.Err() != nil || (event.StillValid != nil && !event.StillValid()) {
-			return
-		}
-		continuation, ok := a.takeReplyContinuation(event)
-		if !ok {
-			a.replyText(continueCtx, event, "当前没有待续发的长回复。")
-			return
-		}
-		if !event.IsPartnerPrivate() {
-			continuation = core.RedactSensitiveIPs(continuation)
-		}
-		sendCtx, cancel := context.WithTimeout(continueCtx, 45*time.Second)
-		continuationUtterance := &Utterance{
-			Platform:   event.Platform,
-			IsGroup:    event.IsGroup,
-			ChannelID:  event.ChannelID,
-			QuoteMsgID: event.RawMessageID,
-		}
-		deliveredText, err := a.transmitTextFallbackWithContinuationContext(sendCtx, continueCtx, continuationUtterance, continuation, event.SenderID)
-		cancel()
-		if err != nil {
-			if continueCtx.Err() == nil {
-				a.restoreReplyContinuation(continueCtx, event, continuation)
-				slog.Warn("superagent: 续发长回复失败，已保留续发内容", "channel", event.ChannelID, "err", err)
-			}
-		} else if committer, ok := a.Cognition.(interface {
-			CommitDeliveredReply(context.Context, *SensoryEvent, string)
-		}); ok {
-			commitCtx, cancelCommit := context.WithTimeout(continueCtx, 15*time.Second)
-			committer.CommitDeliveredReply(commitCtx, event, deliveredText)
-			cancelCommit()
-		}
+	if a.runRegisteredSlashCommand(ctx, event, content) {
 		return
 	}
-	if content == "/task" || strings.HasPrefix(content, "/task ") {
-		if err := a.delegationPermissionError(event.Role); err != nil {
-			a.replyText(ctx, event, err.Error())
-			return
-		}
-		parts := strings.Fields(content)
-		if (len(parts) != 2 && len(parts) != 3) || a.Delegates == nil {
-			a.replyText(ctx, event, "用法：/task <工单编号> [页码]")
-			return
-		}
-		page := 1
-		if len(parts) == 3 {
-			parsedPage, parseErr := strconv.Atoi(parts[2])
-			if parseErr != nil || parsedPage < 1 {
-				a.replyText(ctx, event, "页码必须是大于 0 的整数。用法：/task <工单编号> [页码]")
-				return
-			}
-			page = parsedPage
-		}
-		ticket, err := a.Delegates.TicketFor(ctx, event.Platform, event.SenderID, event.ChannelID, parts[1])
-		if ticket == nil {
-			if err != nil {
-				slog.Warn("superagent: 查询工单失败", "channel", event.ChannelID, "err", err)
-				a.replyText(ctx, event, "读取工单状态失败，请稍后重试。")
-				return
-			}
-			a.replyText(ctx, event, "当前会话中没有找到这张工单。")
-			return
-		}
-		output := strings.TrimSpace(ticket.Output)
-		if output == "" {
-			output = "（暂无执行输出）"
-		}
-		if !event.IsPartnerPrivate() {
-			output = core.RedactSensitiveIPs(output)
-		}
-		const outputPageSize = 3500
-		pages := core.SplitMarkdownChunks(output, outputPageSize)
-		pageCount := len(pages)
-		if page > pageCount {
-			a.replyText(ctx, event, fmt.Sprintf("这张工单共 %d 页，请选择 1 到 %d。", pageCount, pageCount))
-			return
-		}
-		pageOutput := pages[page-1]
-		goal := core.TruncateRunes(strings.TrimSpace(ticket.Goal), 300, "…")
-		detail := fmt.Sprintf("【工单 %s · %s · 第 %d/%d 页】\n目标：%s\n更新时间：%s\n\n%s", ticket.ID, ticket.Status, page, pageCount, goal, ticket.UpdatedAt.Format("2006-01-02 15:04:05"), pageOutput)
-		if err != nil {
-			detail += "\n\n[警告：此工单最新状态尚未可靠写入 SQLite，当前显示的是进程内快照]"
-		}
-		a.replyText(ctx, event, detail)
-		return
-	}
-
-	// 极速控制面 (0 Token 拦截通道)
-	if strings.HasPrefix(content, "/") {
-		switch content {
-		case "/tasks":
-			if err := a.delegationPermissionError(event.Role); err != nil {
-				a.replyText(ctx, event, err.Error())
-				return
-			}
-			if a.Delegates == nil {
-				a.replyText(ctx, event, "工单调度器未配置。")
-				return
-			}
-			tickets, err := a.Delegates.TicketsFor(ctx, event.Platform, event.SenderID, event.ChannelID, 10)
-			if err != nil {
-				slog.Warn("superagent: 查询工单历史失败", "channel", event.ChannelID, "err", err)
-			}
-			if err != nil && len(tickets) == 0 {
-				a.replyText(ctx, event, "读取工单历史失败，请稍后重试。")
-				return
-			}
-			if len(tickets) == 0 {
-				a.replyText(ctx, event, "当前会话没有你的近期工单。")
-				return
-			}
-			lines := make([]string, 0, len(tickets))
-			for _, ticket := range tickets {
-				goal := strings.TrimSpace(ticket.Goal)
-				if len([]rune(goal)) > 100 {
-					goal = string([]rune(goal)[:100]) + "…"
-				}
-				lines = append(lines, fmt.Sprintf("- %s [%s] %s：%s", ticket.ID, ticket.Status, ticket.UpdatedAt.Format("2006-01-02 15:04"), goal))
-			}
-			reply := "【当前会话的近期工单】\n" + strings.Join(lines, "\n")
-			if err != nil {
-				reply += "\n\n[警告：SQLite 历史或部分最新状态不可用；以上可能只包含进程内快照]"
-			}
-			a.replyInfo(ctx, event, "📋 近期工单", reply)
-			return
-
-		case "/status", "/sysinfo":
-			var sections []string
-			sections = append(sections, "### 呆呆生命体当前机能状态")
-			if a.Channels != nil {
-				sections = append(sections, a.Channels.FormatStatus())
-			}
-			if a.Cognition != nil {
-				if mindStatus := strings.TrimSpace(a.Cognition.MindStatus()); mindStatus != "" {
-					sections = append(sections, mindStatus)
-				}
-			}
-			sections = append(sections, core.FormatSystemStatusWithPerm(event.IsPartnerPrivate()))
-			if event.Role != RoleGuest {
-				if a.Workspaces != nil {
-					sections = append(sections, a.Workspaces.FormatCurrent(event.ChannelID))
-				}
-				if a.Delegates != nil {
-					active := a.Delegates.ActiveTicketsFor(event.Platform, event.SenderID, event.ChannelID)
-					if len(active) == 0 {
-						sections = append(sections, "后台工程工单：当前空闲 (0 个活跃)")
-					} else {
-						var tLines []string
-						for _, t := range active {
-							tLines = append(tLines, fmt.Sprintf("- %s [%s · %s]: %s (已持续 %s)", t.ID, t.Worker, t.Status, t.Goal, time.Since(t.CreatedAt).Truncate(time.Second)))
-						}
-						sections = append(sections, fmt.Sprintf("后台工程工单 (%d 个活跃):\n%s", len(active), strings.Join(tLines, "\n")))
-					}
-				}
-			}
-			a.replyInfo(ctx, event, "📊 当前状态", strings.Join(sections, "\n\n"))
-			return
-
-		case "/usage", "/model", "/models":
-			if err := a.delegationPermissionError(event.Role); err != nil {
-				a.replyText(ctx, event, err.Error())
-				return
-			}
-			if a.Cognition == nil {
-				return
-			}
-			switch content {
-			case "/model":
-				status := strings.TrimSpace(a.Cognition.MindStatus())
-				if status == "" {
-					status = "当前没有可用的激活模型状态。"
-				}
-				a.replyInfo(ctx, event, "🧠 当前模型", status)
-			case "/usage":
-				var usage string
-				if contextual, ok := a.Cognition.(interface{ ModelUsageContext(context.Context) string }); ok {
-					usage = contextual.ModelUsageContext(ctx)
-				} else {
-					usage = a.Cognition.ModelUsage()
-				}
-				a.replyInfo(ctx, event, "📊 模型用量", usage)
-			default:
-				var models string
-				if contextual, ok := a.Cognition.(interface{ ModelListContext(context.Context) string }); ok {
-					models = contextual.ModelListContext(ctx)
-				} else {
-					models = a.Cognition.ModelList()
-				}
-				a.replyInfo(ctx, event, "🧠 可用模型", models)
-			}
-			return
-
-		case "/agy login", "/agy auth", "/agy login force", "/agy login --force":
-			if event.IsGroup {
-				a.replyText(ctx, event, "AGY 认证链接包含账号授权信息，请在与呆呆的私聊中发起登录。")
-				return
-			}
-			if err := a.delegationPermissionError(event.Role); err != nil {
-				a.replyText(ctx, event, err.Error())
-				return
-			}
-			if a.AGYAuth == nil {
-				a.replyText(ctx, event, "AGY 认证管理器未挂载。")
-				return
-			}
-			isForce := strings.HasSuffix(content, "force")
-			if !isForce {
-				if st := a.AGYAuth.GetStatus(); st.IsLoggedIn {
-					a.replyText(ctx, event, fmt.Sprintf("当前已登录 Google 账号 (%s)。如需重新登录或切换账号，请发送 `/agy logout` 注销后再登录，或发送 `/agy login force` 强制重新认证。", st.Email))
-					return
-				}
-			} else {
-				if err := a.AGYAuth.Logout(); err != nil {
-					slog.Warn("superagent: 强制重新认证前清理 AGY 凭据失败", "err", err)
-					a.replyText(ctx, event, "清理现有 AGY 登录状态失败，未发起重新认证。请检查服务日志后重试。")
-					return
-				}
-			}
-			a.replyText(ctx, event, "正在发起 Google 账号认证，请稍候获取授权链接...")
-			authURL, err := a.AGYAuth.StartLogin(ctx)
-			if err != nil {
-				slog.Warn("superagent: 启动 AGY 登录失败", "err", err)
-				a.replyText(ctx, event, "没能启动 AGY 登录流程，请检查服务日志中的具体原因后重试。")
-				return
-			}
-			reply := fmt.Sprintf("【Google Antigravity 登录授权】\n请在浏览器或手机中打开以下链接，登录 Google 账号并完成授权：\n\n```\n%s\n```\n\n授权成功后，页面会显示一串授权码 (Authorization Code)。\n请直接回复：\n`/agy code <授权码>`\n（授权会话 5 分钟内有效）", authURL)
-			a.replyText(ctx, event, reply)
-			return
-
-		case "/agy status":
-			if event.IsGroup {
-				a.replyText(ctx, event, "AGY 账号状态包含私人信息，请在与呆呆的私聊中查询。")
-				return
-			}
-			if err := a.delegationPermissionError(event.Role); err != nil {
-				a.replyText(ctx, event, err.Error())
-				return
-			}
-			if a.AGYAuth == nil {
-				a.replyText(ctx, event, "AGY 认证管理器未挂载。")
-				return
-			}
-			st := a.AGYAuth.GetStatus()
-			if !st.IsLoggedIn {
-				a.replyInfo(ctx, event, "🔐 AGY 认证状态", "【AGY 认证状态】\n当前尚未登录 Google 账号或凭证已失效。可发送 `/agy login` 发起登录。")
-				return
-			}
-			expiryStr := "长期有效"
-			if !st.Expiry.IsZero() {
-				expiryStr = st.Expiry.Local().Format("2006-01-02 15:04:05")
-			}
-			reply := fmt.Sprintf("【AGY 认证状态】\n- 状态：已登录在线\n- 账号：%s\n- Token 有效期至：%s", st.Email, expiryStr)
-			a.replyInfo(ctx, event, "🔐 AGY 认证状态", reply)
-			return
-
-		case "/agy logout":
-			if event.IsGroup {
-				a.replyText(ctx, event, "账号注销操作请在与呆呆的私聊中进行。")
-				return
-			}
-			if err := a.delegationPermissionError(event.Role); err != nil {
-				a.replyText(ctx, event, err.Error())
-				return
-			}
-			if a.AGYAuth == nil {
-				a.replyText(ctx, event, "AGY 认证管理器未挂载。")
-				return
-			}
-			st := a.AGYAuth.GetStatus()
-			if err := a.AGYAuth.Logout(); err != nil {
-				slog.Warn("superagent: 注销 AGY 账号失败", "err", err)
-				a.replyText(ctx, event, "注销未完成，凭据状态未确认。请检查服务日志后重试。")
-				return
-			}
-			if !st.IsLoggedIn {
-				a.replyText(ctx, event, "【AGY 登录已取消】\n当前没有已登录账号；等待中的登录会话已清理。如需使用可发送 `/agy login` 重新认证。")
-				return
-			}
-			emailHint := ""
-			if st.Email != "" {
-				emailHint = fmt.Sprintf(" (%s)", st.Email)
-			}
-			a.replyText(ctx, event, fmt.Sprintf("【AGY 账号已注销】\n已安全清除 Google 账号凭据%s。如需再次使用可发送 `/agy login` 重新认证。", emailHint))
-			return
-
-		case "/stop":
-			if err := a.delegationPermissionError(event.Role); err != nil {
-				a.replyText(ctx, event, err.Error())
-				return
-			}
-			stoppedThinking := a.cancelThinkingRequester(event)
-			// A concurrently cancelling continuation may have restored its body
-			// just before the cancellation took effect. Clear again afterwards.
-			a.clearReplyContinuation(event)
-			aborted := 0
-			stopping := 0
-			if a.Delegates != nil {
-				aborted = a.Delegates.AbortByRequester(event.Platform, event.ChannelID, event.SenderID)
-				for _, ticket := range a.Delegates.ActiveTicketsFor(event.Platform, event.SenderID, event.ChannelID) {
-					if ticket.Status == TicketStopping {
-						stopping++
-					}
-				}
-			}
-			msg := "当前没有正在运行中的思考任务或后台工单。"
-			if aborted > 0 && stoppedThinking {
-				msg = fmt.Sprintf("已紧急中断当前思考进程，并向 %d 个后台工单发出停止请求（尚未启动的任务已取消；运行中任务退出后释放执行容量）。", aborted)
-			} else if aborted > 0 {
-				msg = fmt.Sprintf("已向 %d 个后台工单发出停止请求（尚未启动的任务已取消；运行中任务退出后释放执行容量）。", aborted)
-			} else if stopping > 0 && stoppedThinking {
-				msg = fmt.Sprintf("已紧急中断当前思考进程；另有 %d 个后台工单仍在停止过程中，工作者退出后才会释放执行容量。", stopping)
-			} else if stopping > 0 {
-				msg = fmt.Sprintf("仍有 %d 个后台工单正在停止；工作者退出后才会释放执行容量。", stopping)
-			} else if stoppedThinking {
-				msg = "已紧急中断当前正在进行的思考与工具调用。"
-			}
-			a.replyText(ctx, event, msg)
-			return
-
-		case "/reset", "/new", "/clear", "/ws clear", "/ws reset":
-			if err := a.delegationPermissionError(event.Role); err != nil {
-				a.replyText(ctx, event, err.Error())
-				return
-			}
-
-			// 先取消思考上下文以解除会话锁等待；后台工单等工作区校验后再处理。
-			a.cancelThinkingSession(event)
-
-			unlock := a.lockSession(event)
-			defer unlock()
-			// Clear after acquiring the lock too, so a cancelled continuation
-			// cannot restore old content after the reset's first clear.
-			a.clearReplyContinuation(event)
-
-			currWs := ""
-			wsName := ""
-			if a.Workspaces != nil {
-				var workspaceErr error
-				currWs, wsName, workspaceErr = a.Workspaces.GetCurrentChecked(event.ChannelID)
-				if workspaceErr != nil {
-					a.replyText(ctx, event, fmt.Sprintf("【会话重开失败】\n无法确认当前工作区，近期历史和 AGY 会话均未重置：%v", workspaceErr))
-					return
-				}
-			}
-			// 先确认工作区可读，再中断后台工单，避免失败的预检查产生副作用。
-			if a.Delegates != nil {
-				_ = a.Delegates.AbortByChannel(event.Platform, event.ChannelID)
-			}
-
-			chatType := "private"
-			if event.IsGroup {
-				chatType = "group"
-			}
-			if err := db.DefaultManager().ResetSessionHistoryInChat(event.Platform, chatType, event.ChannelID); err != nil {
-				slog.Error("superagent: 重开会话时清理近期历史失败", "platform", event.Platform, "channelID", event.ChannelID, "err", err)
-				a.replyText(ctx, event, "【会话重开失败】\n近期对话历史未能清理，AGY 会话记录未清空；已中断的任务不会自动恢复。请稍后重试。")
-				return
-			}
-			if attachmentCleaner, ok := a.Cognition.(interface {
-				ClearPendingAttachments(*SensoryEvent)
-			}); ok {
-				attachmentCleaner.ClearPendingAttachments(event)
-			}
-			if a.Delegates != nil {
-				if err := a.Delegates.ResetSession(event.ChannelID, currWs); err != nil {
-					slog.Error("superagent: 重开会话时清理 AGY 会话失败", "platform", event.Platform, "channelID", event.ChannelID, "workspace", currWs, "err", err)
-					a.replyText(ctx, event, fmt.Sprintf("【会话重开未完成】\n近期历史游标已重置，但 AGY 会话未能确认清除：%v。请先检查服务日志，再重试 `/reset`。", err))
-					return
-				}
-			}
-
-			feedback := fmt.Sprintf("【当前会话已完成重开】\n已清空工作空间 `%s` (`%s`) 的 agy 会话与近期对话记忆，长期画像与项目文件完好保留。", wsName, currWs)
-			a.replyText(ctx, event, feedback)
-			return
-
-		case "/pwd":
-			if a.Workspaces == nil {
-				a.replyText(ctx, event, "工作空间管理器未配置。")
-				return
-			}
-			unlock := a.lockSession(event)
-			workspaceStatus := a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "current", "", a.Delegates)
-			unlock()
-			a.replyInfo(ctx, event, "📁 当前工作空间", workspaceStatus)
-			return
-
-		case "/workspaces", "/ws":
-			if a.Workspaces == nil {
-				a.replyText(ctx, event, "工作空间管理器未配置。")
-				return
-			}
-			unlock := a.lockSession(event)
-			workspaceList := a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "list", "", a.Delegates)
-			unlock()
-			a.replyInfo(ctx, event, "📚 工作空间书签", workspaceList)
-			return
-
-		case "/ws exit", "/workspaces exit":
-			unlock := a.lockSession(event)
-			defer unlock()
-			if a.Workspaces == nil {
-				a.replyText(ctx, event, "工作空间管理器未配置。")
-				return
-			}
-			a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "exit", "", a.Delegates))
-			return
-
-		case "/ws clean", "/clean":
-			unlock := a.lockSession(event)
-			defer unlock()
-			if a.Workspaces == nil {
-				a.replyText(ctx, event, "工作空间管理器未配置。")
-				return
-			}
-			a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "clean", "", a.Delegates))
-			return
-
-		case "/help":
-			helpText := fmt.Sprintf(`【%s · 控制指令指引】
-- /help                         : 显示这份指令列表
-- /status 或 /sysinfo           : 查看运行状态、系统指标与活跃工单
-- /model                       : 查看当前模型
-- /models                      : 查看可用模型
-- /usage                       : 查看模型用量
-- /tasks                        : 查看你在当前会话的近期工单
-- /task <ID> [页码]             : 查看工单状态和输出
-- 继续 或 /continue             : 续发未发送完的长回复
-- /stop                         : 中断你发起的思考和工单
-- /reset、/new 或 /clear        : 重开当前会话并清除近期历史
-- /agy login [force]            : 发起或强制重新进行 Google 认证（私聊）
-- /agy code <授权码>             : 提交 Google 授权码（私聊）
-- /agy status                   : 查看 AGY 认证状态（私聊）
-- /agy logout                   : 注销 AGY 并清除凭据（私聊）
-- /pwd                          : 查看当前工作空间
-- /cd <目标>                    : 切换工作空间
-- /ws 或 /workspaces            : 列出已纳管的工作空间
-- /ws rm <名称>                 : 移除工作空间书签
-- /ws exit                      : 退出当前工作空间
-- /ws clean 或 /clean           : 清理默认 sandbox 临时文件
-
-工单、模型与工作空间指令需要相应权限；群聊中请 @ 呆呆后发送控制指令。`, a.Persona.Name)
-			a.replyText(ctx, event, helpText)
-			return
-
-		default:
-			if code, isAuthCodeCommand := parseAGYAuthCodeCommand(content); isAuthCodeCommand {
-				if event.IsGroup {
-					a.replyText(ctx, event, "授权码属于私人凭据，请勿在群聊中发送。请在与呆呆的私聊中提交授权码。")
-					return
-				}
-				if err := a.delegationPermissionError(event.Role); err != nil {
-					a.replyText(ctx, event, err.Error())
-					return
-				}
-				if a.AGYAuth == nil {
-					a.replyText(ctx, event, "AGY 认证管理器未挂载。")
-					return
-				}
-				a.replyText(ctx, event, "正在验证并换取凭证，请稍候...")
-				email, err := a.AGYAuth.SubmitCode(ctx, code)
-				if err != nil {
-					slog.Warn("superagent: AGY 授权码交换失败", "err", err)
-					a.replyText(ctx, event, "认证未完成。请确认授权码来自最近一次登录链接且尚未过期；若仍失败，请检查服务日志。")
-					return
-				}
-				if a.OnAuthSuccess != nil {
-					a.OnAuthSuccess(ctx)
-				}
-				a.replyText(ctx, event, fmt.Sprintf("【AGY 登录成功】\n已成功绑定 Google 账号：%s！\n心智模型池已自动刷新就绪。", email))
-				return
-			}
-			if strings.HasPrefix(content, "/ws rm ") || strings.HasPrefix(content, "/workspaces rm ") {
-				unlock := a.lockSession(event)
-				defer unlock()
-				if a.Workspaces == nil {
-					a.replyText(ctx, event, "工作空间管理器未配置。")
-					return
-				}
-				target := strings.TrimSpace(strings.TrimPrefix(content, "/workspaces rm "))
-				if strings.HasPrefix(content, "/ws rm ") {
-					target = strings.TrimSpace(strings.TrimPrefix(content, "/ws rm "))
-				}
-				a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "remove", target, a.Delegates))
-				return
-			}
-
-			if strings.HasPrefix(content, "/cd ") || content == "/cd" {
-				unlock := a.lockSession(event)
-				defer unlock()
-				if a.Workspaces == nil {
-					a.replyText(ctx, event, "工作空间管理器未配置。")
-					return
-				}
-				target := strings.TrimSpace(strings.TrimPrefix(content, "/cd"))
-				if target == "" {
-					target = "~"
-				}
-				a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "switch", target, a.Delegates))
-				return
-			}
-		}
-	}
-
 	// QQ attachments are never inspected just because they were uploaded. Ask
 	// for an explicit task before invoking vision, cognition, or any tool.
 	if event.Platform == "qq" && content == "" && (len(event.Images) > 0 || event.OmittedImages > 0 || len(event.Files) > 0 || event.OmittedFiles > 0) {

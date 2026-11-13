@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS messages (
     reply_to_uid TEXT NOT NULL DEFAULT '',
     reply_to_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
     platform_msg_id TEXT NOT NULL DEFAULT '',
-    embedding    BLOB                             -- 可选稠密语义向量 (float32 小端字节序)
+    embedding    BLOB,
+    embedding_model TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_messages_lookup ON messages(platform, chat_type, conv_id, id);
 CREATE INDEX IF NOT EXISTS idx_messages_time ON messages(platform, chat_type, conv_id, created_at, id);
@@ -65,6 +66,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_reply_to_message ON messages(reply_to_me
 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_inbound_event ON messages(platform, chat_type, conv_id, platform_msg_id)
     WHERE is_bot = 0 AND platform_msg_id <> '';
 CREATE INDEX IF NOT EXISTS idx_messages_reply_lookup ON messages(platform, chat_type, conv_id, user_id, is_bot, id DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_vector_lookup ON messages(platform, chat_type, conv_id, embedding_model, id DESC) WHERE embedding IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS user_facts (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,11 +79,13 @@ CREATE TABLE IF NOT EXISTS user_facts (
     quote        TEXT NOT NULL DEFAULT '',        -- 来源用户原话
     created_at   INTEGER NOT NULL,                -- 毫秒级时间戳
     updated_at   INTEGER NOT NULL,
-    embedding    BLOB,                            -- 可选稠密语义向量 (float32 小端字节序)
+    embedding    BLOB,
+    embedding_model TEXT NOT NULL DEFAULT '',
     CHECK ((scope_type = 'global' AND scope_id = '') OR (scope_type = 'group' AND length(scope_id) > 0))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_active_unique ON user_facts(platform, user_id, scope_type, scope_id, fact) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_facts_page ON user_facts(platform, user_id, scope_type, scope_id, updated_at DESC, id DESC) WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_facts_embedding_model ON user_facts(platform, user_id, embedding_model) WHERE embedding IS NOT NULL AND status = 'active';
 
 CREATE TABLE IF NOT EXISTS user_fact_sources (
     fact_id     INTEGER NOT NULL,
@@ -659,16 +663,17 @@ func (m *Manager) MessageContentByPlatformID(ctx context.Context, platform, chat
 
 // StoredMessage 持久化的会话历史消息记录
 type StoredMessage struct {
-	ID        int64
-	Platform  string
-	IsGroup   bool
-	ConvID    string
-	UserID    string
-	Name      string
-	Text      string
-	IsBot     bool
-	Embedding []float32
-	CreatedAt time.Time
+	ID             int64
+	Platform       string
+	IsGroup        bool
+	ConvID         string
+	UserID         string
+	Name           string
+	Text           string
+	IsBot          bool
+	Embedding      []float32
+	EmbeddingModel string
+	CreatedAt      time.Time
 }
 
 type FactSource struct {
@@ -734,28 +739,28 @@ func (m *Manager) ListVisibleFactSources(ctx context.Context, platform, userID, 
 }
 
 // UpdateMessageEmbedding 异步回填消息的稠密语义向量
-func (m *Manager) UpdateMessageEmbedding(ctx context.Context, platform string, msgID int64, vec []float32) error {
-	if msgID <= 0 || len(vec) == 0 {
+func (m *Manager) UpdateMessageEmbedding(ctx context.Context, platform string, msgID int64, vec []float32, modelIdentity string) error {
+	if msgID <= 0 || len(vec) == 0 || strings.TrimSpace(modelIdentity) == "" {
 		return nil
 	}
 	db, err := m.GetConn(platform)
 	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, "UPDATE messages SET embedding = ? WHERE id = ?", encodeFloat32Slice(vec), msgID)
+	_, err = db.ExecContext(ctx, "UPDATE messages SET embedding = ?, embedding_model = ? WHERE id = ?", encodeFloat32Slice(vec), modelIdentity, msgID)
 	return err
 }
 
 // UpdateFactEmbedding 异步回填长期事实的稠密语义向量
-func (m *Manager) UpdateFactEmbedding(ctx context.Context, platform string, factID int64, expectedFact string, vec []float32) error {
-	if factID <= 0 || len(vec) == 0 {
+func (m *Manager) UpdateFactEmbedding(ctx context.Context, platform string, factID int64, expectedFact string, vec []float32, modelIdentity string) error {
+	if factID <= 0 || len(vec) == 0 || strings.TrimSpace(modelIdentity) == "" {
 		return nil
 	}
 	db, err := m.GetConn(platform)
 	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, "UPDATE user_facts SET embedding = ? WHERE id = ? AND fact = ? AND status = 'active' AND (embedding IS NULL OR length(embedding) = 0)", encodeFloat32Slice(vec), factID, expectedFact)
+	_, err = db.ExecContext(ctx, "UPDATE user_facts SET embedding = ?, embedding_model = ? WHERE id = ? AND fact = ? AND status = 'active' AND (embedding IS NULL OR length(embedding) = 0 OR embedding_model <> ?)", encodeFloat32Slice(vec), modelIdentity, factID, expectedFact, modelIdentity)
 	return err
 }
 
@@ -1071,7 +1076,7 @@ func (m *Manager) searchMessages(ctx context.Context, platform, chatType, convID
 	args = append(args, limit)
 
 	query := fmt.Sprintf(`
-		SELECT id, platform, chat_type, conv_id, user_id, name, substr(text, 1, %d), is_bot, created_at, embedding
+		SELECT id, platform, chat_type, conv_id, user_id, name, substr(text, 1, %d), is_bot, created_at, embedding, embedding_model
 		FROM messages
 		WHERE %s AND (%s)
 		ORDER BY (%s) DESC, id DESC
@@ -1096,21 +1101,23 @@ func (m *Manager) searchMessages(ctx context.Context, platform, chatType, convID
 			isBotInt  int
 			createdMs int64
 			embBlob   []byte
+			embModel  string
 		)
-		if err := rows.Scan(&id, &plat, &cType, &cID, &uID, &name, &text, &isBotInt, &createdMs, &embBlob); err != nil {
+		if err := rows.Scan(&id, &plat, &cType, &cID, &uID, &name, &text, &isBotInt, &createdMs, &embBlob, &embModel); err != nil {
 			return nil, err
 		}
 		list = append(list, StoredMessage{
-			ID:        id,
-			Platform:  plat,
-			IsGroup:   cType == "group",
-			ConvID:    cID,
-			UserID:    uID,
-			Name:      name,
-			Text:      core.TruncateRunes(text, core.MaxUserMessageRunes, "…[消息已截断]"),
-			IsBot:     isBotInt == 1,
-			Embedding: decodeFloat32Slice(embBlob),
-			CreatedAt: time.UnixMilli(createdMs),
+			ID:             id,
+			Platform:       plat,
+			IsGroup:        cType == "group",
+			ConvID:         cID,
+			UserID:         uID,
+			Name:           name,
+			Text:           core.TruncateRunes(text, core.MaxUserMessageRunes, "…[消息已截断]"),
+			IsBot:          isBotInt == 1,
+			Embedding:      decodeFloat32Slice(embBlob),
+			EmbeddingModel: embModel,
+			CreatedAt:      time.UnixMilli(createdMs),
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -1124,17 +1131,17 @@ func (m *Manager) searchMessages(ctx context.Context, platform, chatType, convID
 }
 
 // RecentVectorMessages 获取指定会话中带有稠密向量的最近 limit 条历史消息（用于向量语义通道召回）
-func (m *Manager) RecentVectorMessages(ctx context.Context, platform, convID string, limit int) ([]StoredMessage, error) {
-	return m.recentVectorMessages(ctx, platform, "", convID, limit)
+func (m *Manager) RecentVectorMessages(ctx context.Context, platform, convID, modelIdentity string, limit int) ([]StoredMessage, error) {
+	return m.recentVectorMessages(ctx, platform, "", convID, modelIdentity, limit)
 }
 
 // RecentVectorMessagesInChat restricts vector recall to the requested chat type.
-func (m *Manager) RecentVectorMessagesInChat(ctx context.Context, platform, chatType, convID string, limit int) ([]StoredMessage, error) {
-	return m.recentVectorMessages(ctx, platform, chatType, convID, limit)
+func (m *Manager) RecentVectorMessagesInChat(ctx context.Context, platform, chatType, convID, modelIdentity string, limit int) ([]StoredMessage, error) {
+	return m.recentVectorMessages(ctx, platform, chatType, convID, modelIdentity, limit)
 }
 
-func (m *Manager) recentVectorMessages(ctx context.Context, platform, chatType, convID string, limit int) ([]StoredMessage, error) {
-	if convID == "" {
+func (m *Manager) recentVectorMessages(ctx context.Context, platform, chatType, convID, modelIdentity string, limit int) ([]StoredMessage, error) {
+	if convID == "" || strings.TrimSpace(modelIdentity) == "" {
 		return nil, nil
 	}
 	if limit <= 0 {
@@ -1163,8 +1170,10 @@ func (m *Manager) recentVectorMessages(ctx context.Context, platform, chatType, 
 		queryScope += " AND created_at > ?"
 		queryArgs = append(queryArgs[:len(queryArgs)-1], resetAt, limit)
 	}
+	queryScope += " AND embedding_model = ?"
+	queryArgs = append(queryArgs[:len(queryArgs)-1], modelIdentity, limit)
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, platform, chat_type, conv_id, user_id, name, substr(text, 1, %d), is_bot, created_at, embedding
+		SELECT id, platform, chat_type, conv_id, user_id, name, substr(text, 1, %d), is_bot, created_at, embedding, embedding_model
 		FROM messages
 		WHERE %s AND embedding IS NOT NULL AND length(embedding) > 0
 		ORDER BY id DESC
@@ -1188,21 +1197,23 @@ func (m *Manager) recentVectorMessages(ctx context.Context, platform, chatType, 
 			isBotInt  int
 			createdMs int64
 			embBlob   []byte
+			embModel  string
 		)
-		if err := rows.Scan(&id, &plat, &cType, &cID, &uID, &name, &text, &isBotInt, &createdMs, &embBlob); err != nil {
+		if err := rows.Scan(&id, &plat, &cType, &cID, &uID, &name, &text, &isBotInt, &createdMs, &embBlob, &embModel); err != nil {
 			return nil, err
 		}
 		list = append(list, StoredMessage{
-			ID:        id,
-			Platform:  plat,
-			IsGroup:   cType == "group",
-			ConvID:    cID,
-			UserID:    uID,
-			Name:      name,
-			Text:      core.TruncateRunes(text, core.MaxUserMessageRunes, "…[消息已截断]"),
-			IsBot:     isBotInt == 1,
-			Embedding: decodeFloat32Slice(embBlob),
-			CreatedAt: time.UnixMilli(createdMs),
+			ID:             id,
+			Platform:       plat,
+			IsGroup:        cType == "group",
+			ConvID:         cID,
+			UserID:         uID,
+			Name:           name,
+			Text:           core.TruncateRunes(text, core.MaxUserMessageRunes, "…[消息已截断]"),
+			IsBot:          isBotInt == 1,
+			Embedding:      decodeFloat32Slice(embBlob),
+			EmbeddingModel: embModel,
+			CreatedAt:      time.UnixMilli(createdMs),
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -1265,7 +1276,7 @@ func (m *Manager) PageVisibleFacts(ctx context.Context, platform, userID, groupI
 		return []*core.Fact{}, total, nil
 	}
 	query := fmt.Sprintf(`
-		SELECT id, user_id, scope_type, scope_id, substr(fact, 1, %d), updated_at, embedding
+		SELECT id, user_id, scope_type, scope_id, substr(fact, 1, %d), updated_at, embedding, embedding_model
 		FROM user_facts
 		WHERE platform = ? AND user_id = ? AND status = 'active' %s
 		ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`, core.MaxFactContentRunes+1, scopeFilter)
@@ -1280,7 +1291,7 @@ func (m *Manager) PageVisibleFacts(ctx context.Context, platform, userID, groupI
 		var fact core.Fact
 		var updatedAt int64
 		var embedding []byte
-		if err := rows.Scan(&fact.ID, &fact.UserID, &fact.ScopeType, &fact.ScopeID, &fact.Content, &updatedAt, &embedding); err != nil {
+		if err := rows.Scan(&fact.ID, &fact.UserID, &fact.ScopeType, &fact.ScopeID, &fact.Content, &updatedAt, &embedding, &fact.EmbeddingModel); err != nil {
 			return nil, 0, err
 		}
 		fact.ConvID = fact.ScopeID
@@ -1302,7 +1313,7 @@ func (m *Manager) listFacts(ctx context.Context, platform, userID, scopeFilter, 
 	}
 
 	query := `
-		SELECT id, user_id, scope_type, scope_id, substr(fact, 1, %d), updated_at, embedding
+		SELECT id, user_id, scope_type, scope_id, substr(fact, 1, %d), updated_at, embedding, embedding_model
 		FROM user_facts 
 		WHERE platform = ? AND user_id = ? AND status = 'active' ` + scopeFilter + `
 		ORDER BY id ASC
@@ -1328,19 +1339,21 @@ func (m *Manager) listFacts(ctx context.Context, platform, userID, scopeFilter, 
 			factText  string
 			updatedMs int64
 			embBlob   []byte
+			embModel  string
 		)
-		if err := rows.Scan(&id, &uID, &scopeType, &scID, &factText, &updatedMs, &embBlob); err != nil {
+		if err := rows.Scan(&id, &uID, &scopeType, &scID, &factText, &updatedMs, &embBlob, &embModel); err != nil {
 			return nil, err
 		}
 		facts = append(facts, &core.Fact{
-			ID:        id,
-			UserID:    uID,
-			ScopeType: scopeType,
-			ScopeID:   scID,
-			ConvID:    scID,
-			Content:   factText,
-			Embedding: decodeFloat32Slice(embBlob),
-			UpdatedAt: time.UnixMilli(updatedMs),
+			ID:             id,
+			UserID:         uID,
+			ScopeType:      scopeType,
+			ScopeID:        scID,
+			ConvID:         scID,
+			Content:        factText,
+			Embedding:      decodeFloat32Slice(embBlob),
+			EmbeddingModel: embModel,
+			UpdatedAt:      time.UnixMilli(updatedMs),
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -1354,6 +1367,7 @@ type FactMutation struct {
 	Action          string    `json:"action"`               // ADD, UPDATE 或 DELETE
 	FactID          int64     `json:"fact_id,omitempty"`    // 当 UPDATE 或 DELETE 时指定的目标事实 ID
 	SourceMessageID int64     `json:"-"`                    // 支撑该事实的入站消息记录 ID
+	EmbeddingModel  string    `json:"-"`                    // 生成向量的编码器配置哈希
 	Fact            string    `json:"fact,omitempty"`       // 新增或更新后的事实陈述
 	ExpectedFact    string    `json:"-"`                    // 非空时要求修改前事实仍与读取时一致
 	ScopeType       string    `json:"scope_type,omitempty"` // global 或 group
@@ -1427,8 +1441,8 @@ func (m *Manager) ApplyFactMutations(ctx context.Context, platform, userID strin
 				return err
 			}
 			result, err := tx.ExecContext(ctx,
-				"INSERT INTO user_facts (platform, user_id, scope_type, scope_id, fact, status, quote, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)",
-				p, userID, scopeType, scopeID, factText, mut.Quote, nowMs, nowMs, encodeFloat32Slice(mut.Embedding),
+				"INSERT INTO user_facts (platform, user_id, scope_type, scope_id, fact, status, quote, created_at, updated_at, embedding, embedding_model) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)",
+				p, userID, scopeType, scopeID, factText, mut.Quote, nowMs, nowMs, encodeFloat32Slice(mut.Embedding), mut.EmbeddingModel,
 			)
 			if err != nil {
 				return err
@@ -1463,8 +1477,8 @@ func (m *Manager) ApplyFactMutations(ctx context.Context, platform, userID strin
 			if !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
-			query := "UPDATE user_facts SET fact = ?, quote = ?, updated_at = ?, embedding = ? WHERE id = ? AND platform = ? AND user_id = ? AND scope_type = ? AND scope_id = ? AND status = 'active'"
-			args := []any{factText, mut.Quote, nowMs, encodeFloat32Slice(mut.Embedding), mut.FactID, p, userID, scopeType, scopeID}
+			query := "UPDATE user_facts SET fact = ?, quote = ?, updated_at = ?, embedding = ?, embedding_model = ? WHERE id = ? AND platform = ? AND user_id = ? AND scope_type = ? AND scope_id = ? AND status = 'active'"
+			args := []any{factText, mut.Quote, nowMs, encodeFloat32Slice(mut.Embedding), mut.EmbeddingModel, mut.FactID, p, userID, scopeType, scopeID}
 			if mut.ExpectedFact != "" {
 				query += " AND fact = ?"
 				args = append(args, mut.ExpectedFact)

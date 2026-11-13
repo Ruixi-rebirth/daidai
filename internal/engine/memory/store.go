@@ -45,8 +45,9 @@ var (
 )
 
 type embedCacheKey struct {
-	version uint64
-	text    string
+	version  uint64
+	identity string
+	text     string
 }
 
 // SetDefaultEmbedder 设置全局默认稠密向量编码器 (如 BAAI/bge-m3)
@@ -75,23 +76,32 @@ func defaultEmbedderSnapshot() (core.EmbeddingProvider, uint64) {
 
 // EmbedText 使用当前配置的向量模型编码文本（带内存缓存，未配置或超时时静默返回 nil）
 func EmbedText(ctx context.Context, text string) []float32 {
+	vec, _ := EmbedTextWithIdentity(ctx, text)
+	return vec
+}
+
+func EmbedTextWithIdentity(ctx context.Context, text string) ([]float32, string) {
 	emb, version := defaultEmbedderSnapshot()
 	clean := strings.TrimSpace(text)
 	if emb == nil || clean == "" {
-		return nil
+		return nil, ""
 	}
-	key := embedCacheKey{version: version, text: clean}
+	identity := embeddingIdentity(emb)
+	key := embedCacheKey{version: version, identity: identity, text: clean}
 
 	embedCacheMu.RLock()
 	if cached, ok := embedCache[key]; ok {
 		embedCacheMu.RUnlock()
-		return append([]float32(nil), cached...)
+		return append([]float32(nil), cached...), identity
 	}
 	embedCacheMu.RUnlock()
 
-	vec, err := emb.Embed(ctx, clean)
+	vec, actualIdentity, err := embedWithIdentity(ctx, emb, clean)
 	if err != nil || len(vec) == 0 {
-		return nil
+		return nil, ""
+	}
+	if actualIdentity == "" {
+		actualIdentity = identity
 	}
 
 	embedCacheMu.Lock()
@@ -101,9 +111,31 @@ func EmbedText(ctx context.Context, text string) []float32 {
 			break
 		}
 	}
-	embedCache[key] = append([]float32(nil), vec...)
+	if actualIdentity == identity {
+		embedCache[key] = append([]float32(nil), vec...)
+	}
 	embedCacheMu.Unlock()
-	return append([]float32(nil), vec...)
+	return append([]float32(nil), vec...), actualIdentity
+}
+
+func embeddingIdentity(emb core.EmbeddingProvider) string {
+	if emb == nil {
+		return ""
+	}
+	if identified, ok := emb.(core.IdentifiedEmbeddingProvider); ok {
+		if identity := strings.TrimSpace(identified.EmbeddingIdentity()); identity != "" {
+			return identity
+		}
+	}
+	return fmt.Sprintf("%T", emb)
+}
+
+func embedWithIdentity(ctx context.Context, emb core.EmbeddingProvider, text string) ([]float32, string, error) {
+	if identified, ok := emb.(core.IdentifiedEmbeddingProvider); ok {
+		return identified.EmbedIdentified(ctx, text)
+	}
+	vec, err := emb.Embed(ctx, text)
+	return vec, embeddingIdentity(emb), err
 }
 
 // MemoryEngine 长期事实记忆与会话历史引擎 (直接实现 entity.Memory，纯粹 SQLite 驱动)
@@ -520,13 +552,13 @@ func (m *MemoryEngine) Commit(ctx context.Context, event *entity.SensoryEvent, r
 
 			if emb != nil {
 				if uID > 0 && len([]rune(uText)) >= 4 {
-					if vec, err := emb.Embed(bgCtx, uText); err == nil && len(vec) > 0 && bgCtx.Err() == nil {
-						_ = dbMgr.UpdateMessageEmbedding(bgCtx, ev.Platform, uID, vec)
+					if vec, identity, err := embedWithIdentity(bgCtx, emb, uText); err == nil && len(vec) > 0 && identity != "" && bgCtx.Err() == nil {
+						_ = dbMgr.UpdateMessageEmbedding(bgCtx, ev.Platform, uID, vec, identity)
 					}
 				}
 				if bID > 0 && len([]rune(rText)) >= 6 {
-					if vec, err := emb.Embed(bgCtx, rText); err == nil && len(vec) > 0 && bgCtx.Err() == nil {
-						_ = dbMgr.UpdateMessageEmbedding(bgCtx, ev.Platform, bID, vec)
+					if vec, identity, err := embedWithIdentity(bgCtx, emb, rText); err == nil && len(vec) > 0 && identity != "" && bgCtx.Err() == nil {
+						_ = dbMgr.UpdateMessageEmbedding(bgCtx, ev.Platform, bID, vec, identity)
 					}
 				}
 			}
@@ -582,12 +614,12 @@ func (m *MemoryEngine) backfillUserFactEmbeddings(ctx context.Context, event *en
 		if ctx.Err() != nil {
 			return
 		}
-		if len(f.Embedding) == 0 && f.Content != "" {
-			if vec, err := emb.Embed(ctx, f.Content); err == nil && len(vec) > 0 {
+		if f.EmbeddingModel != embeddingIdentity(emb) && f.Content != "" {
+			if vec, identity, err := embedWithIdentity(ctx, emb, f.Content); err == nil && len(vec) > 0 && identity != "" {
 				if ctx.Err() != nil {
 					return
 				}
-				_ = dbMgr.UpdateFactEmbedding(ctx, event.Platform, f.ID, f.Content, vec)
+				_ = dbMgr.UpdateFactEmbedding(ctx, event.Platform, f.ID, f.Content, vec, identity)
 			}
 		}
 	}
@@ -640,13 +672,14 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 			if ctx.Err() != nil {
 				return
 			}
-			if len(f.Embedding) == 0 && f.Content != "" {
-				if vec, err := emb.Embed(ctx, f.Content); err == nil && len(vec) > 0 {
+			if f.EmbeddingModel != embeddingIdentity(emb) && f.Content != "" {
+				if vec, identity, err := embedWithIdentity(ctx, emb, f.Content); err == nil && len(vec) > 0 && identity != "" {
 					if ctx.Err() != nil {
 						return
 					}
 					f.Embedding = vec
-					_ = dbMgr.UpdateFactEmbedding(ctx, event.Platform, f.ID, f.Content, vec)
+					f.EmbeddingModel = identity
+					_ = dbMgr.UpdateFactEmbedding(ctx, event.Platform, f.ID, f.Content, vec, identity)
 				}
 			}
 		}
@@ -735,8 +768,9 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 				continue
 			}
 			var factVec []float32
+			var factModel string
 			if emb != nil {
-				factVec, _ = emb.Embed(ctx, factText)
+				factVec, factModel, _ = embedWithIdentity(ctx, emb, factText)
 				if ctx.Err() != nil {
 					return
 				}
@@ -759,7 +793,7 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 					continue
 				}
 				if LexicalOverlap(factText, old.Content) >= 0.78 ||
-					(len(factVec) > 0 && len(old.Embedding) > 0 && CosineSimilarity(factVec, old.Embedding) >= 0.88) {
+					(len(factVec) > 0 && len(old.Embedding) > 0 && factModel != "" && factModel == old.EmbeddingModel && CosineSimilarity(factVec, old.Embedding) >= 0.88) {
 					if _, exists := scheduledFactIDs[old.ID]; exists {
 						merged = true
 						break
@@ -768,6 +802,7 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 						Action:          "UPDATE",
 						FactID:          old.ID,
 						SourceMessageID: event.HistoryRecordID,
+						EmbeddingModel:  factModel,
 						Fact:            factText,
 						ExpectedFact:    old.Content,
 						ScopeType:       old.ScopeType,
@@ -785,6 +820,7 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 				normalized = append(normalized, db.FactMutation{
 					Action:          "ADD",
 					SourceMessageID: event.HistoryRecordID,
+					EmbeddingModel:  factModel,
 					Fact:            factText,
 					ScopeType:       scopeType,
 					ScopeID:         scopeID,
@@ -803,8 +839,9 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 					continue
 				}
 				var factVec []float32
+				var factModel string
 				if emb != nil {
-					factVec, _ = emb.Embed(ctx, factText)
+					factVec, factModel, _ = embedWithIdentity(ctx, emb, factText)
 					if ctx.Err() != nil {
 						return
 					}
@@ -813,6 +850,7 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 					Action:          "UPDATE",
 					FactID:          mut.FactID,
 					SourceMessageID: event.HistoryRecordID,
+					EmbeddingModel:  factModel,
 					Fact:            factText,
 					ExpectedFact:    old.Content,
 					ScopeType:       old.ScopeType,
@@ -929,9 +967,10 @@ func RankFactsByBM25(ctx context.Context, query string, facts []*core.Fact, minS
 	}
 	docs := make([]string, len(facts))
 	hasFactEmb := false
+	queryIdentity := embeddingIdentity(GetDefaultEmbedder())
 	for i, f := range facts {
 		docs[i] = f.Content
-		if len(f.Embedding) > 0 {
+		if len(f.Embedding) > 0 && f.EmbeddingModel == queryIdentity {
 			hasFactEmb = true
 		}
 	}
@@ -941,10 +980,10 @@ func RankFactsByBM25(ctx context.Context, query string, facts []*core.Fact, minS
 	// 若全量事实本就少于常驻上限且无需过滤，直接本地 0ms 完成 BM25 + 时间衰减排序，避免主对话热路径发生不必要的网络等待
 	var vecScores []float32
 	if hasFactEmb && strings.TrimSpace(query) != "" && (minScore > 0 || len(facts) > defaultMaxFacts) {
-		if qVec := EmbedText(ctx, query); len(qVec) > 0 {
+		if qVec, identity := EmbedTextWithIdentity(ctx, query); len(qVec) > 0 && identity == queryIdentity {
 			vecScores = make([]float32, len(facts))
 			for i, f := range facts {
-				if len(f.Embedding) > 0 {
+				if len(f.Embedding) > 0 && f.EmbeddingModel == identity {
 					vecScores[i] = CosineSimilarity(qVec, f.Embedding)
 				}
 			}
@@ -1031,14 +1070,14 @@ func searchMessagesByBM25(ctx context.Context, dbMgr *db.Manager, platform, chat
 		}
 	}
 
-	qVec := EmbedText(ctx, query)
+	qVec, modelIdentity := EmbedTextWithIdentity(ctx, query)
 	if len(qVec) > 0 {
 		var vecMsgs []db.StoredMessage
 		var err error
 		if chatType == "" {
-			vecMsgs, err = dbMgr.RecentVectorMessages(ctx, platform, convID, 500)
+			vecMsgs, err = dbMgr.RecentVectorMessages(ctx, platform, convID, modelIdentity, 500)
 		} else {
-			vecMsgs, err = dbMgr.RecentVectorMessagesInChat(ctx, platform, chatType, convID, 500)
+			vecMsgs, err = dbMgr.RecentVectorMessagesInChat(ctx, platform, chatType, convID, modelIdentity, 500)
 		}
 		if err == nil {
 			for _, m := range vecMsgs {
@@ -1047,7 +1086,7 @@ func searchMessagesByBM25(ctx context.Context, dbMgr *db.Manager, platform, chat
 						continue
 					}
 				}
-				if CosineSimilarity(qVec, m.Embedding) >= 0.48 {
+				if m.EmbeddingModel == modelIdentity && CosineSimilarity(qVec, m.Embedding) >= 0.48 {
 					candidates = append(candidates, m)
 					if m.ID > 0 {
 						seenIDs[m.ID] = struct{}{}
@@ -1068,7 +1107,7 @@ func searchMessagesByBM25(ctx context.Context, dbMgr *db.Manager, platform, chat
 	}
 	for i, m := range candidates {
 		docs[i] = m.Text
-		if len(qVec) > 0 && len(m.Embedding) > 0 {
+		if len(qVec) > 0 && len(m.Embedding) > 0 && m.EmbeddingModel == modelIdentity {
 			vecScores[i] = CosineSimilarity(qVec, m.Embedding)
 		}
 	}
