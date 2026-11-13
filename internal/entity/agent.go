@@ -610,6 +610,7 @@ func (a *SuperAgent) transmitTextFallbackWithContinuationContext(ctx, continuati
 	fallback.FallbackText = ""
 	fallback.CardData = nil
 	fallback.Images = nil
+	fallback.InlineImages = false
 	chunks := core.SplitMarkdownChunks(text, 1100)
 	if len(chunks) <= 5 {
 		fallback.Text = text
@@ -1221,6 +1222,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 						utterance.FallbackText = replyContent
 						utterance.Text = ""
 						utterance.Images = images
+						utterance.InlineImages = true
 						slog.Info("superagent: 长回复已分页渲染为图片", "platform", event.Platform, "channel", event.ChannelID, "pages", len(images), "textBytes", len(replyContent))
 					}
 				}

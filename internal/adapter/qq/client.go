@@ -3,12 +3,17 @@ package qq
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -255,6 +260,86 @@ func (c *Client) UploadMedia(ctx context.Context, targetType, targetID string, f
 	return res.FileInfo, nil
 }
 
+// UploadMarkdownImage uploads PNG data to QQ's material library and returns
+// the platform-scoped Markdown reference and material ID for later cleanup.
+func (c *Client) UploadMarkdownImage(ctx context.Context, data []byte) (string, string, error) {
+	const maxMarkdownImageBytes = 10_000_000
+	if len(data) == 0 || len(data) > maxMarkdownImageBytes {
+		return "", "", fmt.Errorf("markdown image size must be between 1 and %d bytes", maxMarkdownImageBytes)
+	}
+	if !bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n")) {
+		return "", "", fmt.Errorf("markdown image must be PNG")
+	}
+	md5Sum := md5.Sum(data)
+	sha1Sum := sha1.Sum(data)
+	sha256Sum := sha256.Sum256(data)
+	fileName := "reply-" + hex.EncodeToString(sha256Sum[:8]) + ".png"
+	prepared, err := c.doPostJSON(ctx, apiBaseURL+"/v2/media-images/prepare", map[string]any{
+		"file_name": fileName, "file_size": len(data), "content_type": "image/png",
+		"md5": hex.EncodeToString(md5Sum[:]), "sha1": hex.EncodeToString(sha1Sum[:]),
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("prepare QQ Markdown image upload: %w", err)
+	}
+	var upload struct {
+		UploadID     string `json:"upload_id"`
+		PresignedURL string `json:"presigned_url"`
+	}
+	if err := json.Unmarshal(prepared, &upload); err != nil {
+		return "", "", fmt.Errorf("parse QQ Markdown image upload: %w", err)
+	}
+	if upload.UploadID == "" || upload.PresignedURL == "" {
+		return "", "", fmt.Errorf("QQ Markdown image upload response is missing upload_id or presigned_url")
+	}
+	putReq, err := http.NewRequestWithContext(ctx, http.MethodPut, upload.PresignedURL, bytes.NewReader(data))
+	if err != nil {
+		return "", "", err
+	}
+	putReq.Header.Set("Content-Type", "image/png")
+	putResp, err := c.httpClient.Do(putReq)
+	if err != nil {
+		return "", "", fmt.Errorf("upload QQ Markdown image bytes: %w", err)
+	}
+	_, readErr := readBoundedAPIResponse(putResp.Body)
+	_ = putResp.Body.Close()
+	if readErr != nil {
+		return "", "", readErr
+	}
+	if putResp.StatusCode < 200 || putResp.StatusCode >= 300 {
+		return "", "", fmt.Errorf("QQ Markdown image storage returned status %d", putResp.StatusCode)
+	}
+	etag := strings.Trim(putResp.Header.Get("ETag"), "\" ")
+	if etag == "" {
+		return "", "", fmt.Errorf("QQ Markdown image storage response did not include ETag")
+	}
+	completed, err := c.doPostJSON(ctx, apiBaseURL+"/v2/media-images/complete", map[string]string{
+		"upload_id": upload.UploadID, "md5": etag,
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("complete QQ Markdown image upload: %w", err)
+	}
+	var material struct {
+		ImageID string `json:"image_id"`
+		URL     string `json:"url"`
+	}
+	if err := json.Unmarshal(completed, &material); err != nil {
+		return "", "", fmt.Errorf("parse completed QQ Markdown image: %w", err)
+	}
+	if material.ImageID == "" || !strings.HasPrefix(material.URL, "qqbot-media://image/v1/") {
+		return "", "", fmt.Errorf("QQ returned an invalid Markdown image material")
+	}
+	return material.ImageID, material.URL, nil
+}
+
+// DeleteMarkdownImage releases a temporary material after its message is sent.
+func (c *Client) DeleteMarkdownImage(ctx context.Context, imageID string) error {
+	if imageID == "" {
+		return nil
+	}
+	_, err := c.doJSON(ctx, http.MethodDelete, apiBaseURL+"/v2/media-images/"+url.PathEscape(imageID)+"/delete", nil)
+	return err
+}
+
 // SendGroupMessage 发送 QQ 群聊 Markdown 消息。
 func (c *Client) SendGroupMessage(ctx context.Context, groupOpenID string, content string, msgID string) error {
 	return c.sendMessage(ctx, "groups", groupOpenID, content, msgID)
@@ -328,18 +413,35 @@ func (c *Client) sendMediaMessage(ctx context.Context, targetType, targetID, con
 }
 
 func (c *Client) doPostJSON(ctx context.Context, url string, data any) ([]byte, error) {
-	body, err := json.Marshal(data)
-	if err != nil {
-		return nil, err
+	return c.doJSON(ctx, http.MethodPost, url, data)
+}
+
+func (c *Client) doJSON(ctx context.Context, method, url string, data any) ([]byte, error) {
+	var body []byte
+	var err error
+	if data != nil {
+		body, err = json.Marshal(data)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	newRequest := func(token string) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		if data != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req.Header.Set("Authorization", "QQBot "+token)
+		return req, nil
+	}
+	usedToken := c.Token()
+	req, err := newRequest(usedToken)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	usedToken := c.Token()
-	req.Header.Set("Authorization", "QQBot "+usedToken)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -355,12 +457,10 @@ func (c *Client) doPostJSON(ctx context.Context, url string, data any) ([]byte, 
 	if resp.StatusCode == http.StatusUnauthorized {
 		slog.Warn("qq api 返回 401 未授权，尝试即时刷新 token 并重发请求...", "url", url)
 		if refErr := c.refreshTokenForRejectedToken(ctx, usedToken); refErr == nil {
-			retryReq, rErr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+			retryReq, rErr := newRequest(c.Token())
 			if rErr != nil {
 				return nil, rErr
 			}
-			retryReq.Header.Set("Content-Type", "application/json")
-			retryReq.Header.Set("Authorization", "QQBot "+c.Token())
 			retryResp, doErr := c.httpClient.Do(retryReq)
 			if doErr != nil {
 				return nil, doErr

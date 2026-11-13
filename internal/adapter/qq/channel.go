@@ -1278,6 +1278,9 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) error {
 			replyWindow = 5 * time.Minute
 		}
 	}
+	if u.InlineImages {
+		return q.transmitInlineImages(ctx, u, images, content, partLimit, replyWindow)
+	}
 
 	chunks := core.SplitMarkdownChunks(content, 1200)
 	if len(chunks) == 0 {
@@ -1459,6 +1462,75 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) error {
 	}
 
 	slog.Info("qq_channel: 表达成功送达客户端", "channelID", u.ChannelID, "isGroup", u.IsGroup, "hasMedia", u.HasMedia())
+	return nil
+}
+
+func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utterance, images [][]byte, content string, partLimit int, replyWindow time.Duration) error {
+	if len(images) == 0 {
+		return fmt.Errorf("inline image message has no images")
+	}
+	if len(images) > 4 {
+		return fmt.Errorf("inline image message exceeds the four-page limit")
+	}
+	var markdown strings.Builder
+	imageIDs := make([]string, 0, len(images))
+	cleanup := func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		for _, imageID := range imageIDs {
+			if err := q.client.DeleteMarkdownImage(cleanupCtx, imageID); err != nil {
+				slog.Warn("qq_channel: failed to release temporary Markdown image material", "imageID", imageID, "err", err)
+			}
+		}
+	}
+	for i, image := range images {
+		imageID, imageURL, err := q.client.UploadMarkdownImage(ctx, image)
+		if err != nil {
+			cleanup()
+			return fmt.Errorf("upload inline image %d: %w", i+1, err)
+		}
+		imageIDs = append(imageIDs, imageID)
+		if markdown.Len() > 0 {
+			markdown.WriteString("\n\n")
+		}
+		fmt.Fprintf(&markdown, "![第 %d 页](%s)", i+1, imageURL)
+	}
+	if strings.TrimSpace(content) != "" {
+		markdown.WriteString("\n\n")
+		markdown.WriteString(content)
+	}
+	if markdown.Len() > 4000 {
+		cleanup()
+		return fmt.Errorf("inline Markdown message exceeds QQ's 4000-character limit")
+	}
+	budget, reservedCount, limitedByBudget, err := q.reservePassiveReplyBudget(u.QuoteMsgID, 1, partLimit, replyWindow)
+	if err != nil {
+		cleanup()
+		return err
+	}
+	defer func() { q.releasePassiveReplyReservations(budget, reservedCount) }()
+	if limitedByBudget && reservedCount < 1 {
+		cleanup()
+		return fmt.Errorf("QQ 被动回复额度已用完")
+	}
+	if err := ctx.Err(); err != nil {
+		cleanup()
+		return err
+	}
+	if budget != nil {
+		q.commitPassiveReplyAttempt(budget)
+		reservedCount--
+	}
+	if u.IsGroup {
+		err = q.client.SendGroupMessage(ctx, u.ChannelID, markdown.String(), u.QuoteMsgID)
+	} else {
+		err = q.client.SendC2CMessage(ctx, u.ChannelID, markdown.String(), u.QuoteMsgID)
+	}
+	cleanup()
+	if err != nil {
+		return fmt.Errorf("send QQ Markdown message with inline images: %w", err)
+	}
+	slog.Info("qq_channel: 多页卡片已在单条 Markdown 消息中发送", "channelID", u.ChannelID, "pages", len(images))
 	return nil
 }
 
