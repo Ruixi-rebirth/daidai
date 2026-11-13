@@ -573,7 +573,7 @@ func runOCIScheduler(ctx context.Context, ociCfg config.OCIConfig, recipient str
 					message := report.Markdown
 					dailyReportDeferred := false
 					if len(card) > 0 {
-						message = "【OCI 每日账单】日报与资源巡检报告见随消息发送的长图。"
+						message = "📊 OCI 每日账单与资源巡检"
 					} else if len(core.SplitMarkdownChunks(message, 1200)) > 5 {
 						queueCtx, queueCancel := context.WithTimeout(context.Background(), 5*time.Second)
 						_, queueErr := db.DefaultManager().EnqueuePendingNotification(queueCtx, "qq", recipient,
