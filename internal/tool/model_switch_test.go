@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"daidai/internal/entity"
 	"daidai/internal/provider/llm"
 )
 
@@ -20,8 +21,9 @@ func TestModelSwitchTool_Flow(t *testing.T) {
 		Model:   "deepseek-chat",
 	})
 	agy := llm.NewAGYMindProvider(llm.AGYMindConfig{
-		Model:  "gemini-3.8-flash",
-		Effort: "medium",
+		Command: "mock-agy-cmd",
+		Model:   "gemini-3.8-flash",
+		Effort:  "medium",
 	})
 	router := llm.NewMindRouter(llm.MindRouterConfig{
 		StatePath:       statePath,
@@ -43,10 +45,15 @@ func TestModelSwitchTool_Flow(t *testing.T) {
 		),
 	})
 
-	switchTool := NewModelSwitchTool(router, nil)
+	immune := entity.NewImmuneSystem("10001")
+	switchTool := NewModelSwitchTool(router, immune)
+	partnerCtx := entity.WithSensoryEvent(context.Background(), &entity.SensoryEvent{
+		SenderID: "10001",
+		Role:     entity.RolePartner,
+	})
 
 	// 1. 查询当前心智
-	currRes, err := switchTool.Execute(context.Background(), json.RawMessage(`{"action":"current"}`))
+	currRes, err := switchTool.Execute(partnerCtx, json.RawMessage(`{"action":"current"}`))
 	if err != nil {
 		t.Fatalf("failed to query current: %v", err)
 	}
@@ -55,7 +62,7 @@ func TestModelSwitchTool_Flow(t *testing.T) {
 	}
 
 	// 2. 列出模型池
-	listRes, err := switchTool.Execute(context.Background(), json.RawMessage(`{"action":"list"}`))
+	listRes, err := switchTool.Execute(partnerCtx, json.RawMessage(`{"action":"list"}`))
 	if err != nil {
 		t.Fatalf("failed to list models: %v", err)
 	}
@@ -64,7 +71,7 @@ func TestModelSwitchTool_Flow(t *testing.T) {
 	}
 
 	// 3. 歧义查询 claude
-	ambRes, err := switchTool.Execute(context.Background(), json.RawMessage(`{"action":"switch","model":"claude"}`))
+	ambRes, err := switchTool.Execute(partnerCtx, json.RawMessage(`{"action":"switch","model":"claude"}`))
 	if err != nil {
 		t.Fatalf("failed to handle ambiguity: %v", err)
 	}
@@ -73,7 +80,7 @@ func TestModelSwitchTool_Flow(t *testing.T) {
 	}
 
 	// 4. 精确切换至 AGY claude-sonnet-5-5 思考强度 medium
-	okRes, err := switchTool.Execute(context.Background(), json.RawMessage(`{"action":"switch","model":"claude-sonnet","effort":"medium"}`))
+	okRes, err := switchTool.Execute(partnerCtx, json.RawMessage(`{"action":"switch","model":"claude-sonnet","effort":"medium"}`))
 	if err != nil {
 		t.Fatalf("failed to switch: %v", err)
 	}

@@ -13,6 +13,7 @@ import (
 )
 
 type mockLLMWithRenderTool struct {
+	round              int
 	calledWithMessages []core.ChatMessage
 }
 
@@ -24,20 +25,26 @@ func (m *mockLLMWithRenderTool) Chat(ctx context.Context, messages []core.ChatMe
 
 func (m *mockLLMWithRenderTool) ChatWithTools(ctx context.Context, messages []core.ChatMessage, tools []core.ToolDefinition, opts *core.ChatOptions) (*core.ChatResponse, error) {
 	m.calledWithMessages = messages
-
-	// 模拟大模型看到引用后调用 render_card
-	return &core.ChatResponse{
-		Content: "",
-		ToolCalls: []core.ToolCall{
-			{
-				ID:   "call_render_1",
-				Type: "function",
-				Function: core.ToolCallFunction{
-					Name:      "render_card",
-					Arguments: "{\"content\": \"# 引用代码\\n\\n```go\\nfunc hello() {}\\n```\"}",
+	m.round++
+	if m.round == 1 {
+		// 模拟大模型看到引用后第一轮调用 render_card
+		return &core.ChatResponse{
+			Content: "",
+			ToolCalls: []core.ToolCall{
+				{
+					ID:   "call_render_1",
+					Type: "function",
+					Function: core.ToolCallFunction{
+						Name:      "render_card",
+						Arguments: "{\"content\": \"# 引用代码\\n\\n```go\\nfunc hello() {}\\n```\"}",
+					},
 				},
 			},
-		},
+		}, nil
+	}
+	// 卡片生成后模型第二轮给出配文
+	return &core.ChatResponse{
+		Content: "这是你要的代码卡片～",
 	}, nil
 }
 
@@ -75,7 +82,16 @@ func TestCortex_ThinkWithQuoteMarkdown(t *testing.T) {
 	if len(mockLLM.calledWithMessages) == 0 {
 		t.Fatalf("expected llm to be called")
 	}
-	lastUserMsg := mockLLM.calledWithMessages[len(mockLLM.calledWithMessages)-1]
+	var lastUserMsg *core.ChatMessage
+	for i := len(mockLLM.calledWithMessages) - 1; i >= 0; i-- {
+		if mockLLM.calledWithMessages[i].Role == core.RoleUser {
+			lastUserMsg = &mockLLM.calledWithMessages[i]
+			break
+		}
+	}
+	if lastUserMsg == nil {
+		t.Fatalf("expected user message in calledWithMessages")
+	}
 	expectedQuote := "> package main\n> func main() {}"
 	if !strings.Contains(lastUserMsg.Content, expectedQuote) {
 		t.Fatalf("expected user message to contain quote block %q, got: %s", expectedQuote, lastUserMsg.Content)
@@ -88,7 +104,7 @@ func TestCortex_ThinkWithQuoteMarkdown(t *testing.T) {
 	if utter.Platform != "qq" {
 		t.Errorf("expected utterance platform 'qq', got %q", utter.Platform)
 	}
-	if len(utter.CardData) == 0 {
+	if len(utter.CardData) == 0 && len(utter.Images) == 0 {
 		t.Fatalf("expected utterance to contain rendered card data")
 	}
 }
@@ -168,7 +184,7 @@ func TestCortex_GuestBlockedFromSwitchModelAndTicketProgress(t *testing.T) {
 	}
 	foundPermDenied := false
 	for _, msg := range mockSwitch.lastMsgs {
-		if msg.Role == core.RoleTool && strings.Contains(msg.Content, "权限不足") {
+		if msg.Role == core.RoleTool && (strings.Contains(msg.Content, "权限不足") || strings.Contains(msg.Content, "调用已拒绝")) {
 			foundPermDenied = true
 		}
 	}

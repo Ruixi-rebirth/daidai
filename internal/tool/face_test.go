@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -31,8 +32,12 @@ func TestFaceTool_HitCache(t *testing.T) {
 		t.Fatalf("execute failed: %v", err)
 	}
 
-	if string(res.ImageData) != string(dummyBytes) {
-		t.Errorf("expected image data to match dummy bytes, got %s", string(res.ImageData))
+	expectedBytes, _, err := normalizeImageData(context.Background(), dummyBytes)
+	if err != nil {
+		t.Fatalf("normalizeImageData failed: %v", err)
+	}
+	if !bytes.Equal(res.ImageData, expectedBytes) {
+		t.Errorf("expected image data to match normalized bytes (got %d bytes, want %d bytes)", len(res.ImageData), len(expectedBytes))
 	}
 	if res.Text != "已发送呆呆的【开心】图片" {
 		t.Errorf("unexpected text: %s", res.Text)

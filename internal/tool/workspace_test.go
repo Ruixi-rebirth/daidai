@@ -92,22 +92,22 @@ func TestWorkspaceTool_CurrentListAndSwitch(t *testing.T) {
 		t.Errorf("expected project-1 to be removed from list, got: %s", resListAfter.Text)
 	}
 
-	// 6. 测试退出工程回到沙盒
+	// 6. 测试退出工程回到默认工作区
 	resExit, err := wsTool.Execute(partnerCtx, json.RawMessage(`{"action":"exit"}`))
 	if err != nil {
 		t.Fatalf("execute exit failed: %v", err)
 	}
-	if !strings.Contains(resExit.Text, "沙盒演练态") {
+	if !strings.Contains(resExit.Text, "已退出生产工程") || !strings.Contains(resExit.Text, "已切回默认工作区") {
 		t.Errorf("expected exit to return to sandbox, got: %s", resExit.Text)
 	}
 
-	// 7. 测试清空沙盒
+	// 7. 测试清理默认工作区
 	_ = os.WriteFile(filepath.Join(sandbox, "scratch.txt"), []byte("temp"), 0644)
 	resClean, err := wsTool.Execute(partnerCtx, json.RawMessage(`{"action":"clean"}`))
 	if err != nil {
 		t.Fatalf("execute clean failed: %v", err)
 	}
-	if !strings.Contains(resClean.Text, "已清空") {
+	if !strings.Contains(resClean.Text, "已清理") {
 		t.Errorf("expected clean to succeed, got: %s", resClean.Text)
 	}
 	if _, err := os.Stat(filepath.Join(sandbox, "scratch.txt")); !os.IsNotExist(err) {
