@@ -239,7 +239,7 @@ func (t *ModelSwitchTool) handleList(ctx context.Context, channelFilter string) 
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString("说明：可通过 switch_model(model=\"...\", effort=\"...\") 无缝热切换心智或调整思考强度。")
+	sb.WriteString("想切换模型，直接说“切换到 <模型名称>”；想调整推理深度，直接说“把思考强度调到 high”。我会根据上面的可用模型和各模型支持的强度执行。")
 
 	return &core.ToolResult{
 		Text: strings.TrimSpace(sb.String()),
