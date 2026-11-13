@@ -487,7 +487,7 @@ func (m *MemoryEngine) Commit(ctx context.Context, event *entity.SensoryEvent, r
 
 	if replyText != "" {
 		var err error
-		botMsgID, err = dbMgr.LogMessage(ctx, event.Platform, chatType, event.ChannelID, "daidai", "呆呆", replyText, true, event.SenderID, "")
+		botMsgID, err = dbMgr.LogBotReply(ctx, event.Platform, chatType, event.ChannelID, replyText, event.SenderID, userMsgID)
 		if err != nil {
 			slog.Warn("memory: 保存机器人回复失败", "platform", event.Platform, "channel", event.ChannelID, "err", err)
 		}

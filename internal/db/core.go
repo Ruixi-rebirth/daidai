@@ -54,12 +54,14 @@ CREATE TABLE IF NOT EXISTS messages (
     is_bot       INTEGER NOT NULL DEFAULT 0 CHECK (is_bot IN (0, 1)),
     created_at   INTEGER NOT NULL,                -- 毫秒级时间戳
     reply_to_uid TEXT NOT NULL DEFAULT '',
+    reply_to_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
     platform_msg_id TEXT NOT NULL DEFAULT '',
     embedding    BLOB                             -- 可选稠密语义向量 (float32 小端字节序)
 );
 CREATE INDEX IF NOT EXISTS idx_messages_lookup ON messages(platform, chat_type, conv_id, id);
 CREATE INDEX IF NOT EXISTS idx_messages_time ON messages(platform, chat_type, conv_id, created_at, id);
 CREATE INDEX IF NOT EXISTS idx_messages_reset ON messages(conv_id, id);
+CREATE INDEX IF NOT EXISTS idx_messages_reply_to_message ON messages(reply_to_message_id) WHERE reply_to_message_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_inbound_event ON messages(platform, chat_type, conv_id, platform_msg_id)
     WHERE is_bot = 0 AND platform_msg_id <> '';
 CREATE INDEX IF NOT EXISTS idx_messages_reply_lookup ON messages(platform, chat_type, conv_id, user_id, is_bot, id DESC);
@@ -521,6 +523,15 @@ func (m *Manager) Close() error {
 
 // LogMessage 写入纯净原始消息 (零前缀)
 func (m *Manager) LogMessage(ctx context.Context, platform, chatType, convID, userID, name, text string, isBot bool, replyToUID, platformMsgID string) (int64, error) {
+	return m.logMessage(ctx, platform, chatType, convID, userID, name, text, isBot, replyToUID, platformMsgID, 0)
+}
+
+// LogBotReply records which exact inbound message a delivered bot reply answers.
+func (m *Manager) LogBotReply(ctx context.Context, platform, chatType, convID, text, replyToUID string, replyToMessageID int64) (int64, error) {
+	return m.logMessage(ctx, platform, chatType, convID, "daidai", "呆呆", text, true, replyToUID, "", replyToMessageID)
+}
+
+func (m *Manager) logMessage(ctx context.Context, platform, chatType, convID, userID, name, text string, isBot bool, replyToUID, platformMsgID string, replyToMessageID int64) (int64, error) {
 	text = core.TruncateRunes(text, core.MaxUserMessageRunes, "…[消息已截断]")
 	p := NormPlatform(platform)
 	db, err := m.GetConn(p)
@@ -535,13 +546,20 @@ func (m *Manager) LogMessage(ctx context.Context, platform, chatType, convID, us
 
 	nowMs := time.Now().UnixMilli()
 	res, err := db.ExecContext(ctx,
-		"INSERT INTO messages (platform, chat_type, conv_id, user_id, name, text, is_bot, created_at, reply_to_uid, platform_msg_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		p, chatType, convID, userID, name, text, botVal, nowMs, replyToUID, platformMsgID,
+		"INSERT INTO messages (platform, chat_type, conv_id, user_id, name, text, is_bot, created_at, reply_to_uid, reply_to_message_id, platform_msg_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		p, chatType, convID, userID, name, text, botVal, nowMs, replyToUID, nullableMessageID(replyToMessageID), platformMsgID,
 	)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+func nullableMessageID(id int64) any {
+	if id <= 0 {
+		return nil
+	}
+	return id
 }
 
 // LogInboundMessage records one raw user event once, keyed by its platform
