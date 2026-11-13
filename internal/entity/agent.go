@@ -1206,6 +1206,9 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			if thinkCtx.Err() != nil {
 				return
 			}
+			if event.Platform == "qq" && event.IsGroup && !event.GroupInterjection && len(utterance.MentionUserIDs) == 0 && event.SenderID != "" {
+				utterance.MentionUserIDs = []string{event.SenderID}
+			}
 			if event.Platform == "qq" && !event.GroupInterjection && !requestsTextOnly(event.Content) && !utterance.HasMedia() && strings.TrimSpace(utterance.Text) != "" {
 				type automaticCardRenderer interface {
 					ShouldAutoRenderReply(string) bool

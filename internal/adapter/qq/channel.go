@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"image/png"
 	"log/slog"
 	"mime"
@@ -1335,22 +1336,11 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) error {
 			q.commitPassiveReplyAttempt(budget)
 			reservedCount--
 		}
-		if u.GroupInterjection && sentParts == 0 && u.IsGroup && len(u.MentionUserIDs) > 0 && len(part.image) == 0 {
-			var at strings.Builder
-			for _, memberID := range u.MentionUserIDs {
-				if memberID == "" {
-					continue
-				}
-				escapedID := strings.NewReplacer("&", "&amp;", `"`, "&quot;", "<", "&lt;", ">", "&gt;").Replace(memberID)
-				fmt.Fprintf(&at, `<qqbot-at-user id="%s" /> `, escapedID)
-			}
-			if at.Len() > 0 {
-				part.text = at.String() + part.text
+		if sentParts == 0 && u.IsGroup && len(u.MentionUserIDs) > 0 && len(part.image) == 0 {
+			if at := qqMentionMarkup(u.MentionUserIDs); at != "" {
+				part.text = at + part.text
 				if len([]rune(part.text)) > 1200 {
-					return fmt.Errorf("群聊插话的 @ 提及标记超过 QQ 单条消息长度限制")
-				}
-				if len(part.image) > 0 {
-					return fmt.Errorf("群聊插话不能同时在图片消息中添加 @ 提及")
+					return fmt.Errorf("群聊回复的 @ 提及标记超过 QQ 单条消息长度限制")
 				}
 				return q.client.SendGroupMessage(ctx, u.ChannelID, part.text, u.QuoteMsgID)
 			}
@@ -1475,6 +1465,12 @@ func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utteranc
 		return fmt.Errorf("inline image message exceeds the four-page limit")
 	}
 	var markdown strings.Builder
+	if u.IsGroup {
+		if at := qqMentionMarkup(u.MentionUserIDs); at != "" {
+			markdown.WriteString(at)
+			markdown.WriteString("\n\n")
+		}
+	}
 	imageIDs := make([]string, 0, len(images))
 	cleanup := func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -1538,6 +1534,17 @@ func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utteranc
 	}
 	slog.Info("qq_channel: 单条 Markdown 卡片消息已接受，保留素材供 QQ 客户端加载", "channelID", u.ChannelID, "pages", len(images))
 	return nil
+}
+
+func qqMentionMarkup(userIDs []string) string {
+	var at strings.Builder
+	for _, userID := range userIDs {
+		if strings.TrimSpace(userID) == "" {
+			continue
+		}
+		fmt.Fprintf(&at, `<qqbot-at-user id="%s" /> `, html.EscapeString(userID))
+	}
+	return at.String()
 }
 
 func (q *QQChannel) Stop(ctx context.Context) error {
