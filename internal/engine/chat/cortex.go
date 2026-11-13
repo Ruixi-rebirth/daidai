@@ -166,7 +166,7 @@ func (c *Cortex) RenderCardPages(ctx context.Context, event *entity.SensoryEvent
 	for index, chunk := range chunks {
 		pageContent := chunk
 		if len(chunks) > 1 {
-			pageContent = fmt.Sprintf("### %d / %d\n\n%s", index+1, len(chunks), chunk)
+			pageContent = fmt.Sprintf("### [%d / %d]\n\n%s", index+1, len(chunks), chunk)
 		}
 		image, err := c.RenderCard(ctx, event, pageContent)
 		if err != nil {
