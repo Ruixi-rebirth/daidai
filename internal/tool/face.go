@@ -129,9 +129,9 @@ func (t *FaceTool) readCachedFace(ctx context.Context, emotion string) ([]byte, 
 	return nil, false
 }
 
-func (t *FaceTool) referenceFacePath(ctx context.Context) (string, func(), error) {
+func (t *FaceTool) referenceFacePath(ctx context.Context, dir string) (string, func(), error) {
 	if data, ok := t.readCachedFace(ctx, "正脸"); ok {
-		return t.writeReferenceImage(data)
+		return t.writeReferenceImage(data, dir)
 	}
 
 	data, err := assets.SmallFaces.ReadFile(filepath.Join("daidai_faces_small", "开心.png"))
@@ -142,11 +142,11 @@ func (t *FaceTool) referenceFacePath(ctx context.Context) (string, func(), error
 	if err != nil {
 		return "", nil, fmt.Errorf("解码内置表情参考图失败: %w", err)
 	}
-	return t.writeReferenceImage(normalized)
+	return t.writeReferenceImage(normalized, dir)
 }
 
-func (t *FaceTool) writeReferenceImage(data []byte) (string, func(), error) {
-	tmpFile, err := os.CreateTemp(t.baseDir, ".face-reference-*.png")
+func (t *FaceTool) writeReferenceImage(data []byte, dir string) (string, func(), error) {
+	tmpFile, err := os.CreateTemp(dir, "face-reference-*.png")
 	if err != nil {
 		return "", nil, fmt.Errorf("创建临时参考图失败: %w", err)
 	}
@@ -233,48 +233,46 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 	if err := os.MkdirAll(t.baseDir, 0755); err != nil {
 		return &core.ToolResult{Text: fmt.Sprintf("创建形象缓存目录失败：%v", err)}, nil
 	}
-	tmpFile, err := os.CreateTemp(t.baseDir, ".face-gen-*.png")
+	workDir, err := os.MkdirTemp(t.baseDir, "face-gen-")
 	if err != nil {
-		return &core.ToolResult{Text: fmt.Sprintf("创建形象临时文件失败：%v", err)}, nil
+		return &core.ToolResult{Text: fmt.Sprintf("创建形象临时工作区失败：%v", err)}, nil
 	}
-	tmpPath := tmpFile.Name()
-	if err := tmpFile.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return &core.ToolResult{Text: fmt.Sprintf("关闭形象临时文件失败：%v", err)}, nil
+	defer func() { _ = os.RemoveAll(workDir) }()
+	if err := os.Chmod(workDir, 0700); err != nil {
+		return &core.ToolResult{Text: fmt.Sprintf("保护形象临时工作区失败：%v", err)}, nil
 	}
-	defer func() { _ = os.Remove(tmpPath) }()
-	// Keep the randomized path but remove the empty placeholder so a failed
-	// generator is reported as a missing output file, not as an empty image.
-	if err := os.Remove(tmpPath); err != nil {
-		return &core.ToolResult{Text: fmt.Sprintf("准备形象输出路径失败：%v", err)}, nil
-	}
-	absTmpPath, absErr := filepath.Abs(tmpPath)
-	if absErr != nil {
-		absTmpPath = tmpPath
+	tmpPath := filepath.Join(workDir, "daidai.png")
+	absTmpPath, err := filepath.Abs(tmpPath)
+	if err != nil {
+		return &core.ToolResult{Text: fmt.Sprintf("解析形象输出路径失败：%v", err)}, nil
 	}
 
-	refPath, cleanupRef, err := t.referenceFacePath(ctx)
+	refPath, cleanupRef, err := t.referenceFacePath(ctx, workDir)
 	if err != nil {
 		return &core.ToolResult{Text: fmt.Sprintf("准备形象参考图失败：%v", err)}, nil
 	}
 	defer cleanupRef()
-	goal := fmt.Sprintf("请调用 image-generator 子智能体生成一张呆呆本人的二次元插画照片（主题/角度/神态：%s），请让 image-generator 先读取参考基准图 %s 以严格保持同一人物的五官、发色（黑茶色微卷中长发）、白色小兔发夹、蓝灰眼眸与画风一致。最终文件必须是实际 PNG 格式（不是仅修改扩展名）；生成完成后，将图片复制到临时输出路径：%s。", emotion, refPath, absTmpPath)
+	goal := fmt.Sprintf("请调用 image-generator 子智能体生成一张呆呆本人的二次元插画照片（主题/角度/神态：%s），请先读取参考基准图 %s 以保持同一人物的五官、发色（黑茶色微卷中长发）、白色小兔发夹、蓝灰眼眸与画风一致。将最终图片保存到指定路径 %s；必须确认该文件实际存在且非空后才能结束任务，文件内容必须是实际 PNG 格式（不能只修改扩展名）。", emotion, refPath, absTmpPath)
 
 	slog.Info("face_tool: 触发无状态后台动态生成呆呆新图片", "emotion", emotion)
-	if _, execErr := runStatelessImageGen(ctx, t.command, goal, filepath.Dir(absTmpPath)); execErr != nil {
+	output, execErr := runStatelessImageGen(ctx, t.command, goal, workDir)
+	if execErr != nil {
 		slog.Warn("face_tool: 动态生成图片失败", "emotion", emotion, "err", execErr)
 		return &core.ToolResult{
 			Text: fmt.Sprintf("动态生成【%s】图片失败：%v", emotion, execErr),
 		}, nil
 	}
 
-	data, err := readFileLimited(tmpPath, maxGeneratedImageBytes)
+	data, generatedPath, err := readGeneratedImage(ctx, tmpPath, workDir, refPath)
 	if err != nil {
-		slog.Warn("face_tool: 生成结果读取失败", "emotion", emotion, "err", err)
+		slog.Warn("face_tool: 生成结果读取失败", "emotion", emotion, "err", err, "outputBytes", len(output))
 		if os.IsNotExist(err) {
-			return &core.ToolResult{Text: fmt.Sprintf("已尝试生成【%s】图片，但生成器没有写出图片文件。", emotion)}, nil
+			return &core.ToolResult{Text: fmt.Sprintf("生成任务已结束，但没有找到【%s】图片文件；未确认失败原因，不要推测为超时或上游服务故障。", emotion)}, nil
 		}
 		return &core.ToolResult{Text: fmt.Sprintf("已生成【%s】图片，但读取失败；请检查服务日志。", emotion)}, nil
+	}
+	if generatedPath != tmpPath {
+		slog.Info("face_tool: 从生成器实际输出文件中恢复图片", "emotion", emotion, "file", filepath.Base(generatedPath))
 	}
 	if len(data) == 0 {
 		return &core.ToolResult{Text: fmt.Sprintf("已尝试生成【%s】图片，但输出文件为空", emotion)}, nil

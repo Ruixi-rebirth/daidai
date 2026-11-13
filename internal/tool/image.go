@@ -211,7 +211,7 @@ func (t *ImageTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 		return nil, fmt.Errorf("解析图片临时文件路径失败: %w", err)
 	}
 
-	goal := fmt.Sprintf("请调用 image-generator 子智能体生成一张图片，画面要求：%s。最终文件必须是实际 PNG 格式（不是仅修改扩展名）；生成完成后将图片复制到目标路径：%s。", prompt, absOutFile)
+	goal := fmt.Sprintf("请调用 image-generator 子智能体生成一张图片，画面要求：%s。将最终文件保存到目标路径：%s；必须确认该文件实际存在且非空后才能结束任务，文件内容必须是实际 PNG 格式（不能只修改扩展名）。", prompt, absOutFile)
 
 	slog.Info("image_tool: 触发无状态后台生成图片", "promptBytes", len(prompt))
 	output, execErr := runStatelessImageGen(ctx, t.command, goal, workDir)
@@ -222,7 +222,10 @@ func (t *ImageTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 		}, nil
 	}
 
-	if data, err := readFileLimited(absOutFile, maxGeneratedImageBytes); err == nil {
+	if data, generatedPath, err := readGeneratedImage(ctx, absOutFile, workDir); err == nil {
+		if generatedPath != absOutFile {
+			slog.Info("image_tool: 从生成器实际输出文件中恢复图片", "file", filepath.Base(generatedPath))
+		}
 		normalized, format, normalizeErr := normalizeImageData(ctx, data)
 		if normalizeErr != nil {
 			slog.Warn("image_tool: 生成结果无法解码或转换", "contentType", imageContentType(data), "format", format, "bytes", len(data), "err", normalizeErr)
@@ -237,8 +240,8 @@ func (t *ImageTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 		return &core.ToolResult{Text: "图片生成任务已执行，但读取生成结果失败；请检查服务日志。"}, nil
 	}
 
-	slog.Warn("image_tool: 生图任务未在目标位置生成图片", "outputBytes", len(output))
+	slog.Warn("image_tool: 生图任务未在工作区生成图片", "outputBytes", len(output))
 	return &core.ToolResult{
-		Text: "已执行生图任务，但没有找到生成的图片文件。请重试，或调整描述后再生成。",
+		Text: "生成任务已结束，但没有找到图片文件；未确认失败原因，不要推测为超时或上游服务故障。",
 	}, nil
 }

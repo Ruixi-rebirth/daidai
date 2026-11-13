@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"daidai/internal/core"
 	"daidai/internal/media"
@@ -51,4 +53,64 @@ func readFileLimited(path string, maxBytes int64) ([]byte, error) {
 		return nil, fmt.Errorf("file exceeded %d byte limit", maxBytes)
 	}
 	return data, nil
+}
+
+// readGeneratedImage prefers the requested output path, then recovers a raster
+// image the generator may have saved under a different name in its isolated workspace.
+func readGeneratedImage(ctx context.Context, outputPath, workspace string, excludedPaths ...string) ([]byte, string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if data, err := readFileLimited(outputPath, maxGeneratedImageBytes); err == nil {
+		return data, outputPath, nil
+	} else if !os.IsNotExist(err) {
+		return nil, "", err
+	}
+
+	excluded := make(map[string]struct{}, len(excludedPaths)+1)
+	for _, path := range append(excludedPaths, outputPath) {
+		absPath, err := filepath.Abs(path)
+		if err == nil {
+			excluded[absPath] = struct{}{}
+		}
+	}
+
+	var candidates []string
+	err := filepath.WalkDir(workspace, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if path != workspace && strings.Count(strings.TrimPrefix(path, workspace), string(filepath.Separator)) >= 2 {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return nil
+		}
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			return nil
+		}
+		if _, skip := excluded[absPath]; skip {
+			return nil
+		}
+		candidates = append(candidates, path)
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	for _, path := range candidates {
+		data, err := readFileLimited(path, maxGeneratedImageBytes)
+		if err != nil || !strings.HasPrefix(imageContentType(data), "image/") {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
+		return data, path, nil
+	}
+	return nil, "", os.ErrNotExist
 }
