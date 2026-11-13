@@ -183,11 +183,50 @@ func (a *SuperAgent) handleTaskCommand(ctx context.Context, event *SensoryEvent,
 		return
 	}
 	goal := core.TruncateRunes(strings.TrimSpace(ticket.Goal), 300, "…")
-	detail := fmt.Sprintf("【工单 %s · %s · 第 %d/%d 页】\n目标：%s\n更新时间：%s\n\n%s", ticket.ID, ticketStatusLabel(ticket.Status), page, pageCount, goal, ticket.UpdatedAt.Format("2006-01-02 15:04:05"), pages[page-1])
-	if err != nil {
-		detail += "\n\n[警告：此工单最新状态尚未可靠写入 SQLite，当前显示的是进程内快照]"
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "### 🧾 工单详情 · `%s`\n\n", ticket.ID)
+
+	statusBadge := ticketStatusBadge(ticket.Status)
+	durationStr := ""
+	if ticket.Status == TicketPending || ticket.Status == TicketRunning || ticket.Status == TicketStopping {
+		durationStr = fmt.Sprintf("（已运行 %s）", formatTicketDuration(time.Since(ticket.CreatedAt)))
+	} else if ticket.UpdatedAt.After(ticket.CreatedAt) {
+		durationStr = fmt.Sprintf("（总耗时 %s）", formatTicketDuration(ticket.UpdatedAt.Sub(ticket.CreatedAt)))
 	}
-	a.replyText(ctx, event, detail)
+
+	fmt.Fprintf(&sb, "- **当前状态**：%s %s\n", statusBadge, durationStr)
+	fmt.Fprintf(&sb, "- **任务目标**：%s\n", goal)
+	if ticket.Workspace != "" {
+		fmt.Fprintf(&sb, "- **工作空间**：`%s`\n", ticket.Workspace)
+	}
+	if ticket.Worker != "" {
+		fmt.Fprintf(&sb, "- **执行通道**：`%s`\n", ticket.Worker)
+	}
+	timeRange := ticket.CreatedAt.Format("2006-01-02 15:04:05")
+	if ticket.UpdatedAt.After(ticket.CreatedAt) {
+		timeRange += " ~ " + ticket.UpdatedAt.Format("15:04:05")
+	}
+	fmt.Fprintf(&sb, "- **记录时间**：%s\n", timeRange)
+	fmt.Fprintf(&sb, "- **输出分页**：第 %d/%d 页\n\n", page, pageCount)
+
+	fence := "```"
+	if strings.Contains(pages[page-1], "```") {
+		fence = "````"
+	}
+	sb.WriteString("#### 💻 执行输出\n")
+	sb.WriteString(fence + "bash\n")
+	sb.WriteString(pages[page-1])
+	sb.WriteString("\n" + fence + "\n")
+
+	if page < pageCount {
+		fmt.Fprintf(&sb, "\n---\n💡 发送 `/task %s %d` 可查看下一页输出\n", ticket.ID, page+1)
+	}
+	if err != nil {
+		sb.WriteString("\n> ⚠️ 注意：此工单最新状态尚未可靠写入 SQLite，当前显示的是进程内快照。\n")
+	}
+
+	a.replyInfo(ctx, event, fmt.Sprintf("🧾 工单详情 · %s", ticket.ID), strings.TrimSpace(sb.String()))
 }
 
 func (a *SuperAgent) handleTasksCommand(ctx context.Context, event *SensoryEvent, _ string) {
@@ -211,16 +250,66 @@ func (a *SuperAgent) handleTasksCommand(ctx context.Context, event *SensoryEvent
 		a.replyText(ctx, event, "当前会话没有你的近期工单。")
 		return
 	}
-	lines := make([]string, 0, len(tickets))
+
+	var activeTickets []*Ticket
+	var historyTickets []*Ticket
 	for _, ticket := range tickets {
-		goal := core.TruncateRunes(strings.TrimSpace(ticket.Goal), 100, "…")
-		lines = append(lines, fmt.Sprintf("- %s [%s] %s：%s", ticket.ID, ticketStatusLabel(ticket.Status), ticket.UpdatedAt.Format("2006-01-02 15:04"), goal))
+		switch ticket.Status {
+		case TicketPending, TicketRunning, TicketStopping:
+			activeTickets = append(activeTickets, ticket)
+		default:
+			historyTickets = append(historyTickets, ticket)
+		}
 	}
-	reply := "【当前会话的近期工单】\n" + strings.Join(lines, "\n")
+
+	var sb strings.Builder
+	sb.WriteString("### 📋 近期工程工单\n\n")
+	sb.WriteString("> 统计范围：当前会话最近发起的 10 条工单\n\n")
+
+	if len(activeTickets) > 0 {
+		fmt.Fprintf(&sb, "#### ⚡ 活跃工单 (%d)\n", len(activeTickets))
+		for _, ticket := range activeTickets {
+			goal := core.TruncateRunes(strings.TrimSpace(ticket.Goal), 120, "…")
+			durationStr := formatTicketDuration(time.Since(ticket.CreatedAt))
+			badge := ticketStatusBadge(ticket.Status)
+			fmt.Fprintf(&sb, "- %s `%s` ·（已运行 %s）\n", badge, ticket.ID, durationStr)
+			fmt.Fprintf(&sb, "  - 🎯 **目标**：%s\n", goal)
+			if ticket.Workspace != "" {
+				fmt.Fprintf(&sb, "  - 📁 **工作区**：`%s`\n", ticket.Workspace)
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(historyTickets) > 0 {
+		fmt.Fprintf(&sb, "#### 📜 历史工单 (%d)\n", len(historyTickets))
+		for _, ticket := range historyTickets {
+			goal := core.TruncateRunes(strings.TrimSpace(ticket.Goal), 120, "…")
+			badge := ticketStatusBadge(ticket.Status)
+			timeStr := ticket.UpdatedAt.Format("01-02 15:04")
+			durationPart := ""
+			if ticket.UpdatedAt.After(ticket.CreatedAt) {
+				durationPart = fmt.Sprintf(" · 耗时 %s", formatTicketDuration(ticket.UpdatedAt.Sub(ticket.CreatedAt)))
+			}
+			fmt.Fprintf(&sb, "- %s `%s` · %s%s\n", badge, ticket.ID, timeStr, durationPart)
+			fmt.Fprintf(&sb, "  - 🎯 **目标**：%s\n", goal)
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("---\n")
+	sb.WriteString("💡 **操作提示**：\n")
+	sampleID := tickets[0].ID
+	fmt.Fprintf(&sb, "- 发送 `/task <工单编号>` 查看执行详情与日志（例如 `/task %s`）\n", sampleID)
+	if len(activeTickets) > 0 {
+		fmt.Fprintf(&sb, "- 发送 `/stop <工单编号>` 可中止活跃工单（例如 `/stop %s`）\n", activeTickets[0].ID)
+	}
+
 	if err != nil {
-		reply += "\n\n[警告：SQLite 历史或部分最新状态不可用；以上可能只包含进程内快照]"
+		sb.WriteString("\n> ⚠️ 注意：SQLite 历史或部分最新状态不可用；以上可能只包含进程内快照。\n")
 	}
-	a.replyInfo(ctx, event, "📋 近期工单", reply)
+
+	a.replyInfo(ctx, event, "📋 近期工单", strings.TrimSpace(sb.String()))
 }
 
 func (a *SuperAgent) handleStatusCommand(ctx context.Context, event *SensoryEvent, _ string) {
@@ -616,4 +705,49 @@ func ticketStatusLabel(status TicketStatus) string {
 	default:
 		return string(status)
 	}
+}
+
+func ticketStatusBadge(status TicketStatus) string {
+	switch status {
+	case TicketPending:
+		return "⏳ 排队中"
+	case TicketRunning:
+		return "🟡 执行中"
+	case TicketStopping:
+		return "⏹️ 正在停止"
+	case TicketCompleted:
+		return "🟢 已完成"
+	case TicketFailed:
+		return "🔴 未完成"
+	case TicketAborted:
+		return "⏹️ 已停止"
+	case TicketInterrupted:
+		return "⚠️ 重启时中断"
+	default:
+		return string(status)
+	}
+}
+
+func formatTicketDuration(d time.Duration) string {
+	d = d.Truncate(time.Second)
+	if d <= 0 {
+		return "0s"
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	m := int(d.Minutes())
+	s := int(d.Seconds()) % 60
+	if m < 60 {
+		if s == 0 {
+			return fmt.Sprintf("%dm", m)
+		}
+		return fmt.Sprintf("%dm%ds", m, s)
+	}
+	h := m / 60
+	m = m % 60
+	if m == 0 {
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dh%dm", h, m)
 }
