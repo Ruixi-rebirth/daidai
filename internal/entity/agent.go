@@ -569,6 +569,7 @@ func (a *SuperAgent) transmitUtterance(ctx context.Context, utterance *Utterance
 		return a.transmitTextFallback(ctx, utterance, fallbackText, senderID)
 	} else {
 		if !utterance.HasMedia() {
+			a.setReplyContinuation(ctx, senderID, utterance, utterance.Text)
 			return "", err
 		}
 		slog.Warn("superagent: 图片消息发送失败，回退为文字", "channel", utterance.ChannelID, "err", err)
@@ -589,7 +590,11 @@ func (a *SuperAgent) transmitUtterance(ctx context.Context, utterance *Utterance
 }
 
 func (a *SuperAgent) transmitTextFallback(ctx context.Context, utterance *Utterance, text, senderID string) (string, error) {
-	return a.transmitTextFallbackWithContinuationContext(ctx, ctx, utterance, text, senderID)
+	delivered, err := a.transmitTextFallbackWithContinuationContext(ctx, ctx, utterance, text, senderID)
+	if err != nil {
+		a.setReplyContinuation(ctx, senderID, utterance, text)
+	}
+	return delivered, err
 }
 
 func (a *SuperAgent) transmitTextFallbackWithContinuationContext(ctx, continuationCtx context.Context, utterance *Utterance, text, senderID string) (string, error) {
@@ -631,7 +636,8 @@ func (a *SuperAgent) transmitTextFallbackWithContinuationContext(ctx, continuati
 	if err := a.Channels.Transmit(ctx, &fallback); err != nil {
 		var partialErr *PartialDeliveryError
 		if errors.As(err, &partialErr) {
-			pending := partialErr.UndeliveredText
+			// The pagination hint is transport metadata, not reply content.
+			pending := strings.TrimSuffix(partialErr.UndeliveredText, marker)
 			if remaining != "" {
 				pending = strings.TrimSpace(pending + "\n\n" + remaining)
 			}

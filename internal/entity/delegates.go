@@ -81,6 +81,7 @@ type Delegates struct {
 	queueWake        chan struct{}
 	queueDone        chan struct{}
 	queueCancel      context.CancelFunc
+	queueContext     context.Context
 	queueStarted     bool
 	queueCompletion  queuedTicketCompletion
 	queueOrder       []string
@@ -358,6 +359,7 @@ func (d *Delegates) StartQueue(ctx context.Context, onComplete func(context.Cont
 	queueCtx, cancel := context.WithCancel(ctx)
 	d.queueStarted = true
 	d.queueCancel = cancel
+	d.queueContext = queueCtx
 	d.queueWake = make(chan struct{}, 1)
 	d.queueDone = make(chan struct{})
 	d.queueCallbacks = make(map[string]queuedTicketCleanup)
@@ -404,15 +406,18 @@ func (d *Delegates) StopQueue(ctx context.Context) error {
 // EnqueueTicket makes a persisted pending ticket eligible for background
 // execution. The optional cleanup runs exactly once after it leaves pending.
 func (d *Delegates) EnqueueTicket(ticketID string, cleanup func(*Ticket, string, error)) error {
+	d.queueMu.Lock()
+	// Register under the status lock so cancellation cannot strand a ticket
+	// and its attachment cleanup between validation and enqueue.
 	d.mu.RLock()
 	ticket := d.tickets[ticketID]
 	valid := ticket != nil && ticket.Status == TicketPending
-	d.mu.RUnlock()
+	defer d.mu.RUnlock()
 	if !valid {
+		d.queueMu.Unlock()
 		return fmt.Errorf("工单不存在或已不在待执行状态")
 	}
-	d.queueMu.Lock()
-	if !d.queueStarted {
+	if !d.queueStarted || d.queueContext.Err() != nil {
 		d.queueMu.Unlock()
 		return fmt.Errorf("工单队列尚未启动")
 	}
@@ -561,6 +566,11 @@ func (d *Delegates) cleanupQueuedOnStop(ctx context.Context) {
 	d.queueCallbacks = make(map[string]queuedTicketCleanup)
 	d.queueOrder = nil
 	d.queueMu.Unlock()
+	// StopQueue must also terminate waiting tickets when called on its own.
+	d.abortTickets(func(t *Ticket) bool {
+		_, queued := pending[t.ID]
+		return queued
+	})
 	for id, cleanup := range pending {
 		if cleanup == nil {
 			continue

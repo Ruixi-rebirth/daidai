@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 type mockWorker struct {
@@ -156,4 +157,201 @@ func TestDelegates_WorkspaceConflict(t *testing.T) {
 	}
 
 	close(bWorker.releaseCh)
+}
+
+type queueTestWorker struct {
+	started chan string
+	release chan struct{}
+}
+
+func (w *queueTestWorker) Name() string        { return "queue-test" }
+func (w *queueTestWorker) Description() string { return "controlled worker" }
+func (w *queueTestWorker) ExecuteTicket(ctx context.Context, ticket *Ticket) (string, error) {
+	w.started <- ticket.ID
+	select {
+	case <-w.release:
+		return "complete", nil
+	case <-ctx.Done():
+		return "partial result", ctx.Err()
+	}
+}
+
+func awaitQueueID(t *testing.T, ch <-chan string) string {
+	t.Helper()
+	select {
+	case id := <-ch:
+		return id
+	case <-time.After(3 * time.Second):
+		t.Fatal("queue did not make progress")
+		return ""
+	}
+}
+
+func TestQueueCancellationAndCompletion(t *testing.T) {
+	w := &queueTestWorker{started: make(chan string, 10), release: make(chan struct{}, 10)}
+	d := NewDelegates(w)
+	completed := make(chan string, 10)
+	cleaned := make(chan string, 10)
+	if err := d.StartQueue(context.Background(), func(_ context.Context, ticket *Ticket, _ string, _ error) { completed <- ticket.ID }); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := d.StopQueue(ctx); err != nil {
+			t.Error(err)
+		}
+	})
+	create := func() *Ticket {
+		ticket := d.CreateTicketForPlatform("qq", "owner", "room", "goal", "", "", "")
+		if err := d.EnqueueTicket(ticket.ID, func(tk *Ticket, _ string, _ error) { cleaned <- tk.ID }); err != nil {
+			t.Fatal(err)
+		}
+		return ticket
+	}
+	first := create()
+	if got := awaitQueueID(t, w.started); got != first.ID {
+		t.Fatal(got)
+	}
+	second, third := create(), create()
+	if d.AbortTicketForRequester(second.ID, "qq", "room", "other") != 0 {
+		t.Fatal("unauthorized cancellation")
+	}
+	if d.AbortTicketForRequester(second.ID, "qq", "room", "owner") != 1 {
+		t.Fatal("pending cancellation failed")
+	}
+	if got := awaitQueueID(t, cleaned); got != second.ID {
+		t.Fatal(got)
+	}
+	if d.AbortTicketForRequester(first.ID, "qq", "room", "owner") != 1 {
+		t.Fatal("running cancellation failed")
+	}
+	if got := awaitQueueID(t, completed); got != first.ID {
+		t.Fatal(got)
+	}
+	if got := awaitQueueID(t, cleaned); got != first.ID {
+		t.Fatal(got)
+	}
+	if got := awaitQueueID(t, w.started); got != third.ID {
+		t.Fatal("cancelled pending task ran", got)
+	}
+	w.release <- struct{}{}
+	if got := awaitQueueID(t, completed); got != third.ID {
+		t.Fatal(got)
+	}
+	if got := awaitQueueID(t, cleaned); got != third.ID {
+		t.Fatal(got)
+	}
+	for id, status := range map[string]TicketStatus{first.ID: TicketAborted, second.ID: TicketAborted, third.ID: TicketCompleted} {
+		ticket, _ := d.GetTicket(id)
+		if ticket.Status != status {
+			t.Fatalf("%s: %s", id, ticket.Status)
+		}
+	}
+}
+
+func TestQueueTimeoutAndStop(t *testing.T) {
+	w := &queueTestWorker{started: make(chan string, 10), release: make(chan struct{})}
+	d := NewDelegates(w)
+	if err := d.SetExecutionTimeout(50 * time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	completed := make(chan string, 10)
+	if err := d.StartQueue(context.Background(), func(_ context.Context, ticket *Ticket, _ string, _ error) { completed <- ticket.ID }); err != nil {
+		t.Fatal(err)
+	}
+	defer d.StopQueue(context.Background())
+	first := d.CreateTicket("owner", "room", "goal", "", "", "")
+	if err := d.EnqueueTicket(first.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	awaitQueueID(t, w.started)
+	awaitQueueID(t, completed)
+	ticket, _ := d.GetTicket(first.ID)
+	if ticket.Status != TicketFailed || !strings.Contains(ticket.Output, "partial result") || !strings.Contains(ticket.Output, "执行时限") {
+		t.Fatalf("timeout lost status/output: %+v", ticket)
+	}
+	if err := d.SetExecutionTimeout(0); err != nil {
+		t.Fatal(err)
+	}
+	running := d.CreateTicket("owner", "room", "goal", "", "", "")
+	if err := d.EnqueueTicket(running.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	awaitQueueID(t, w.started)
+	pending := d.CreateTicket("owner", "room", "goal", "", "", "")
+	if err := d.EnqueueTicket(pending.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := d.StopQueue(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{running.ID, pending.ID} {
+		ticket, _ := d.GetTicket(id)
+		if ticket.Status != TicketAborted {
+			t.Fatalf("stopped queue left %s in %s", id, ticket.Status)
+		}
+	}
+}
+
+func TestQueueRejectsEnqueueDuringShutdown(t *testing.T) {
+	d := NewDelegates(&mockWorker{name: "mock"})
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := d.StartQueue(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	ticket := d.CreateTicket("owner", "room", "goal", "", "", "")
+	if err := d.EnqueueTicket(ticket.ID, nil); err == nil {
+		t.Fatal("accepted work after shutdown")
+	}
+	if err := d.StopQueue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestQueueWaitDoesNotConsumeExecutionTimeout(t *testing.T) {
+	w := &queueTestWorker{started: make(chan string, 10), release: make(chan struct{}, 1)}
+	d := NewDelegates(w)
+	if err := d.SetExecutionTimeout(0); err != nil {
+		t.Fatal(err)
+	}
+	completed := make(chan string, 10)
+	if err := d.StartQueue(context.Background(), func(_ context.Context, ticket *Ticket, _ string, _ error) { completed <- ticket.ID }); err != nil {
+		t.Fatal(err)
+	}
+	defer d.StopQueue(context.Background())
+	first := d.CreateTicket("owner", "room", "first", "", "", "")
+	if err := d.EnqueueTicket(first.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	awaitQueueID(t, w.started)
+	if err := d.SetExecutionTimeout(50 * time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	second := d.CreateTicket("owner", "room", "second", "", "", "")
+	if err := d.EnqueueTicket(second.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case id := <-w.started:
+		t.Fatal("concurrency limit violated", id)
+	case <-time.After(100 * time.Millisecond):
+	}
+	ticket, _ := d.GetTicket(second.ID)
+	if ticket.Status != TicketPending {
+		t.Fatalf("waiting ticket timed out: %s", ticket.Status)
+	}
+	w.release <- struct{}{}
+	awaitQueueID(t, completed)
+	if got := awaitQueueID(t, w.started); got != second.ID {
+		t.Fatal(got)
+	}
+	awaitQueueID(t, completed)
+	ticket, _ = d.GetTicket(second.ID)
+	if ticket.Status != TicketFailed || !strings.Contains(ticket.Output, "partial result") {
+		t.Fatalf("second worker never ran: %+v", ticket)
+	}
 }

@@ -289,3 +289,80 @@ func TestSuperAgent_AGYAuthCommands(t *testing.T) {
 		t.Fatalf("expected logged out state in mockAuth")
 	}
 }
+
+type failingReplyChannel struct {
+	mockChannel
+	send func(*Utterance) error
+}
+
+func (c *failingReplyChannel) Transmit(_ context.Context, u *Utterance) error {
+	return c.send(u)
+}
+
+func TestReplyContinuationDelivery(t *testing.T) {
+	ctx := context.Background()
+	event := &SensoryEvent{Platform: "qq", ChannelID: "group", IsGroup: true, SenderID: "owner"}
+	channel := &failingReplyChannel{mockChannel: mockChannel{name: "qq"}}
+	registry := NewChannelRegistry()
+	registry.Register(channel)
+	a := &SuperAgent{Channels: registry}
+	u := &Utterance{Platform: "qq", ChannelID: "group", IsGroup: true, Text: "尚未送达的正文"}
+	channel.send = func(*Utterance) error { return errors.New("offline") }
+	if _, err := a.transmitUtterance(ctx, u, "owner"); err == nil {
+		t.Fatal("expected send failure")
+	}
+	other := *event
+	other.SenderID = "other"
+	if _, ok := a.takeReplyContinuation(&other); ok {
+		t.Fatal("another user received the continuation")
+	}
+	// A failed retry must restore the original exactly once.
+	a.handleContinueCommand(ctx, event, "")
+	got, ok := a.takeReplyContinuation(event)
+	if !ok || got != u.Text {
+		t.Fatalf("failed retry lost or duplicated reply: %q", got)
+	}
+	a.restoreReplyContinuation(ctx, event, got)
+	channel.send = func(*Utterance) error {
+		return &PartialDeliveryError{Err: errors.New("offline"), DeliveredText: "尚未", UndeliveredText: "送达的正文"}
+	}
+	a.handleContinueCommand(ctx, event, "")
+	got, _ = a.takeReplyContinuation(event)
+	if got != "送达的正文" {
+		t.Fatalf("partial retry retained delivered text: %q", got)
+	}
+	a.restoreReplyContinuation(ctx, event, got)
+	channel.send = func(u *Utterance) error {
+		if u.Text != got {
+			t.Fatalf("unexpected retry: %q", u.Text)
+		}
+		return nil
+	}
+	a.handleContinueCommand(ctx, event, "")
+	if _, ok := a.takeReplyContinuation(event); ok {
+		t.Fatal("successful reply still pending")
+	}
+}
+
+func TestReplyContinuationOmitsPaginationHint(t *testing.T) {
+	ctx := context.Background()
+	channel := &failingReplyChannel{mockChannel: mockChannel{name: "qq"}}
+	registry := NewChannelRegistry()
+	registry.Register(channel)
+	a := &SuperAgent{Channels: registry}
+	channel.send = func(u *Utterance) error {
+		return &PartialDeliveryError{Err: errors.New("offline"), UndeliveredText: u.Text}
+	}
+	text := strings.Repeat("正文内容", 2000) + "结尾"
+	u := &Utterance{Platform: "qq", ChannelID: "private"}
+	if _, err := a.transmitTextFallback(ctx, u, text, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := a.takeReplyContinuation(&SensoryEvent{Platform: "qq", ChannelID: "private", SenderID: "owner"})
+	if strings.Contains(got, "已达到平台") || !strings.HasSuffix(got, "结尾") {
+		t.Fatal("continuation contains pagination metadata or lost its tail")
+	}
+	if strings.ReplaceAll(got, "\n", "") != text {
+		t.Fatal("partial delivery lost or duplicated content")
+	}
+}
