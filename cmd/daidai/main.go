@@ -225,7 +225,23 @@ func run() int {
 		}
 		slog.Info("已按 --reset 参数重置会话短期上下文游标", "ownerOpenID", ownerOpenID)
 	}
-	immune := entity.NewImmuneSystem(ownerOpenID, cfg.QQ.Collaborators...)
+	database := db.DefaultManager()
+	roleCtx, roleCancel := context.WithTimeout(rootCtx, 5*time.Second)
+	if err := database.BootstrapConfiguredCollaborators(roleCtx, "qq", cfg.QQ.Collaborators); err != nil {
+		slog.Warn("迁移配置中的 QQ 协作者失败", "err", err)
+	}
+	storedRoles, roleErr := database.ListUserRoles(roleCtx, "qq")
+	roleCancel()
+	immune := entity.NewImmuneSystem(ownerOpenID)
+	if roleErr != nil {
+		slog.Warn("读取数据库角色失败，协作者权限暂不可用", "err", roleErr)
+	} else {
+		for _, role := range storedRoles {
+			if role.Role == "collaborator" {
+				immune.AddCollaborator(role.UserID)
+			}
+		}
+	}
 	persona := entity.NewDefaultPersona()
 
 	// 按配置挂载多沙箱工作者与工单调度中枢 (全局最大并发限制)
@@ -272,6 +288,7 @@ func run() int {
 		Immune:          immune,
 		Workspaces:      workspaceMgr,
 		AttachmentInbox: attachmentInbox,
+		Database:        database,
 		EnableNixSearch: cfg.Plugins.NixSearch.Enabled,
 		OCIConfig:       &cfg.OCI,
 		OCIClient:       ociClient,
@@ -298,6 +315,7 @@ func run() int {
 			Secret: cfg.QQ.Secret,
 		}, immune)
 		qqChannel.SetAttachmentInbox(attachmentInbox)
+		qqChannel.SetAccessRequestStore(database)
 		qqChannel.SetHistoryRecorder(cortex.RecordInbound)
 		channelRegistry.Register(qqChannel)
 	}

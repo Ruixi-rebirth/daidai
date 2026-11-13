@@ -353,15 +353,16 @@ func (c *msgCache) Get(msgID, chatType, convID string) string {
 
 // QQChannel 官方 QQ 开放平台全双工通道 (直接实现 entity.Channel，零前缀、单层架构)
 type QQChannel struct {
-	cfg        Config
-	client     *Client
-	debounce   *kernel.DebounceManager
-	immune     *entity.ImmuneSystem
-	msgCache   *msgCache
-	dedup      *dedupCache
-	inbox      *media.Inbox
-	stopCancel context.CancelFunc
-	wsWG       sync.WaitGroup
+	cfg            Config
+	client         *Client
+	debounce       *kernel.DebounceManager
+	immune         *entity.ImmuneSystem
+	msgCache       *msgCache
+	dedup          *dedupCache
+	inbox          *media.Inbox
+	accessRequests *db.Manager
+	stopCancel     context.CancelFunc
+	wsWG           sync.WaitGroup
 
 	wsMu        sync.Mutex
 	wsSessionID string
@@ -835,6 +836,10 @@ func (q *QQChannel) SetAttachmentInbox(inbox *media.Inbox) {
 	q.inbox = inbox
 }
 
+func (q *QQChannel) SetAccessRequestStore(database *db.Manager) {
+	q.accessRequests = database
+}
+
 func (q *QQChannel) Start(ctx context.Context, onSensory func(event *entity.SensoryEvent)) error {
 	q.wsReady.Store(false)
 	if q.msgCache != nil {
@@ -1096,7 +1101,21 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 			if q.dedup != nil {
 				q.dedup.Remember(msgID)
 			}
-			slog.Info("qq: 忽略未授权访客的私聊消息", "userID", userID, "messageID", msgID)
+			if q.accessRequests != nil {
+				accessCtx, accessCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				accessMessage := strings.TrimSpace(content)
+				if entity.IsSensitiveAuthCommand(accessMessage) {
+					accessMessage = "[敏感认证指令内容已隐藏]"
+				} else if accessMessage == "" {
+					accessMessage = attachmentHistoryNote(len(images), omittedImages, len(files), omittedFiles)
+				}
+				accessMessage = core.TruncateRunes(accessMessage, 500, "…")
+				if err := q.accessRequests.RecordPrivateAccessRequest(accessCtx, "qq", userID, senderName, accessMessage); err != nil {
+					slog.Warn("qq: 保存访客私聊申请失败", "userID", userID, "err", err)
+				}
+				accessCancel()
+			}
+			slog.Info("qq: 拒绝未授权访客私聊", "userID", userID, "senderName", senderName, "messageID", msgID)
 			q.replyPrivateMessage(userID, msgID, "暂未开通私聊权限")
 			return true
 		}

@@ -39,6 +39,16 @@ func (im *ImmuneSystem) AddCollaborator(userID string) {
 	im.collaborators[userID] = struct{}{}
 }
 
+func (im *ImmuneSystem) RemoveCollaborator(userID string) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return
+	}
+	im.mu.Lock()
+	defer im.mu.Unlock()
+	delete(im.collaborators, userID)
+}
+
 // ResolveRole 评估感知事件发起人的角色权限
 func (im *ImmuneSystem) ResolveRole(senderID string) UserRole {
 	senderID = strings.TrimSpace(senderID)

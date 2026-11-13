@@ -8,7 +8,7 @@ qq:
   app_id: "YOUR_QQ_APP_ID"
   secret: "YOUR_QQ_APP_SECRET"
   owner_openid: "YOUR_QQ_OPENID"
-  collaborators: []
+  collaborators: [] # 首次启动时导入数据库；之后通过 QQ 私聊自然语言管理协作者
 
 llm:
   base_url: "https://api.deepseek.com/v1"

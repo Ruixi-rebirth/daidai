@@ -10,6 +10,7 @@ import (
 
 	"daidai/internal/config"
 	"daidai/internal/core"
+	"daidai/internal/db"
 	"daidai/internal/entity"
 	"daidai/internal/media"
 	"daidai/internal/provider/llm"
@@ -30,6 +31,7 @@ type HandsConfig struct {
 	Immune          *entity.ImmuneSystem
 	Workspaces      *entity.WorkspaceManager
 	AttachmentInbox *media.Inbox
+	Database        *db.Manager
 	EnableNixSearch bool
 	OCIConfig       *config.OCIConfig
 	OCIClient       *OCIClient
@@ -43,6 +45,9 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 	h.Register(NewRenderTool())
 	h.Register(NewSysInfoTool())
 	h.Register(NewMemoryTool(nil, cfg.Router))
+	if cfg.Database != nil && cfg.Immune != nil {
+		h.Register(NewAccessTool(cfg.Database, cfg.Immune))
+	}
 	h.Register(NewChatSummaryTool(nil, cfg.Router))
 	h.Register(NewWebSearchToolWithCommand(cfg.Router, cfg.AGYCommand))
 	h.Register(NewReadLinkTool())

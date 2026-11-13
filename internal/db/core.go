@@ -164,6 +164,32 @@ CREATE TABLE IF NOT EXISTS agy_sessions (
     updated_at      INTEGER NOT NULL,
     PRIMARY KEY (requester_id, channel_id, workspace_path)
 );
+
+CREATE TABLE IF NOT EXISTS user_roles (
+    platform     TEXT NOT NULL,
+    user_id      TEXT NOT NULL CHECK (length(user_id) > 0),
+    role         TEXT NOT NULL CHECK (role = 'collaborator'),
+    granted_by   TEXT NOT NULL DEFAULT '',
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    PRIMARY KEY (platform, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_roles_role ON user_roles(platform, role, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS private_access_requests (
+    platform        TEXT NOT NULL,
+    user_id         TEXT NOT NULL CHECK (length(user_id) > 0),
+    display_name    TEXT NOT NULL DEFAULT '',
+    last_message    TEXT NOT NULL DEFAULT '',
+    first_seen_at   INTEGER NOT NULL,
+    last_seen_at    INTEGER NOT NULL,
+    request_count   INTEGER NOT NULL DEFAULT 1 CHECK (request_count > 0),
+    status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'revoked')),
+    reviewed_by     TEXT NOT NULL DEFAULT '',
+    reviewed_at     INTEGER,
+    PRIMARY KEY (platform, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_private_access_pending ON private_access_requests(platform, status, last_seen_at DESC);
 `
 
 // Manager 统一多平台 SQLite 分库连接管理器 (纯净零前缀规范)
@@ -282,6 +308,189 @@ func (m *Manager) SetRuntimeState(ctx context.Context, platform, key, value stri
 	_, err = db.ExecContext(ctx, `INSERT INTO runtime_state (state_key, value, updated_at) VALUES (?, ?, ?)
 		ON CONFLICT(state_key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`, key, value, time.Now().UnixMilli())
 	return err
+}
+
+type UserRole struct {
+	Platform  string
+	UserID    string
+	Role      string
+	GrantedBy string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+type PrivateAccessRequest struct {
+	UserID       string
+	DisplayName  string
+	LastMessage  string
+	FirstSeenAt  time.Time
+	LastSeenAt   time.Time
+	RequestCount int
+}
+
+func (m *Manager) SetUserRole(ctx context.Context, platform, userID, role, grantedBy string) error {
+	platform = NormPlatform(platform)
+	userID = strings.TrimSpace(userID)
+	role = strings.TrimSpace(role)
+	if platform == "" || userID == "" || role != "collaborator" {
+		return fmt.Errorf("invalid user role")
+	}
+	conn, err := m.GetConn(platform)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UnixMilli()
+	_, err = conn.ExecContext(ctx, `INSERT INTO user_roles (platform, user_id, role, granted_by, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(platform, user_id) DO UPDATE SET role = excluded.role, granted_by = excluded.granted_by, updated_at = excluded.updated_at`,
+		platform, userID, role, strings.TrimSpace(grantedBy), now, now)
+	return err
+}
+
+func (m *Manager) GrantCollaborator(ctx context.Context, platform, userID, grantedBy string) error {
+	platform = NormPlatform(platform)
+	userID = strings.TrimSpace(userID)
+	if platform == "" || userID == "" {
+		return fmt.Errorf("platform and user ID are required")
+	}
+	conn, err := m.GetConn(platform)
+	if err != nil {
+		return err
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := time.Now().UnixMilli()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO user_roles (platform, user_id, role, granted_by, created_at, updated_at)
+		VALUES (?, ?, 'collaborator', ?, ?, ?)
+		ON CONFLICT(platform, user_id) DO UPDATE SET role = 'collaborator', granted_by = excluded.granted_by, updated_at = excluded.updated_at`,
+		platform, userID, strings.TrimSpace(grantedBy), now, now); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE private_access_requests SET status = 'approved', reviewed_by = ?, reviewed_at = ?
+		WHERE platform = ? AND user_id = ?`, strings.TrimSpace(grantedBy), now, platform, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (m *Manager) RevokeCollaborator(ctx context.Context, platform, userID, reviewer string) error {
+	platform = NormPlatform(platform)
+	userID = strings.TrimSpace(userID)
+	if platform == "" || userID == "" {
+		return fmt.Errorf("platform and user ID are required")
+	}
+	conn, err := m.GetConn(platform)
+	if err != nil {
+		return err
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, "DELETE FROM user_roles WHERE platform = ? AND user_id = ?", platform, userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE private_access_requests SET status = 'revoked', reviewed_by = ?, reviewed_at = ?
+		WHERE platform = ? AND user_id = ?`, strings.TrimSpace(reviewer), time.Now().UnixMilli(), platform, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (m *Manager) ListUserRoles(ctx context.Context, platform string) ([]UserRole, error) {
+	conn, err := m.GetConn(platform)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := conn.QueryContext(ctx, `SELECT platform, user_id, role, granted_by, created_at, updated_at
+		FROM user_roles WHERE platform = ? ORDER BY updated_at DESC, user_id`, NormPlatform(platform))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var roles []UserRole
+	for rows.Next() {
+		var role UserRole
+		var createdAt, updatedAt int64
+		if err := rows.Scan(&role.Platform, &role.UserID, &role.Role, &role.GrantedBy, &createdAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		role.CreatedAt = time.UnixMilli(createdAt)
+		role.UpdatedAt = time.UnixMilli(updatedAt)
+		roles = append(roles, role)
+	}
+	return roles, rows.Err()
+}
+
+func (m *Manager) RecordPrivateAccessRequest(ctx context.Context, platform, userID, displayName, message string) error {
+	platform = NormPlatform(platform)
+	userID = strings.TrimSpace(userID)
+	if platform == "" || userID == "" {
+		return fmt.Errorf("platform and user ID are required")
+	}
+	conn, err := m.GetConn(platform)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UnixMilli()
+	_, err = conn.ExecContext(ctx, `INSERT INTO private_access_requests
+		(platform, user_id, display_name, last_message, first_seen_at, last_seen_at, request_count, status)
+		VALUES (?, ?, ?, ?, ?, ?, 1, 'pending')
+		ON CONFLICT(platform, user_id) DO UPDATE SET
+		display_name = excluded.display_name,
+		last_message = excluded.last_message,
+		last_seen_at = excluded.last_seen_at,
+		request_count = private_access_requests.request_count + 1,
+		status = 'pending', reviewed_by = '', reviewed_at = NULL`,
+		platform, userID, strings.TrimSpace(displayName), message, now, now)
+	return err
+}
+
+func (m *Manager) ListPendingPrivateAccessRequests(ctx context.Context, platform string, limit int) ([]PrivateAccessRequest, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	conn, err := m.GetConn(platform)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := conn.QueryContext(ctx, `SELECT user_id, display_name, last_message, first_seen_at, last_seen_at, request_count
+		FROM private_access_requests WHERE platform = ? AND status = 'pending'
+		ORDER BY last_seen_at DESC LIMIT ?`, NormPlatform(platform), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var requests []PrivateAccessRequest
+	for rows.Next() {
+		var request PrivateAccessRequest
+		var firstSeenAt, lastSeenAt int64
+		if err := rows.Scan(&request.UserID, &request.DisplayName, &request.LastMessage, &firstSeenAt, &lastSeenAt, &request.RequestCount); err != nil {
+			return nil, err
+		}
+		request.FirstSeenAt = time.UnixMilli(firstSeenAt)
+		request.LastSeenAt = time.UnixMilli(lastSeenAt)
+		requests = append(requests, request)
+	}
+	return requests, rows.Err()
+}
+
+func (m *Manager) BootstrapConfiguredCollaborators(ctx context.Context, platform string, collaborators []string) error {
+	key := "configured_collaborators_imported_v1"
+	imported, err := m.GetRuntimeState(ctx, platform, key)
+	if err != nil || imported != "" {
+		return err
+	}
+	for _, userID := range collaborators {
+		if err := m.SetUserRole(ctx, platform, userID, "collaborator", "legacy-config"); err != nil {
+			return err
+		}
+	}
+	return m.SetRuntimeState(ctx, platform, key, "done")
 }
 
 type PendingNotification struct {
