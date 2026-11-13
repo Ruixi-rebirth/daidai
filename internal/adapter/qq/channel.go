@@ -1,10 +1,12 @@
 package qq
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/png"
 	"log/slog"
 	"mime"
 	"path/filepath"
@@ -1490,10 +1492,15 @@ func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utteranc
 			return fmt.Errorf("upload inline image %d: %w", i+1, err)
 		}
 		imageIDs = append(imageIDs, imageID)
+		dimensions, err := png.DecodeConfig(bytes.NewReader(image))
+		if err != nil {
+			cleanup()
+			return fmt.Errorf("read inline image %d dimensions: %w", i+1, err)
+		}
 		if markdown.Len() > 0 {
 			markdown.WriteString("\n\n")
 		}
-		fmt.Fprintf(&markdown, "![第 %d 页](%s)", i+1, imageURL)
+		fmt.Fprintf(&markdown, "![第 %d 页 #%dpx #%dpx](%s)", i+1, dimensions.Width, dimensions.Height, imageURL)
 	}
 	if strings.TrimSpace(content) != "" {
 		markdown.WriteString("\n\n")
@@ -1526,11 +1533,10 @@ func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utteranc
 	} else {
 		err = q.client.SendC2CMessage(ctx, u.ChannelID, markdown.String(), u.QuoteMsgID)
 	}
-	cleanup()
 	if err != nil {
 		return fmt.Errorf("send QQ Markdown message with inline images: %w", err)
 	}
-	slog.Info("qq_channel: 多页卡片已在单条 Markdown 消息中发送", "channelID", u.ChannelID, "pages", len(images))
+	slog.Info("qq_channel: 单条 Markdown 卡片消息已接受，保留素材供 QQ 客户端加载", "channelID", u.ChannelID, "pages", len(images))
 	return nil
 }
 
