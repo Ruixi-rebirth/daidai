@@ -91,7 +91,7 @@ type Utterance struct {
 	QuoteMsgID        string
 	Proactive         bool     // 主动发送；平台可能限制适用场景或频率
 	GroupInterjection bool     // 未 @ 群消息的有限插话；必须关联原群消息作为被动回复
-	MentionUserIDs    []string // 群聊插话需要点名时使用的群成员 OpenID
+	MentionUserIDs    []string // QQ 群聊消息要点名的成员 OpenID；主动插话由模型决定是否填写
 	Text              string   // 纯净人话
 	FallbackText      string   // 媒体发送失败时替代图片的文字内容
 	CardData          []byte   // 美学卡片长图 (Maple Mono 排版图卷)
