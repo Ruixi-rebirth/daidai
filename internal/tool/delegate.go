@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -369,9 +370,16 @@ func (t *DelegateTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*c
 		errText = core.TruncateRunes(errText, 1000, "\n[错误详情已截断]")
 		partialOutput = core.TruncateRunes(partialOutput, 4500, "\n[阶段输出已截断；完整结果请用 /task "+ticket.ID+"]")
 		slog.Warn("delegate_tool: 工单未能完成", "ticketID", ticket.ID, "err", errText)
-		output = fmt.Sprintf("工单执行遇到异常: %s", errText)
+		if errors.Is(execErr, context.DeadlineExceeded) {
+			output = fmt.Sprintf("工单达到执行时限，尚未完成: %s", errText)
+		} else {
+			output = fmt.Sprintf("工单未能完成: %s", errText)
+		}
 		if partialOutput != "" {
 			output += "\n\n" + partialOutput
+		}
+		if !errors.Is(execErr, context.Canceled) {
+			output += "\n\n这张工单已停止，以上是目前保留的阶段结果；不会自动重跑。请明确告知是否要基于这些结果继续下一阶段。"
 		}
 	}
 	if args.IncludeCurrentAttachments && event.OmittedFiles > 0 {
