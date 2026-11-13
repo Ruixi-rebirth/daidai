@@ -1130,6 +1130,7 @@ func (r *MindRouter) ChatWithTools(
 		if fbErr == nil {
 			return fbResp, nil
 		}
+		slog.Warn("兜底心智通道执行失败", "channel", r.fallbackChannel, "err", fbErr)
 	}
 
 	return nil, fmt.Errorf("%s 通道心智驱动执行失败: %w", channel, err)
