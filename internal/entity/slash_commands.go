@@ -16,6 +16,7 @@ type slashCommand struct {
 	section string
 	usage   string
 	help    string
+	access  string
 	match   func(string) bool
 	handle  func(context.Context, *SensoryEvent, string)
 }
@@ -44,24 +45,24 @@ func slashCommandRegistry(a *SuperAgent) []slashCommand {
 	return []slashCommand{
 		{section: "对话与会话", usage: "/help", help: "显示指令帮助卡", match: exact("/help"), handle: a.handleHelpCommand},
 		{section: "对话与会话", usage: "/continue", help: "续发未发送完的长回复", match: exact("/continue", "继续"), handle: a.handleContinueCommand},
-		{section: "对话与会话", usage: "/stop", help: "中断你发起的思考和工单", match: exact("/stop"), handle: a.handleStopCommand},
-		{section: "对话与会话", usage: "/reset · /new · /clear", help: "重开当前会话并清除近期历史", match: exact("/reset", "/new", "/clear", "/ws clear", "/ws reset"), handle: a.handleResetCommand},
+		{section: "对话与会话", usage: "/stop", help: "中断你发起的思考和工单", access: "仅核心搭档/协作者", match: exact("/stop"), handle: a.handleStopCommand},
+		{section: "对话与会话", usage: "/reset · /new · /clear", help: "重开当前会话并清除近期历史", access: "仅核心搭档/协作者", match: exact("/reset", "/new", "/clear", "/ws clear", "/ws reset"), handle: a.handleResetCommand},
 		{section: "状态与模型", usage: "/status · /sysinfo", help: "查看运行状态、系统指标与活跃工单", match: exact("/status", "/sysinfo"), handle: a.handleStatusCommand},
-		{section: "状态与模型", usage: "/model", help: "查看当前对话使用的模型；此命令不会切换模型", match: exact("/model"), handle: a.handleModelCommand},
-		{section: "状态与模型", usage: "/models", help: "列出可用模型", match: exact("/models"), handle: a.handleModelsCommand},
-		{section: "状态与模型", usage: "/usage", help: "查看模型用量", match: exact("/usage"), handle: a.handleUsageCommand},
-		{section: "工程工单", usage: "/tasks", help: "查看当前会话的近期工单", match: exact("/tasks"), handle: a.handleTasksCommand},
-		{section: "工程工单", usage: "/task <ID> [页码]", help: "查看工单状态和输出", match: prefix("/task"), handle: a.handleTaskCommand},
-		{section: "工作空间", usage: "/pwd", help: "查看当前工作空间", match: exact("/pwd"), handle: a.handlePwdCommand},
-		{section: "工作空间", usage: "/cd <目标>", help: "切换工作空间", match: prefix("/cd"), handle: a.handleCDCommand},
-		{section: "工作空间", usage: "/ws · /workspaces", help: "列出已纳管的工作空间", match: exact("/ws", "/workspaces"), handle: a.handleWorkspaceListCommand},
-		{section: "工作空间", usage: "/ws rm <名称>", help: "移除工作空间书签", match: prefix("/ws rm", "/workspaces rm"), handle: a.handleWorkspaceRemoveCommand},
-		{section: "工作空间", usage: "/ws exit", help: "退出当前工作空间", match: exact("/ws exit", "/workspaces exit"), handle: a.handleWorkspaceExitCommand},
-		{section: "工作空间", usage: "/ws clean · /clean", help: "清理默认 sandbox 临时文件", match: exact("/ws clean", "/clean"), handle: a.handleWorkspaceCleanCommand},
-		{section: "AGY 认证（私聊）", usage: "/agy login [force]", help: "发起或强制重新进行 Google 认证", match: exact("/agy login", "/agy auth", "/agy login force", "/agy login --force"), handle: a.handleAGYLoginCommand},
-		{section: "AGY 认证（私聊）", usage: "/agy code <授权码>", help: "提交 Google 授权码", match: func(content string) bool { _, ok := parseAGYAuthCodeCommand(content); return ok }, handle: a.handleAGYCodeCommand},
-		{section: "AGY 认证（私聊）", usage: "/agy status", help: "查看 AGY 认证状态", match: exact("/agy status"), handle: a.handleAGYStatusCommand},
-		{section: "AGY 认证（私聊）", usage: "/agy logout", help: "注销 AGY 并清除凭据", match: exact("/agy logout"), handle: a.handleAGYLogoutCommand},
+		{section: "状态与模型", usage: "/model", help: "查看当前对话使用的模型；此命令不会切换模型", access: "仅核心搭档/协作者", match: exact("/model"), handle: a.handleModelCommand},
+		{section: "状态与模型", usage: "/models", help: "列出可用模型", access: "仅核心搭档/协作者", match: exact("/models"), handle: a.handleModelsCommand},
+		{section: "状态与模型", usage: "/usage", help: "查看模型用量", access: "仅核心搭档/协作者", match: exact("/usage"), handle: a.handleUsageCommand},
+		{section: "工程工单", usage: "/tasks", help: "查看当前会话的近期工单", access: "仅核心搭档/协作者", match: exact("/tasks"), handle: a.handleTasksCommand},
+		{section: "工程工单", usage: "/task <ID> [页码]", help: "查看工单状态和输出", access: "仅核心搭档/协作者", match: prefix("/task"), handle: a.handleTaskCommand},
+		{section: "工作空间", usage: "/pwd", help: "查看当前工作空间", access: "仅核心搭档/协作者", match: exact("/pwd"), handle: a.handlePwdCommand},
+		{section: "工作空间", usage: "/cd <目标>", help: "切换工作空间", access: "仅核心搭档/协作者", match: prefix("/cd"), handle: a.handleCDCommand},
+		{section: "工作空间", usage: "/ws · /workspaces", help: "列出已纳管的工作空间", access: "仅核心搭档/协作者", match: exact("/ws", "/workspaces"), handle: a.handleWorkspaceListCommand},
+		{section: "工作空间", usage: "/ws rm <名称>", help: "移除工作空间书签", access: "仅核心搭档/协作者", match: prefix("/ws rm", "/workspaces rm"), handle: a.handleWorkspaceRemoveCommand},
+		{section: "工作空间", usage: "/ws exit", help: "退出当前工作空间", access: "仅核心搭档/协作者", match: exact("/ws exit", "/workspaces exit"), handle: a.handleWorkspaceExitCommand},
+		{section: "工作空间", usage: "/ws clean · /clean", help: "清理默认 sandbox 临时文件", access: "仅核心搭档/协作者", match: exact("/ws clean", "/clean"), handle: a.handleWorkspaceCleanCommand},
+		{section: "AGY 认证", usage: "/agy login [force]", help: "发起或强制重新进行 Google 认证", access: "仅私聊；核心搭档/协作者", match: exact("/agy login", "/agy auth", "/agy login force", "/agy login --force"), handle: a.handleAGYLoginCommand},
+		{section: "AGY 认证", usage: "/agy code <授权码>", help: "提交 Google 授权码", access: "仅私聊；核心搭档/协作者", match: func(content string) bool { _, ok := parseAGYAuthCodeCommand(content); return ok }, handle: a.handleAGYCodeCommand},
+		{section: "AGY 认证", usage: "/agy status", help: "查看 AGY 认证状态", access: "仅私聊；核心搭档/协作者", match: exact("/agy status"), handle: a.handleAGYStatusCommand},
+		{section: "AGY 认证", usage: "/agy logout", help: "注销 AGY 并清除凭据", access: "仅私聊；核心搭档/协作者", match: exact("/agy logout"), handle: a.handleAGYLogoutCommand},
 	}
 }
 
@@ -83,13 +84,17 @@ func (a *SuperAgent) handleHelpCommand(ctx context.Context, event *SensoryEvent,
 		if _, exists := sectionLines[command.section]; !exists {
 			sectionNames = append(sectionNames, command.section)
 		}
-		sectionLines[command.section] = append(sectionLines[command.section], fmt.Sprintf("- %s：%s", command.usage, command.help))
+		line := fmt.Sprintf("- %s：%s", command.usage, command.help)
+		if command.access != "" {
+			line += "（" + command.access + "）"
+		}
+		sectionLines[command.section] = append(sectionLines[command.section], line)
 	}
 	for _, name := range sectionNames {
-		icon := map[string]string{"对话与会话": "💬", "状态与模型": "📊", "工程工单": "🧾", "工作空间": "📁", "AGY 认证（私聊）": "🔐"}[name]
+		icon := map[string]string{"对话与会话": "💬", "状态与模型": "📊", "工程工单": "🧾", "工作空间": "📁", "AGY 认证": "🔐"}[name]
 		sections = append(sections, fmt.Sprintf("### %s %s\n%s", icon, name, strings.Join(sectionLines[name], "\n")))
 	}
-	helpText := fmt.Sprintf("# %s · 使用帮助\n\n%s\n\n想切换模型时，直接说“切换到 <模型名称>”，例如“切换到 Gemini 3.8 Flash”。\n\n部分工单、模型和工作空间操作需要相应权限；群聊控制指令请先 @ 呆呆。", a.Persona.Name, strings.Join(sections, "\n\n"))
+	helpText := fmt.Sprintf("# %s · 使用帮助\n\n%s\n\n想切换模型时，直接说“切换到 <模型名称>”，例如“切换到 Gemini 3.8 Flash”。未标注权限的指令可直接使用；标注“仅核心搭档/协作者”的指令需要系统配置授权。群聊中的 slash 指令请先 @ 呆呆；普通对话中 @ 呆呆或直接称呼“呆呆”都可以。AGY 认证指令只能在私聊中使用。", a.Persona.Name, strings.Join(sections, "\n\n"))
 	if err := a.transmitInfoCard(ctx, event, "📖 指令速查", helpText); err != nil {
 		slog.Warn("superagent: 发送指令帮助失败", "platform", event.Platform, "channel", event.ChannelID, "err", err)
 	}
