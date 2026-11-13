@@ -150,6 +150,33 @@ func (c *Cortex) RenderCard(ctx context.Context, event *entity.SensoryEvent, con
 	return res.ImageData, nil
 }
 
+// RenderCardPages turns long replies into a small, ordered set of readable cards.
+func (c *Cortex) RenderCardPages(ctx context.Context, event *entity.SensoryEvent, content string) ([][]byte, error) {
+	const maxPages = 4
+	pageRunes := 1400
+	chunks := core.SplitMarkdownChunks(content, pageRunes)
+	for len(chunks) > maxPages && pageRunes < maxAssistantReplyRunes {
+		pageRunes += 300
+		chunks = core.SplitMarkdownChunks(content, pageRunes)
+	}
+	if len(chunks) > maxPages {
+		return nil, fmt.Errorf("long reply requires %d image pages; limit is %d", len(chunks), maxPages)
+	}
+	images := make([][]byte, 0, len(chunks))
+	for index, chunk := range chunks {
+		pageContent := chunk
+		if len(chunks) > 1 {
+			pageContent = fmt.Sprintf("### %d / %d\n\n%s", index+1, len(chunks), chunk)
+		}
+		image, err := c.RenderCard(ctx, event, pageContent)
+		if err != nil {
+			return nil, fmt.Errorf("render reply page %d of %d: %w", index+1, len(chunks), err)
+		}
+		images = append(images, image)
+	}
+	return images, nil
+}
+
 func (c *Cortex) ShouldRenderCard(ctx context.Context, content string) bool {
 	content = strings.TrimSpace(content)
 	if content == "" {
@@ -182,6 +209,12 @@ func (c *Cortex) ShouldRenderCard(ctx context.Context, content string) bool {
 	default:
 		return render.ShouldRenderCard(content)
 	}
+}
+
+// ShouldAutoRenderReply applies the deterministic long-content policy without
+// spending another model call to decide how the reply should be presented.
+func (c *Cortex) ShouldAutoRenderReply(content string) bool {
+	return render.ShouldRenderCard(content)
 }
 
 type attachmentDisposition string

@@ -547,6 +547,9 @@ func (a *SuperAgent) transmitUtterance(ctx context.Context, utterance *Utterance
 	}
 	var partialErr *PartialDeliveryError
 	if err := a.Channels.Transmit(ctx, utterance); err == nil {
+		if utterance.Text == "" && utterance.HasMedia() && strings.TrimSpace(utterance.FallbackText) != "" {
+			return utterance.FallbackText, nil
+		}
 		return utterance.Text, nil
 	} else if errors.As(err, &partialErr) {
 		slog.Warn("superagent: 消息部分送达，不重复发送正文", "channel", utterance.ChannelID, "err", err)
@@ -740,6 +743,15 @@ func (a *SuperAgent) clearReplyContinuation(event *SensoryEvent) {
 	a.continuationMu.Lock()
 	delete(a.continuations, thinkKey(event))
 	a.continuationMu.Unlock()
+}
+
+func requestsTextOnly(content string) bool {
+	for _, phrase := range []string{"纯文字", "只用文字", "只发文字", "不要图片", "不用图片", "别发图片", "不要转图", "别转图", "不要转成图片", "不要渲染成图片"} {
+		if strings.Contains(content, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *SuperAgent) replyText(ctx context.Context, event *SensoryEvent, text string) {
@@ -1192,6 +1204,26 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 		if utterance != nil {
 			if thinkCtx.Err() != nil {
 				return
+			}
+			if event.Platform == "qq" && !event.GroupInterjection && !requestsTextOnly(event.Content) && !utterance.HasMedia() && strings.TrimSpace(utterance.Text) != "" {
+				type automaticCardRenderer interface {
+					ShouldAutoRenderReply(string) bool
+					RenderCardPages(context.Context, *SensoryEvent, string) ([][]byte, error)
+				}
+				if renderer, ok := a.Cognition.(automaticCardRenderer); ok && renderer.ShouldAutoRenderReply(utterance.Text) {
+					replyContent := utterance.Text
+					cardCtx, cancelCard := context.WithTimeout(thinkCtx, 45*time.Second)
+					images, renderErr := renderer.RenderCardPages(cardCtx, event, replyContent)
+					cancelCard()
+					if renderErr != nil || len(images) == 0 {
+						slog.Warn("superagent: 长回复卡片渲染失败，回退为文字", "platform", event.Platform, "channel", event.ChannelID, "err", renderErr)
+					} else {
+						utterance.FallbackText = replyContent
+						utterance.Text = ""
+						utterance.Images = images
+						slog.Info("superagent: 长回复已分页渲染为图片", "platform", event.Platform, "channel", event.ChannelID, "pages", len(images), "textBytes", len(replyContent))
+					}
+				}
 			}
 			if !event.IsPartnerPrivate() {
 				utterance.Text = core.RedactSensitiveIPs(utterance.Text)
