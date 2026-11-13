@@ -327,12 +327,13 @@ func (m *Manager) SetRuntimeState(ctx context.Context, platform, key, value stri
 }
 
 type UserRole struct {
-	Platform  string
-	UserID    string
-	Role      string
-	GrantedBy string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	Platform    string
+	UserID      string
+	DisplayName string
+	Role        string
+	GrantedBy   string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 type PrivateAccessRequest struct {
@@ -365,19 +366,60 @@ func (m *Manager) SetUserRole(ctx context.Context, platform, userID, role, grant
 	platform = NormPlatform(platform)
 	userID = strings.TrimSpace(userID)
 	role = strings.TrimSpace(role)
-	if platform == "" || userID == "" || role != "collaborator" {
-		return fmt.Errorf("invalid user role")
+	if platform == "" || userID == "" || (role != "friend" && role != "collaborator") {
+		return fmt.Errorf("platform, user ID, and valid role ('friend' or 'collaborator') are required")
 	}
 	conn, err := m.GetConn(platform)
 	if err != nil {
 		return err
 	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UnixMilli()
-	_, err = conn.ExecContext(ctx, `INSERT INTO user_roles (platform, user_id, role, granted_by, created_at, updated_at)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO user_roles (platform, user_id, role, granted_by, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(platform, user_id) DO UPDATE SET role = excluded.role, granted_by = excluded.granted_by, updated_at = excluded.updated_at`,
-		platform, userID, role, strings.TrimSpace(grantedBy), now, now)
-	return err
+		platform, userID, role, strings.TrimSpace(grantedBy), now, now); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE private_access_requests SET status = 'approved', reviewed_by = ?, reviewed_at = ?
+		WHERE platform = ? AND user_id = ?`, strings.TrimSpace(grantedBy), now, platform, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (m *Manager) GetUserRole(ctx context.Context, platform, userID string) (*UserRole, error) {
+	platform = NormPlatform(platform)
+	userID = strings.TrimSpace(userID)
+	if platform == "" || userID == "" {
+		return nil, fmt.Errorf("platform and user ID are required")
+	}
+	conn, err := m.GetConn(platform)
+	if err != nil {
+		return nil, err
+	}
+	var role UserRole
+	var createdAt, updatedAt int64
+	var displayName sql.NullString
+	err = conn.QueryRowContext(ctx, `SELECT u.platform, u.user_id, u.role, u.granted_by, u.created_at, u.updated_at, p.display_name
+		FROM user_roles u
+		LEFT JOIN private_access_requests p ON u.platform = p.platform AND u.user_id = p.user_id
+		WHERE u.platform = ? AND u.user_id = ?`, platform, userID).
+		Scan(&role.Platform, &role.UserID, &role.Role, &role.GrantedBy, &createdAt, &updatedAt, &displayName)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	role.DisplayName = displayName.String
+	role.CreatedAt = time.UnixMilli(createdAt)
+	role.UpdatedAt = time.UnixMilli(updatedAt)
+	return &role, nil
 }
 
 func (m *Manager) GrantCollaborator(ctx context.Context, platform, userID, grantedBy string) error {
@@ -446,8 +488,10 @@ func (m *Manager) ListUserRoles(ctx context.Context, platform string) ([]UserRol
 	if err != nil {
 		return nil, err
 	}
-	rows, err := conn.QueryContext(ctx, `SELECT platform, user_id, role, granted_by, created_at, updated_at
-		FROM user_roles WHERE platform = ? ORDER BY updated_at DESC, user_id`, NormPlatform(platform))
+	rows, err := conn.QueryContext(ctx, `SELECT u.platform, u.user_id, u.role, u.granted_by, u.created_at, u.updated_at, COALESCE(p.display_name, '')
+		FROM user_roles u
+		LEFT JOIN private_access_requests p ON u.platform = p.platform AND u.user_id = p.user_id
+		WHERE u.platform = ? ORDER BY u.updated_at DESC, u.user_id`, NormPlatform(platform))
 	if err != nil {
 		return nil, err
 	}
@@ -456,7 +500,7 @@ func (m *Manager) ListUserRoles(ctx context.Context, platform string) ([]UserRol
 	for rows.Next() {
 		var role UserRole
 		var createdAt, updatedAt int64
-		if err := rows.Scan(&role.Platform, &role.UserID, &role.Role, &role.GrantedBy, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&role.Platform, &role.UserID, &role.Role, &role.GrantedBy, &createdAt, &updatedAt, &role.DisplayName); err != nil {
 			return nil, err
 		}
 		role.CreatedAt = time.UnixMilli(createdAt)

@@ -18,6 +18,7 @@ import (
 
 	"daidai/internal/core"
 	"daidai/internal/db"
+	"daidai/internal/engine/render"
 	"daidai/internal/entity"
 	"daidai/internal/kernel"
 	"daidai/internal/media"
@@ -685,22 +686,122 @@ func (q *QQChannel) replyPrivateMessage(userID, messageID, text string) {
 	}
 }
 
+func singleLineText(value string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+}
+
 func (q *QQChannel) notifyOwnerOfPrivateAccessRequest(userID, displayName, message string) {
 	ownerID := strings.TrimSpace(q.cfg.OwnerOpenID)
 	if ownerID == "" || ownerID == strings.TrimSpace(userID) {
 		return
 	}
-	name := strings.TrimSpace(displayName)
-	if name == "" {
-		name = "未提供昵称"
+
+	var pendingRequests []db.PrivateAccessRequest
+	if q.accessRequests != nil {
+		reqCtx, reqCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		reqs, err := q.accessRequests.ListPendingPrivateAccessRequests(reqCtx, "qq", 10)
+		reqCancel()
+		if err != nil {
+			slog.Warn("qq_channel: 查询待处理私聊权限申请失败", "err", err)
+		} else {
+			pendingRequests = reqs
+		}
 	}
-	message = core.TruncateRunes(strings.TrimSpace(message), 200, "…")
-	if message == "" {
-		message = "（空消息或附件消息）"
+
+	// 确保当前申请人在列表中
+	foundCurrent := false
+	for _, req := range pendingRequests {
+		if req.UserID == userID {
+			foundCurrent = true
+			break
+		}
 	}
-	body := fmt.Sprintf("有新的 QQ 私聊权限申请\n昵称：%s\nOpenID：%s\n最近消息：%s\n\n如需授权，可直接告诉我“将 OpenID %s 加为协作者”。", core.TruncateRunes(name, 80, "…"), userID, message, userID)
+	if !foundCurrent {
+		currentReq := db.PrivateAccessRequest{
+			UserID:       userID,
+			DisplayName:  displayName,
+			LastMessage:  message,
+			FirstSeenAt:  time.Now(),
+			LastSeenAt:   time.Now(),
+			RequestCount: 1,
+		}
+		pendingRequests = append([]db.PrivateAccessRequest{currentReq}, pendingRequests...)
+	}
+
+	count := len(pendingRequests)
+	var md strings.Builder
+	if count <= 1 {
+		md.WriteString("### 📬 新的 QQ 私聊权限申请\n\n")
+	} else {
+		fmt.Fprintf(&md, "### 📬 QQ 私聊权限申请（共 %d 位待处理）\n\n", count)
+	}
+
+	for i, req := range pendingRequests {
+		name := strings.TrimSpace(req.DisplayName)
+		if name == "" {
+			name = "未提供昵称"
+		}
+		msg := singleLineText(req.LastMessage)
+		if msg == "" {
+			msg = "（空消息或附件消息）"
+		}
+		msg = core.TruncateRunes(msg, 120, "…")
+		lastSeen := req.LastSeenAt.Format("2006-01-02 15:04:05")
+		reqCount := req.RequestCount
+		if reqCount <= 0 {
+			reqCount = 1
+		}
+
+		fmt.Fprintf(&md, "#### 👤 #%d · %s\n", i+1, core.TruncateRunes(name, 40, "…"))
+		fmt.Fprintf(&md, "- **OpenID**：`%s`\n", req.UserID)
+		fmt.Fprintf(&md, "- **最近消息**：%s\n", msg)
+		fmt.Fprintf(&md, "- **最近联系**：%s（共 %d 次）\n\n", lastSeen, reqCount)
+	}
+
+	md.WriteString("---\n")
+	md.WriteString("💡 **权限说明**：\n")
+	md.WriteString("- **好友**（`friend`）：仅开放日常私聊对话（不可派发工程工单/切换模型）\n")
+	md.WriteString("- **协作者**（`collaborator`）：开放完整工程沙箱与协作者权限\n\n")
+	md.WriteString("💬 **操作指令**（可直接回复）：\n")
+	if count == 1 {
+		md.WriteString("- “将他加为好友” 或 “将第 1 个加为好友”\n")
+		md.WriteString("- “将他加为协作者” 或 “将第 1 个加为协作者”\n")
+		md.WriteString("- “拒绝申请”\n")
+	} else {
+		md.WriteString("- “将第 1 个申请者加为好友”（或指定昵称/序号）\n")
+		md.WriteString("- “将第 1 个申请者加为协作者”\n")
+		md.WriteString("- “拒绝第 1 个申请者的申请”\n")
+	}
+
+	body := md.String()
+
+	// 渲染卡片图
+	cardCtx, cardCancel := context.WithTimeout(context.Background(), 8*time.Second)
+	cardData, cardErr := render.RenderCard(cardCtx, body)
+	cardCancel()
+
+	utterance := &entity.Utterance{
+		Platform:  "qq",
+		ChannelID: ownerID,
+		Proactive: true,
+	}
+	if cardErr == nil && len(cardData) > 0 {
+		utterance.CardData = cardData
+		utterance.FallbackText = body
+		if count <= 1 {
+			utterance.Text = "📬 新的 QQ 私聊权限申请"
+		} else {
+			utterance.Text = fmt.Sprintf("📬 QQ 私聊权限申请（共 %d 位）", count)
+		}
+	} else {
+		if cardErr != nil {
+			slog.Warn("qq_channel: 私聊权限申请卡片渲染失败，回退纯文本", "err", cardErr)
+		}
+		utterance.Text = body
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	err := q.Transmit(ctx, &entity.Utterance{Platform: "qq", ChannelID: ownerID, Text: body, Proactive: true})
+	err := q.Transmit(ctx, utterance)
 	if err == nil {
 		cancel()
 		return
