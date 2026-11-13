@@ -935,8 +935,10 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) error {
 		}
 		parts = append(parts, part)
 	}
-	for _, image := range images[1:] {
-		parts = append(parts, qqOutgoingPart{image: image})
+	if len(images) > 1 {
+		for _, image := range images[1:] {
+			parts = append(parts, qqOutgoingPart{image: image})
+		}
 	}
 	if len(parts) > partLimit {
 		return fmt.Errorf("%w: 图文内容需要发送 %d 条，超过 QQ 单次最多 %d 条的限制", entity.ErrMessageTooLong, len(parts), partLimit)
