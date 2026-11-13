@@ -11,6 +11,7 @@ type ImmuneSystem struct {
 	mu            sync.RWMutex
 	partnerID     string
 	collaborators map[string]struct{}
+	privateUsers  map[string]struct{}
 }
 
 // NewImmuneSystem 实例化免疫系统
@@ -18,6 +19,7 @@ func NewImmuneSystem(partnerID string, collaborators ...string) *ImmuneSystem {
 	im := &ImmuneSystem{
 		partnerID:     strings.TrimSpace(partnerID),
 		collaborators: make(map[string]struct{}),
+		privateUsers:  make(map[string]struct{}),
 	}
 	for _, c := range collaborators {
 		c = strings.TrimSpace(c)
@@ -26,6 +28,31 @@ func NewImmuneSystem(partnerID string, collaborators ...string) *ImmuneSystem {
 		}
 	}
 	return im
+}
+
+func (im *ImmuneSystem) AddPrivateUser(userID string) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return
+	}
+	im.mu.Lock()
+	defer im.mu.Unlock()
+	im.privateUsers[userID] = struct{}{}
+}
+
+func (im *ImmuneSystem) RemovePrivateUser(userID string) {
+	userID = strings.TrimSpace(userID)
+	im.mu.Lock()
+	defer im.mu.Unlock()
+	delete(im.privateUsers, userID)
+}
+
+func (im *ImmuneSystem) HasPrivateAccess(userID string) bool {
+	userID = strings.TrimSpace(userID)
+	im.mu.RLock()
+	defer im.mu.RUnlock()
+	_, ok := im.privateUsers[userID]
+	return ok
 }
 
 // AddCollaborator 授权协作者

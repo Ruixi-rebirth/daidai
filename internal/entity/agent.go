@@ -1040,7 +1040,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 	if event == nil {
 		return
 	}
-	if !event.IsGroup && event.Role == RoleGuest {
+	if !event.IsGroup && event.Role == RoleGuest && !event.PrivateAccessGranted {
 		slog.Info("superagent: 忽略访客私聊", "platform", event.Platform, "channel", event.ChannelID, "sender", event.SenderID)
 		return
 	}

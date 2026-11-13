@@ -1128,7 +1128,37 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 		if q.immune != nil {
 			role = q.immune.ResolveRole(userID)
 		}
-		if !isGroup && role == entity.RoleGuest {
+		privateAccessGranted := !isGroup && role == entity.RoleGuest && q.immune != nil && q.immune.HasPrivateAccess(userID)
+		if !isGroup && role == entity.RoleGuest && !privateAccessGranted {
+			if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(content)), "DAIDAI-") {
+				inviteCode, shapeOK := db.NormalizeAccessInviteCode(content)
+				if shapeOK && q.accessRequests != nil && q.immune != nil {
+					redeemCtx, redeemCancel := context.WithTimeout(context.Background(), 3*time.Second)
+					redemption, redeemErr := q.accessRequests.RedeemPrivateAccessInvite(redeemCtx, "qq", db.HashAccessInviteCode(inviteCode), userID)
+					redeemCancel()
+					if redeemErr == nil && redemption != nil {
+						if redemption.EffectiveRole == "collaborator" {
+							q.immune.AddCollaborator(userID)
+						} else {
+							q.immune.AddPrivateUser(userID)
+						}
+						label := "私聊访客权限"
+						if redemption.EffectiveRole == "collaborator" {
+							label = "协作者权限"
+						}
+						q.replyPrivateMessage(userID, msgID, "邀请码验证通过，已开通"+label+"。")
+						if q.dedup != nil {
+							q.dedup.Remember(msgID)
+						}
+						return true
+					}
+				}
+				q.replyPrivateMessage(userID, msgID, "邀请码无效、已过期或已用完，权限未开通。")
+				if q.dedup != nil {
+					q.dedup.Remember(msgID)
+				}
+				return true
+			}
 			if q.dedup != nil {
 				q.dedup.Remember(msgID)
 			}
@@ -1240,6 +1270,7 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 			SenderID:              userID,
 			SenderName:            strings.TrimSpace(senderName),
 			Role:                  role,
+			PrivateAccessGranted:  privateAccessGranted,
 			Content:               strings.TrimSpace(content),
 			HistoryAttachmentNote: attachmentHistoryNote(len(images), omittedImages, len(files), omittedFiles),
 			Images:                images,

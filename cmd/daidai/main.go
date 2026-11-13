@@ -239,6 +239,8 @@ func run() int {
 		for _, role := range storedRoles {
 			if role.Role == "collaborator" {
 				immune.AddCollaborator(role.UserID)
+			} else if role.Role == "friend" {
+				immune.AddPrivateUser(role.UserID)
 			}
 		}
 	}

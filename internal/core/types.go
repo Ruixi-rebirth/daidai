@@ -136,6 +136,7 @@ type SensoryEvent struct {
 	SenderID              string        // 纯净发送者唯一物理标识
 	SenderName            string        // 发送者真实昵称（未知时留空，不伪造假名）
 	Role                  UserRole      // 免疫系统评估出的权限角色
+	PrivateAccessGranted  bool          // 已授权访客私聊，但仍保持访客级工具权限
 	Content               string        // 纯文本内容
 	HistoryAttachmentNote string        // 持久化历史中使用的附件占位说明，不包含附件地址或内容
 	HistoryRecordID       int64         // 入站消息对应的持久化历史记录 ID
