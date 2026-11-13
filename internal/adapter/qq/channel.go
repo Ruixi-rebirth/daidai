@@ -789,6 +789,13 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 	default:
 		return true
 	}
+	if qqMessageAuthorIsBot(d) {
+		if isGroup {
+			q.cancelPendingGroupInterjection(convID)
+		}
+		slog.Debug("qq: 忽略其他机器人的消息，避免机器人之间互相触发", "eventType", eventType, "channelID", convID, "msgID", msgID)
+		return true
+	}
 	if msgID != "" && q.dedup != nil && q.dedup.Contains(msgID) {
 		slog.Debug("qq: 拦截到重复投递的事件消息", "msgID", msgID)
 		return true
@@ -983,6 +990,19 @@ func qqMessageMentionsBot(eventData map[string]any) bool {
 			continue
 		}
 		if isYou, ok := mention["is_you"].(bool); ok && isYou {
+			return true
+		}
+	}
+	return false
+}
+
+func qqMessageAuthorIsBot(eventData map[string]any) bool {
+	author, ok := eventData["author"].(map[string]any)
+	if !ok {
+		return false
+	}
+	for _, key := range []string{"bot", "is_bot"} {
+		if isBot, ok := author[key].(bool); ok && isBot {
 			return true
 		}
 	}
