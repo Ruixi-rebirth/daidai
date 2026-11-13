@@ -1,6 +1,4 @@
 {
-  description = "Daidai Bot - Golang Refactor with Nix";
-
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
@@ -35,7 +33,7 @@
             shellHook = ''
               export CGO_ENABLED=0
               export TYPST_FONT_PATHS="${pkgs.twemoji-color-font}/share/fonts/truetype:${pkgs.maple-mono.CN}/share/fonts/truetype:${pkgs.source-han-sans}/share/fonts/truetype"
-              echo "✨ Daidai Go Refactor Environment Loaded ✨"
+              echo "✨ Daidai Development Environment Loaded ✨"
               echo "Go version: $(go version)"
               echo "Typst version: $(typst --version)"
             '';
