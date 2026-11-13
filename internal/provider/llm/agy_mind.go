@@ -604,8 +604,8 @@ func (p *AGYMindProvider) assemblePrompt(messages []core.ChatMessage, tools []co
 
 	var nativeTools []core.ToolDefinition
 	for _, t := range tools {
-		// AGY 自身已具备完整的文件、终端与联网检索能力，无需再通过 delegate_ticket 或 search_web 套娃启动第二个 AGY 进程
-		if t.Function.Name == "delegate_ticket" || t.Function.Name == "search_web" {
+		// AGY 自身已具备联网检索能力，无需套娃调用额外检索；但长耗时工程工单必须通过 delegate_ticket 委派给后台异步队列
+		if t.Function.Name == "search_web" {
 			continue
 		}
 		nativeTools = append(nativeTools, t)

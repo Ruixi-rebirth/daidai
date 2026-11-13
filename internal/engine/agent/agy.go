@@ -359,6 +359,7 @@ func (w *AGYWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (string
 		"--output-format", "json",
 		"--mode", "auto",
 		"--sandbox",
+		"--dangerously-skip-permissions",
 	}
 	for _, rawDir := range t.AdditionalDirs {
 		absDir, err := filepath.Abs(filepath.Clean(strings.TrimSpace(rawDir)))
