@@ -58,7 +58,7 @@ func (t *MemoryTool) Parameters() map[string]any {
 			"action": map[string]any{
 				"type":        "string",
 				"enum":        []string{"add", "update", "delete", "search", "list", "list_unconfirmed", "profile", "confirm_source"},
-				"description": "操作类型：profile 生成当前用户的印象与记忆图卡；list 列出当前页已确认记忆；私聊中的 list_unconfirmed 列出来源范围未确认的旧记忆及 ID，供用户核对。profile、list、list_unconfirmed 默认第 1 页、每页 12 条，下一页或上一页使用 page_direction，指定页码使用 page；search 检索当前范围的长期事实与历史对话，命中事实超过 12 条时每页展示 12 条，翻页沿用相同 query；add、update、delete 管理当前范围的长期事实；confirm_source 仅在用户核对并明确确认后，将来源范围不明的旧事实确认成私聊全局记忆",
+				"description": "操作类型：profile 生成当前用户的印象与记忆图卡；list 列出当前页已确认记忆；私聊中的 list_unconfirmed 列出来源范围未确认的旧记忆及 ID，供用户核对。用户问‘未确认的记忆有哪些’‘哪几条待核对’或类似问题时，必须用 list_unconfirmed 展示事实内容和 ID，不要只回答数量。profile、list、list_unconfirmed 默认第 1 页、每页 12 条，下一页或上一页使用 page_direction，指定页码使用 page；search 检索当前范围的长期事实与历史对话，命中事实超过 12 条时每页展示 12 条，翻页沿用相同 query；add、update、delete 管理当前范围的长期事实；confirm_source 仅在用户核对并明确确认后，将来源范围不明的旧事实确认成私聊全局记忆",
 			},
 			"fact": map[string]any{
 				"type":        "string",
@@ -446,6 +446,15 @@ func (t *MemoryTool) profile(ctx context.Context, event *entity.SensoryEvent, re
 			return nil, fmt.Errorf("读取画像所需的近期记忆失败: %w", err)
 		}
 	}
+	var unconfirmedPreview []*core.Fact
+	if !event.IsGroup && totalUnconfirmedFacts > 0 {
+		previewSize := min(3, totalUnconfirmedFacts)
+		unconfirmedPreview, _, err = t.db.PageUnconfirmedVisibleFacts(ctx, event.Platform, event.SenderID, 1, previewSize)
+		if err != nil {
+			slog.Warn("memory: 读取画像卡片待核对旧记忆失败", "platform", event.Platform, "err", err)
+			unconfirmedPreview = nil
+		}
+	}
 
 	chatType := "private"
 	if event.IsGroup {
@@ -573,8 +582,19 @@ func (t *MemoryTool) profile(ctx context.Context, event *entity.SensoryEvent, re
 			fmt.Fprintf(&card, "\n*第 %d/%d 页 · 共 %d 条记忆 · 可以说“下一页”或“上一页”继续浏览。*\n", page, totalPages, totalConfirmedFacts)
 		}
 	}
-	if totalUnconfirmedFacts > 0 {
-		fmt.Fprintf(&card, "\n*另有 %d 条旧记忆的来源尚未核对，暂时没有把它们作为确定印象。*\n", totalUnconfirmedFacts)
+	if len(unconfirmedPreview) > 0 {
+		fmt.Fprintf(&card, "\n### 🕰️ 待核对的旧记忆\n\n")
+		for _, fact := range unconfirmedPreview {
+			if fact != nil {
+				fmt.Fprintf(&card, "- **ID %d** · %s\n", fact.ID, singleLineText(fact.Content))
+			}
+		}
+		if totalUnconfirmedFacts > len(unconfirmedPreview) {
+			fmt.Fprintf(&card, "\n*另有 %d 条；可以让我分页列出全部。*\n", totalUnconfirmedFacts-len(unconfirmedPreview))
+		}
+		card.WriteString("\n*确认某条后说“确认记忆 ID <数字>”；不确认也可以让我删除。*\n")
+	} else if totalUnconfirmedFacts > 0 && !event.IsGroup {
+		fmt.Fprintf(&card, "\n*另有 %d 条旧记忆的来源尚未核对；可以让我分页列出内容。*\n", totalUnconfirmedFacts)
 	}
 	fmt.Fprintf(&card, "\n---\n\n*%s 记错了可以直接告诉我。*", scopeDescription)
 	content := card.String()

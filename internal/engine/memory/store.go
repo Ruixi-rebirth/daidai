@@ -395,7 +395,62 @@ func (m *MemoryEngine) recallPreviousSessionDigest(ctx context.Context, event *e
 	return fmt.Sprintf("【上一场对话历史脉络（距今已间隔超 2 小时，仅供跨场次背景参考）】：\n%s", strings.Join(lines, "\n"))
 }
 
-// Commit 沉淀当前交互历史与新对话：会话记录同步入库防丢，后台异步自动提炼与消解用户长期事实
+func historyUserText(event *entity.SensoryEvent) string {
+	if event == nil {
+		return ""
+	}
+	userText := strings.TrimSpace(core.TruncateRunes(event.Content, core.MaxUserMessageRunes, "\n[消息过长，后续内容已截断]"))
+	if entity.IsSensitiveAuthCommand(userText) {
+		userText = "[OAuth authorization code redacted]"
+	}
+	if note := strings.TrimSpace(event.HistoryAttachmentNote); note != "" {
+		if userText != "" {
+			userText += "\n"
+		}
+		userText += note
+	}
+	if summary := strings.TrimSpace(core.TruncateRunes(event.VisionSummary, core.MaxVisionSummaryRunes, "\n[视觉摘要过长，后续内容已截断]")); summary != "" {
+		if userText != "" {
+			userText += "\n"
+		}
+		userText += "[图片内容: " + summary + "]"
+	}
+	return core.TruncateRunes(userText, core.MaxUserMessageRunes, "\n[消息过长，后续内容已截断]")
+}
+
+func shouldRecordHistoryEvent(event *entity.SensoryEvent) bool {
+	if event == nil {
+		return false
+	}
+	content := strings.TrimSpace(event.Content)
+	if strings.HasPrefix(content, "/") || content == "继续" || entity.IsSensitiveAuthCommand(content) {
+		return false
+	}
+	return historyUserText(event) != ""
+}
+
+// RecordInbound persists each accepted raw user message before debounce or cognition can fail.
+func (m *MemoryEngine) RecordInbound(ctx context.Context, event *entity.SensoryEvent) error {
+	if m == nil || event == nil || event.Platform == "" || event.HistoryRecordID > 0 || !shouldRecordHistoryEvent(event) {
+		return nil
+	}
+	dbMgr := m.getDB()
+	if dbMgr == nil {
+		return nil
+	}
+	chatType := "private"
+	if event.IsGroup {
+		chatType = "group"
+	}
+	id, err := dbMgr.LogInboundMessage(ctx, event.Platform, chatType, event.ChannelID, event.SenderID, event.SenderName, historyUserText(event), event.RawMessageID)
+	if err != nil {
+		return err
+	}
+	event.HistoryRecordID = id
+	return nil
+}
+
+// Commit stores only delivered bot output and attaches derived vision text to the already persisted user row.
 func (m *MemoryEngine) Commit(ctx context.Context, event *entity.SensoryEvent, replyText string) {
 	dbMgr := m.getDB()
 	if dbMgr == nil || event == nil || event.Platform == "" {
@@ -407,27 +462,26 @@ func (m *MemoryEngine) Commit(ctx context.Context, event *entity.SensoryEvent, r
 		chatType = "group"
 	}
 
-	userText := core.TruncateRunes(event.Content, core.MaxUserMessageRunes, "\n[消息过长，后续内容已截断]")
 	visionSummary := core.TruncateRunes(event.VisionSummary, core.MaxVisionSummaryRunes, "\n[视觉摘要过长，后续内容已截断]")
-	if entity.IsSensitiveAuthCommand(userText) {
-		userText = "[OAuth authorization code redacted]"
-	}
-	if visionSummary != "" {
-		if userText != "" {
-			userText += "\n[图片内容: " + visionSummary + "]"
-		} else {
-			userText = "[图片内容: " + visionSummary + "]"
-		}
-	}
-	userText = core.TruncateRunes(userText, core.MaxUserMessageRunes, "\n[消息过长，后续内容已截断]")
 	replyText = core.TruncateRunes(replyText, core.MaxUserMessageRunes, "\n[消息过长，后续内容已截断]")
 
 	var userMsgID, botMsgID int64
-	if userText != "" {
+	userText := ""
+	if shouldRecordHistoryEvent(event) {
+		if event.HistoryRecordID == 0 {
+			if err := m.RecordInbound(ctx, event); err != nil {
+				slog.Warn("memory: 保存入站消息失败", "platform", event.Platform, "channel", event.ChannelID, "err", err)
+			}
+		}
+		userMsgID = event.HistoryRecordID
 		var err error
-		userMsgID, err = dbMgr.LogMessage(ctx, event.Platform, chatType, event.ChannelID, event.SenderID, event.SenderName, userText, false, "", event.RawMessageID)
+		if userMsgID > 0 && visionSummary != "" {
+			userText, err = dbMgr.AppendMessageText(ctx, event.Platform, userMsgID, "[图片内容: "+visionSummary+"]")
+		} else if userMsgID > 0 {
+			userText, err = dbMgr.MessageTextByID(ctx, event.Platform, userMsgID)
+		}
 		if err != nil {
-			slog.Warn("memory: 保存用户消息失败", "platform", event.Platform, "channel", event.ChannelID, "err", err)
+			slog.Warn("memory: 更新入站消息记录失败", "platform", event.Platform, "channel", event.ChannelID, "err", err)
 		}
 	}
 

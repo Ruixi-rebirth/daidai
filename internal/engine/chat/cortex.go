@@ -1029,6 +1029,21 @@ func cardFallbackCaption(content string) string {
 	return "图片展示了整理后的内容，详细信息请看图。"
 }
 
+// RecordInbound persists accepted user input before debounce can merge messages
+// or later processing and delivery can fail.
+func (c *Cortex) RecordInbound(ctx context.Context, event *entity.SensoryEvent) error {
+	if c == nil || c.memory == nil || event == nil {
+		return nil
+	}
+	recorder, ok := c.memory.(interface {
+		RecordInbound(context.Context, *entity.SensoryEvent) error
+	})
+	if !ok {
+		return nil
+	}
+	return recorder.RecordInbound(ctx, event)
+}
+
 // CommitDeliveredReply 在发送层确认结果后持久化本轮消息，避免将未送达或未脱敏的回复写入会话历史。
 func (c *Cortex) CommitDeliveredReply(ctx context.Context, event *entity.SensoryEvent, replyText string) {
 	if c.inbox != nil && event != nil && event.Platform == "qq" && event.ReplyDelivered && len(event.ProcessedAttachments) > 0 {

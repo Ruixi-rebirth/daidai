@@ -125,31 +125,33 @@ type Attachment struct {
 
 // SensoryEvent 经由物理通道归一化与防抖合并后的统一感知事件 (零前缀规范)
 type SensoryEvent struct {
-	Platform             string        // "qq", "cli", "telegram"
-	IsGroup              bool          // 是否为群聊场景
-	ChannelID            string        // 纯净会话标识 (纯群号或纯私聊用户 ID)
-	SenderID             string        // 纯净发送者唯一物理标识
-	SenderName           string        // 发送者真实昵称（未知时留空，不伪造假名）
-	Role                 UserRole      // 免疫系统评估出的权限角色
-	Content              string        // 纯文本内容
-	Images               []*Attachment // 多模态图像感知
-	OmittedImages        int           // 超出单轮视觉识别上限、未纳入分析的图片数
-	PendingImages        []*Attachment // 同一发送者近期发送、尚未处理的图片元数据；仅显式请求时进行视觉分析
-	OmittedPendingImages int           // 待确认图片列表超出保留上限后丢弃的图片数
-	Files                []*Attachment // QQ 上传的普通文件；下载后由 AGY 工单按需读取
-	PendingFiles         []*Attachment // 同一发送者近期发送、尚未处理的文件元数据；仅显式引用时交给 AGY
-	OmittedFiles         int           // 超出单轮文件处理上限、未下载的文件数
-	OmittedPendingFiles  int           // 待确认文件列表超出保留上限后丢弃的文件数
-	ProcessedAttachments []*Attachment // 本轮成功处理、仅在回复送达后从待处理列表移除的附件
-	ReplyDelivered       bool          // 发声通道是否接受本轮回复（允许部分送达）；用于提交交付后生效的状态
-	VisionSummary        string        // 多模态看图提炼出的视觉观察摘要（用于持久化至工作记忆）
-	ReplyContext         *SensoryEvent // 引用的前置消息上下文
-	RawMessageID         string        // 原始平台消息 ID (用于被动回复凭证)
-	OccurredAt           time.Time     // 事件发生时间
-	GroupMessageObserved bool          // 未 @ 机器人的 QQ 群消息；写入本群历史，但默认不触发认知回复
-	GroupInterjection    bool          // 当前未 @ 群消息通过低频判断，可尝试生成一条短回复
-	OnProgress           func(string)  // 认知耗时操作（如签发重型工单）时的即时进度回执回调
-	StillValid           func() bool   // 可选的队列代际校验；等待会话锁后用于丢弃已被 reset 作废的事件
+	Platform              string        // "qq", "cli", "telegram"
+	IsGroup               bool          // 是否为群聊场景
+	ChannelID             string        // 纯净会话标识 (纯群号或纯私聊用户 ID)
+	SenderID              string        // 纯净发送者唯一物理标识
+	SenderName            string        // 发送者真实昵称（未知时留空，不伪造假名）
+	Role                  UserRole      // 免疫系统评估出的权限角色
+	Content               string        // 纯文本内容
+	HistoryAttachmentNote string        // 持久化历史中使用的附件占位说明，不包含附件地址或内容
+	HistoryRecordID       int64         // 入站消息对应的持久化历史记录 ID
+	Images                []*Attachment // 多模态图像感知
+	OmittedImages         int           // 超出单轮视觉识别上限、未纳入分析的图片数
+	PendingImages         []*Attachment // 同一发送者近期发送、尚未处理的图片元数据；仅显式请求时进行视觉分析
+	OmittedPendingImages  int           // 待确认图片列表超出保留上限后丢弃的图片数
+	Files                 []*Attachment // QQ 上传的普通文件；下载后由 AGY 工单按需读取
+	PendingFiles          []*Attachment // 同一发送者近期发送、尚未处理的文件元数据；仅显式引用时交给 AGY
+	OmittedFiles          int           // 超出单轮文件处理上限、未下载的文件数
+	OmittedPendingFiles   int           // 待确认文件列表超出保留上限后丢弃的文件数
+	ProcessedAttachments  []*Attachment // 本轮成功处理、仅在回复送达后从待处理列表移除的附件
+	ReplyDelivered        bool          // 发声通道是否接受本轮回复（允许部分送达）；用于提交交付后生效的状态
+	VisionSummary         string        // 多模态看图提炼出的视觉观察摘要（用于持久化至工作记忆）
+	ReplyContext          *SensoryEvent // 引用的前置消息上下文
+	RawMessageID          string        // 原始平台消息 ID (用于被动回复凭证)
+	OccurredAt            time.Time     // 事件发生时间
+	GroupMessageObserved  bool          // 未 @ 机器人的 QQ 群消息；写入本群历史，但默认不触发认知回复
+	GroupInterjection     bool          // 当前未 @ 群消息通过低频判断，可尝试生成一条短回复
+	OnProgress            func(string)  // 认知耗时操作（如签发重型工单）时的即时进度回执回调
+	StillValid            func() bool   // 可选的队列代际校验；等待会话锁后用于丢弃已被 reset 作废的事件
 }
 
 // IsPartnerPrivate 判断当前感知事件是否为核心伙伴在私聊下发起的最高信任级交互

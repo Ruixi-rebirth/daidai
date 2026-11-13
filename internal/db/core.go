@@ -782,6 +782,87 @@ func (m *Manager) LogMessage(ctx context.Context, platform, chatType, convID, us
 	return res.LastInsertId()
 }
 
+// LogInboundMessage records one raw user event once, keyed by its platform
+// message ID. It runs before debounce so merged turns cannot erase messages.
+func (m *Manager) LogInboundMessage(ctx context.Context, platform, chatType, convID, userID, name, text, platformMsgID string) (int64, error) {
+	if platformMsgID == "" {
+		return m.LogMessage(ctx, platform, chatType, convID, userID, name, text, false, "", "")
+	}
+	text = core.TruncateRunes(text, core.MaxUserMessageRunes, "…[消息已截断]")
+	p := NormPlatform(platform)
+	database, err := m.GetConn(p)
+	if err != nil {
+		return 0, err
+	}
+	result, err := database.ExecContext(ctx, `
+		INSERT INTO messages (platform, chat_type, conv_id, user_id, name, text, is_bot, created_at, reply_to_uid, platform_msg_id)
+		SELECT ?, ?, ?, ?, ?, ?, 0, ?, '', ?
+		WHERE NOT EXISTS (
+			SELECT 1 FROM messages
+			WHERE platform = ? AND chat_type = ? AND conv_id = ? AND platform_msg_id = ? AND is_bot = 0
+		)`, p, chatType, convID, userID, name, text, time.Now().UnixMilli(), platformMsgID, p, chatType, convID, platformMsgID)
+	if err != nil {
+		return 0, err
+	}
+	if inserted, err := result.RowsAffected(); err != nil {
+		return 0, err
+	} else if inserted > 0 {
+		return result.LastInsertId()
+	}
+	var id int64
+	err = database.QueryRowContext(ctx, `SELECT id FROM messages
+		WHERE platform = ? AND chat_type = ? AND conv_id = ? AND platform_msg_id = ? AND is_bot = 0
+		ORDER BY id DESC LIMIT 1`, p, chatType, convID, platformMsgID).Scan(&id)
+	return id, err
+}
+
+// MessageTextByID loads one bounded history row for its asynchronous embedding.
+func (m *Manager) MessageTextByID(ctx context.Context, platform string, id int64) (string, error) {
+	if id <= 0 {
+		return "", nil
+	}
+	database, err := m.GetConn(platform)
+	if err != nil {
+		return "", err
+	}
+	var text string
+	err = database.QueryRowContext(ctx, `SELECT substr(text, 1, ?) FROM messages WHERE platform = ? AND id = ? AND is_bot = 0`, core.MaxUserMessageRunes+1, NormPlatform(platform), id).Scan(&text)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return text, err
+}
+
+// AppendMessageText adds a derived note, such as a vision summary, to an
+// already persisted inbound row without duplicating the note on retries.
+func (m *Manager) AppendMessageText(ctx context.Context, platform string, id int64, addition string) (string, error) {
+	if id <= 0 || strings.TrimSpace(addition) == "" {
+		return m.MessageTextByID(ctx, platform, id)
+	}
+	database, err := m.GetConn(platform)
+	if err != nil {
+		return "", err
+	}
+	var current string
+	if err := database.QueryRowContext(ctx, `SELECT text FROM messages WHERE platform = ? AND id = ? AND is_bot = 0`, NormPlatform(platform), id).Scan(&current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", err
+	}
+	if !strings.Contains(current, addition) {
+		separator := "\n"
+		if current == "" {
+			separator = ""
+		}
+		current = core.TruncateRunes(current+separator+addition, core.MaxUserMessageRunes, "\n[消息过长，后续内容已截断]")
+		if _, err := database.ExecContext(ctx, `UPDATE messages SET text = ? WHERE platform = ? AND id = ? AND is_bot = 0`, current, NormPlatform(platform), id); err != nil {
+			return "", err
+		}
+	}
+	return current, nil
+}
+
 // MessageContentByPlatformID retrieves the latest stored body for a platform message reference.
 func (m *Manager) MessageContentByPlatformID(ctx context.Context, platform, chatType, convID, platformMsgID string) (string, error) {
 	if platformMsgID == "" || (chatType != "private" && chatType != "group") || strings.TrimSpace(convID) == "" {

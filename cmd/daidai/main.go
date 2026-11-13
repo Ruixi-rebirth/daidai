@@ -298,6 +298,7 @@ func run() int {
 			Secret: cfg.QQ.Secret,
 		}, immune)
 		qqChannel.SetAttachmentInbox(attachmentInbox)
+		qqChannel.SetHistoryRecorder(cortex.RecordInbound)
 		channelRegistry.Register(qqChannel)
 	}
 

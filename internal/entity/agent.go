@@ -984,6 +984,17 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 	if event.StillValid != nil && !event.StillValid() {
 		return
 	}
+	if event.HistoryRecordID == 0 {
+		if recorder, ok := a.Cognition.(interface {
+			RecordInbound(context.Context, *SensoryEvent) error
+		}); ok {
+			recordCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := recorder.RecordInbound(recordCtx, event); err != nil {
+				slog.Warn("superagent: 保存入站消息历史失败", "channel", event.ChannelID, "err", err)
+			}
+			cancel()
+		}
+	}
 
 	content := strings.TrimSpace(event.Content)
 	slog.Info("superagent: 感知事件流入大脑", "channel", event.ChannelID, "isGroup", event.IsGroup, "sender", event.SenderName, "role", event.Role, "contentBytes", len(content))

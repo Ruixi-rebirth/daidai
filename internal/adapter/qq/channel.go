@@ -358,6 +358,15 @@ type QQChannel struct {
 	groupInterjectionsMu     sync.Mutex
 	groupInterjections       map[string]time.Time
 	groupInterjectionSweepAt time.Time
+	historyRecorder          func(context.Context, *entity.SensoryEvent) error
+}
+
+// SetHistoryRecorder installs the callback used to persist each raw inbound
+// event before debounce can merge it with neighboring messages.
+func (q *QQChannel) SetHistoryRecorder(recorder func(context.Context, *entity.SensoryEvent) error) {
+	if q != nil {
+		q.historyRecorder = recorder
+	}
 }
 
 func (q *QQChannel) shouldConsiderGroupInterjection(groupID string) bool {
@@ -562,7 +571,7 @@ func (q *QQChannel) Start(ctx context.Context, onSensory func(event *entity.Sens
 			return
 		}
 		event.Content = strings.TrimSpace(event.Content)
-		if event.Content == "" && len(event.Images) == 0 && event.OmittedImages == 0 && len(event.Files) == 0 && event.OmittedFiles == 0 &&
+		if event.Content == "" && event.HistoryAttachmentNote == "" && len(event.Images) == 0 && event.OmittedImages == 0 && len(event.Files) == 0 && event.OmittedFiles == 0 &&
 			len(event.PendingImages) == 0 && event.OmittedPendingImages == 0 && len(event.PendingFiles) == 0 && event.OmittedPendingFiles == 0 {
 			return
 		}
@@ -587,6 +596,15 @@ func (q *QQChannel) IngestRaw(event *entity.SensoryEvent) bool {
 	}
 	if q.debounce == nil {
 		return false
+	}
+	if q.historyRecorder != nil {
+		recordCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := q.historyRecorder(recordCtx, event); err != nil {
+			cancel()
+			slog.Warn("qq_channel: 保存入站消息历史失败", "channelID", event.ChannelID, "msgID", event.RawMessageID, "err", err)
+			return false
+		}
+		cancel()
 	}
 	return q.debounce.Push(event)
 }
@@ -779,7 +797,8 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 		pendingImages, omittedPendingImages = q.inbox.PendingKind(attachmentScope, core.AttachmentImage)
 	}
 	if convID != "" && userID != "" && (content != "" || len(images) > 0 || len(files) > 0 || len(pendingFiles) > 0 || len(pendingImages) > 0 || omittedPendingFiles > 0 || omittedPendingImages > 0) {
-		if content != "" && q.msgCache != nil && !entity.IsSensitiveAuthCommand(content) {
+		trimmedContent := strings.TrimSpace(content)
+		if trimmedContent != "" && !strings.HasPrefix(trimmedContent, "/") && trimmedContent != "继续" && q.msgCache != nil && !entity.IsSensitiveAuthCommand(content) {
 			chatType := "private"
 			if isGroup {
 				chatType = "group"
@@ -794,7 +813,8 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 			q.inbox.RememberPending(attachmentScope, append(append([]*core.Attachment(nil), files...), images...))
 		}
 		if fullGroupEvent && !botMentioned {
-			if content == "" {
+			historyAttachmentNote := attachmentHistoryNote(len(images), omittedImages, len(files), omittedFiles)
+			if content == "" && historyAttachmentNote == "" {
 				if q.dedup != nil {
 					q.dedup.Remember(msgID)
 				}
@@ -807,18 +827,19 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 				canInterject = q.shouldConsiderGroupInterjection(convID)
 			}
 			accepted := q.IngestRaw(&entity.SensoryEvent{
-				Platform:             "qq",
-				ChannelID:            convID,
-				IsGroup:              true,
-				SenderID:             userID,
-				SenderName:           strings.TrimSpace(senderName),
-				Role:                 role,
-				Content:              strings.TrimSpace(content),
-				ReplyContext:         replyCtx,
-				RawMessageID:         msgID,
-				OccurredAt:           time.Now(),
-				GroupMessageObserved: true,
-				GroupInterjection:    canInterject,
+				Platform:              "qq",
+				ChannelID:             convID,
+				IsGroup:               true,
+				SenderID:              userID,
+				SenderName:            strings.TrimSpace(senderName),
+				Role:                  role,
+				Content:               strings.TrimSpace(content),
+				HistoryAttachmentNote: historyAttachmentNote,
+				ReplyContext:          replyCtx,
+				RawMessageID:          msgID,
+				OccurredAt:            time.Now(),
+				GroupMessageObserved:  true,
+				GroupInterjection:     canInterject,
 			})
 			if accepted && q.dedup != nil {
 				q.dedup.Remember(msgID)
@@ -826,24 +847,25 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 			return accepted
 		}
 		accepted := q.IngestRaw(&entity.SensoryEvent{
-			Platform:             "qq",
-			ChannelID:            convID,
-			IsGroup:              isGroup,
-			SenderID:             userID,
-			SenderName:           strings.TrimSpace(senderName),
-			Role:                 role,
-			Content:              strings.TrimSpace(content),
-			Images:               images,
-			OmittedImages:        omittedImages,
-			PendingImages:        pendingImages,
-			OmittedPendingImages: omittedPendingImages,
-			Files:                files,
-			PendingFiles:         pendingFiles,
-			OmittedFiles:         omittedFiles,
-			OmittedPendingFiles:  omittedPendingFiles,
-			ReplyContext:         replyCtx,
-			RawMessageID:         msgID,
-			OccurredAt:           time.Now(),
+			Platform:              "qq",
+			ChannelID:             convID,
+			IsGroup:               isGroup,
+			SenderID:              userID,
+			SenderName:            strings.TrimSpace(senderName),
+			Role:                  role,
+			Content:               strings.TrimSpace(content),
+			HistoryAttachmentNote: attachmentHistoryNote(len(images), omittedImages, len(files), omittedFiles),
+			Images:                images,
+			OmittedImages:         omittedImages,
+			PendingImages:         pendingImages,
+			OmittedPendingImages:  omittedPendingImages,
+			Files:                 files,
+			PendingFiles:          pendingFiles,
+			OmittedFiles:          omittedFiles,
+			OmittedPendingFiles:   omittedPendingFiles,
+			ReplyContext:          replyCtx,
+			RawMessageID:          msgID,
+			OccurredAt:            time.Now(),
 		})
 		if !accepted {
 			return false
@@ -870,6 +892,20 @@ func qqMessageMentionsBot(eventData map[string]any) bool {
 		}
 	}
 	return false
+}
+
+func attachmentHistoryNote(images, omittedImages int, files, omittedFiles int) string {
+	var kinds []string
+	if count := images + omittedImages; count > 0 {
+		kinds = append(kinds, fmt.Sprintf("图片 %d 张", count))
+	}
+	if count := files + omittedFiles; count > 0 {
+		kinds = append(kinds, fmt.Sprintf("文件 %d 个", count))
+	}
+	if len(kinds) == 0 {
+		return ""
+	}
+	return "[附件：" + strings.Join(kinds, "，") + "；未保存附件本体]"
 }
 
 // Transmit 物理发声：投递全息表达体到 QQ 客户端 (支持大文本自动分片与图文混合发送)

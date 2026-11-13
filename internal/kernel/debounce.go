@@ -623,15 +623,16 @@ func mergeEvents(events []*core.SensoryEvent) *core.SensoryEvent {
 	}
 	latest := events[len(events)-1]
 	merged := &core.SensoryEvent{
-		Platform:     latest.Platform,
-		IsGroup:      latest.IsGroup,
-		ChannelID:    latest.ChannelID,
-		SenderID:     latest.SenderID,
-		SenderName:   latest.SenderName,
-		Role:         latest.Role,
-		RawMessageID: latest.RawMessageID,
-		OccurredAt:   latest.OccurredAt,
-		ReplyContext: latest.ReplyContext,
+		Platform:        latest.Platform,
+		IsGroup:         latest.IsGroup,
+		ChannelID:       latest.ChannelID,
+		SenderID:        latest.SenderID,
+		SenderName:      latest.SenderName,
+		Role:            latest.Role,
+		RawMessageID:    latest.RawMessageID,
+		HistoryRecordID: latest.HistoryRecordID,
+		OccurredAt:      latest.OccurredAt,
+		ReplyContext:    latest.ReplyContext,
 	}
 
 	var textParts []string
