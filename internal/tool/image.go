@@ -18,12 +18,19 @@ import (
 )
 
 // runStatelessImageGen 无状态调用一次 agy 执行生图子任务（不占用工程工单槽位，不累积幽灵会话上下文）
-func runStatelessImageGen(ctx context.Context, command, goal, workDir string) (string, error) {
+type agyRunResult struct {
+	ConversationID string `json:"conversation_id"`
+	Status         string `json:"status"`
+	Response       string `json:"response"`
+	Error          string `json:"error"`
+}
+
+func runStatelessImageGen(ctx context.Context, command, goal, workDir string) (agyRunResult, error) {
 	if ctx == nil {
-		return "", fmt.Errorf("image generation requires a caller context")
+		return agyRunResult{}, fmt.Errorf("image generation requires a caller context")
 	}
 	if err := llm.CheckAGYAuth(); err != nil {
-		return "", err
+		return agyRunResult{}, err
 	}
 	command = strings.TrimSpace(command)
 	if command == "" {
@@ -32,7 +39,7 @@ func runStatelessImageGen(ctx context.Context, command, goal, workDir string) (s
 
 	args := []string{
 		"-p", goal,
-		"--output-format", "text",
+		"--output-format", "json",
 		"--sandbox",
 	}
 
@@ -65,16 +72,30 @@ func runStatelessImageGen(ctx context.Context, command, goal, workDir string) (s
 		if stdoutBuf.Truncated() || stderrBuf.Truncated() {
 			errDetail += " (子进程输出已截断)"
 		}
-		return "", fmt.Errorf("%w (%s)", err, errDetail)
+		return agyRunResult{}, fmt.Errorf("%w (%s)", err, errDetail)
 	}
-	output := strings.TrimSpace(stdoutBuf.String())
+	var result agyRunResult
+	if err := json.Unmarshal(stdoutBuf.Bytes(), &result); err != nil {
+		return agyRunResult{}, fmt.Errorf("解析 AGY JSON 结果失败: %w", err)
+	}
+	if result.Status != "SUCCESS" {
+		if strings.TrimSpace(result.Error) == "" {
+			result.Error = result.Response
+		}
+		return result, fmt.Errorf("AGY 任务状态为 %q: %s", result.Status, strings.TrimSpace(result.Error))
+	}
+	if result.ConversationID == "" {
+		return result, fmt.Errorf("AGY 结果缺少 conversation_id")
+	}
+	output := strings.TrimSpace(result.Response)
 	if stdoutBuf.Truncated() {
 		output += "\n[标准输出已截断，最多保留 2 MiB]"
 	}
 	if runes := []rune(output); len(runes) > 8000 {
 		output = string(runes[:8000]) + "... (输出摘要已截断)"
 	}
-	return output, nil
+	result.Response = output
+	return result, nil
 }
 
 // ImageTool 通用真实图片与插画生成工具 (实现 core.Tool)
@@ -214,7 +235,7 @@ func (t *ImageTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 	goal := fmt.Sprintf("请调用 image-generator 子智能体生成一张图片，画面要求：%s。将最终文件保存到目标路径：%s；必须确认该文件实际存在且非空后才能结束任务，文件内容必须是实际 PNG 格式（不能只修改扩展名）。", prompt, absOutFile)
 
 	slog.Info("image_tool: 触发无状态后台生成图片", "promptBytes", len(prompt))
-	output, execErr := runStatelessImageGen(ctx, t.command, goal, workDir)
+	agyResult, execErr := runStatelessImageGen(ctx, t.command, goal, workDir)
 	if execErr != nil {
 		slog.Warn("image_tool: 生成图片失败", "err", execErr)
 		return &core.ToolResult{
@@ -240,8 +261,75 @@ func (t *ImageTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 		return &core.ToolResult{Text: "图片生成任务已执行，但读取生成结果失败；请检查服务日志。"}, nil
 	}
 
-	slog.Warn("image_tool: 生图任务未在工作区生成图片", "outputBytes", len(output))
+	// AGY's image-generator agent may save the finished image into its own
+	// conversation artifact directory. The JSON result identifies this exact
+	// AGY conversation, so recovery never scans artifacts from another run.
+	if data, generatedPath, err := readAGYImageArtifact(ctx, agyResult.ConversationID); err == nil {
+		slog.Info("image_tool: 从本次 AGY 会话产物中恢复图片", "conversationID", agyResult.ConversationID, "file", filepath.Base(generatedPath))
+		normalized, format, normalizeErr := normalizeImageData(ctx, data)
+		if normalizeErr != nil {
+			slog.Warn("image_tool: AGY 会话产物无法解码或转换", "contentType", imageContentType(data), "format", format, "bytes", len(data), "err", normalizeErr)
+			return &core.ToolResult{Text: fmt.Sprintf("生图任务写出了文件，但无法识别或转换为可发送图片（检测类型：%s）：%v", imageContentType(data), normalizeErr)}, nil
+		}
+		return &core.ToolResult{Text: fmt.Sprintf("已生成图片：%s", prompt), ImageData: normalized}, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		slog.Warn("image_tool: AGY 会话产物扫描失败", "err", err)
+	}
+
+	slog.Warn("image_tool: 生图任务未找到图片", "conversationID", agyResult.ConversationID, "outputBytes", len(agyResult.Response))
 	return &core.ToolResult{
 		Text: "生成任务已结束，但没有找到图片文件；未确认失败原因，不要推测为超时或上游服务故障。",
 	}, nil
+}
+
+func readAGYImageArtifact(ctx context.Context, conversationID string) ([]byte, string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	conversationID = strings.TrimSpace(conversationID)
+	if !isAGYConversationID(conversationID) {
+		return nil, "", fmt.Errorf("无效的 AGY conversation_id")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, "", err
+	}
+	root := filepath.Join(home, ".gemini", "antigravity-cli", "brain", conversationID)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, "", err
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
+		if !entry.Type().IsRegular() || entry.Name() == "" {
+			continue
+		}
+		path := filepath.Join(root, entry.Name())
+		data, err := readFileLimited(path, maxGeneratedImageBytes)
+		if err == nil && strings.HasPrefix(imageContentType(data), "image/") {
+			return data, path, nil
+		}
+	}
+	return nil, "", os.ErrNotExist
+}
+
+func isAGYConversationID(value string) bool {
+	parts := strings.Split(value, "-")
+	lengths := [...]int{8, 4, 4, 4, 12}
+	if len(parts) != len(lengths) {
+		return false
+	}
+	for i, part := range parts {
+		if len(part) != lengths[i] {
+			return false
+		}
+		for _, char := range part {
+			if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
 }

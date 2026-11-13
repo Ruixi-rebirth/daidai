@@ -255,7 +255,7 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 	goal := fmt.Sprintf("请调用 image-generator 子智能体生成一张呆呆本人的二次元插画照片（主题/角度/神态：%s），请先读取参考基准图 %s 以保持同一人物的五官、发色（黑茶色微卷中长发）、白色小兔发夹、蓝灰眼眸与画风一致。将最终图片保存到指定路径 %s；必须确认该文件实际存在且非空后才能结束任务，文件内容必须是实际 PNG 格式（不能只修改扩展名）。", emotion, refPath, absTmpPath)
 
 	slog.Info("face_tool: 触发无状态后台动态生成呆呆新图片", "emotion", emotion)
-	output, execErr := runStatelessImageGen(ctx, t.command, goal, workDir)
+	agyResult, execErr := runStatelessImageGen(ctx, t.command, goal, workDir)
 	if execErr != nil {
 		slog.Warn("face_tool: 动态生成图片失败", "emotion", emotion, "err", execErr)
 		return &core.ToolResult{
@@ -264,8 +264,11 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 	}
 
 	data, generatedPath, err := readGeneratedImage(ctx, tmpPath, workDir, refPath)
+	if os.IsNotExist(err) {
+		data, generatedPath, err = readAGYImageArtifact(ctx, agyResult.ConversationID)
+	}
 	if err != nil {
-		slog.Warn("face_tool: 生成结果读取失败", "emotion", emotion, "err", err, "outputBytes", len(output))
+		slog.Warn("face_tool: 生成结果读取失败", "emotion", emotion, "err", err, "conversationID", agyResult.ConversationID, "outputBytes", len(agyResult.Response))
 		if os.IsNotExist(err) {
 			return &core.ToolResult{Text: fmt.Sprintf("生成任务已结束，但没有找到【%s】图片文件；未确认失败原因，不要推测为超时或上游服务故障。", emotion)}, nil
 		}

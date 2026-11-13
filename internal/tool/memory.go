@@ -515,7 +515,7 @@ func (t *MemoryTool) profile(ctx context.Context, event *entity.SensoryEvent, re
 	if !event.IsPartnerPrivate() {
 		content = core.RedactSensitiveIPs(content)
 	}
-	result := &core.ToolResult{Text: content, FallbackText: content}
+	result := &core.ToolResult{Text: content, FallbackText: content, ImageOnly: true}
 	renderCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	png, renderErr := render.RenderMemoryProfileCard(renderCtx, content)

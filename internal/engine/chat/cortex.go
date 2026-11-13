@@ -757,6 +757,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 	var lastToolText string
 	var directCardData [][]byte
 	var directCardFallbackText string
+	imageOnlyReply := false
 	linkToolCalls := 0
 	toolCallsUsed := 0
 	mediaUtterance := func(text string) *entity.Utterance {
@@ -765,7 +766,12 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 		case "卡片图片已成功渲染生成":
 			text = cardFallbackCaption(directCardFallbackText)
 		case "":
-			text = "图片已准备好。"
+			if !imageOnlyReply {
+				text = "图片已准备好。"
+			}
+		}
+		if imageOnlyReply {
+			text = ""
 		}
 		return &entity.Utterance{
 			Platform:     event.Platform,
@@ -868,6 +874,9 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 		if len(resp.ToolCalls) == 0 {
 			cleanText := sanitizeAssistantSpoken(resp.Content)
 			cleanText = core.TruncateRunes(cleanText, maxAssistantReplyRunes, "\n[回复过长，后续内容已截断]")
+			if imageOnlyReply {
+				cleanText = ""
+			}
 			if cleanText == "" && len(directCardData) == 0 {
 				return nil, fmt.Errorf("cortex reasoning failed: model returned neither text nor media")
 			}
@@ -988,6 +997,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 				toolImages = append(toolImages, toolRes.ImageData)
 			}
 			if len(toolImages) > 0 {
+				imageOnlyReply = imageOnlyReply || toolRes.ImageOnly
 				imageFallback := strings.TrimSpace(toolRes.FallbackText)
 				if imageFallback == "" {
 					imageFallback = strings.TrimSpace(toolRes.Text)
@@ -1038,6 +1048,9 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 		finalText = sanitizeAssistantSpoken(lastToolText)
 	} else {
 		finalText = "工具调用没有返回可确认的结果。"
+	}
+	if imageOnlyReply {
+		finalText = ""
 	}
 
 	utter := &entity.Utterance{
