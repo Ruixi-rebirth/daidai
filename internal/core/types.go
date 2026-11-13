@@ -123,6 +123,11 @@ type Attachment struct {
 	SourceMessageID string // 所属平台消息 ID，仅用于避免并发处理清除后续重发的相同附件
 }
 
+type GroupParticipant struct {
+	ID   string
+	Name string
+}
+
 // SensoryEvent 经由物理通道归一化与防抖合并后的统一感知事件 (零前缀规范)
 type SensoryEvent struct {
 	Platform              string        // "qq", "cli", "telegram"
@@ -150,8 +155,9 @@ type SensoryEvent struct {
 	OccurredAt            time.Time     // 事件发生时间
 	GroupMessageObserved  bool          // 未 @ 机器人的 QQ 群消息；写入本群历史，但默认不触发认知回复
 	GroupInterjection     bool          // 当前未 @ 群消息通过低频判断，可尝试生成一条短回复
-	OnProgress            func(string)  // 认知耗时操作（如签发重型工单）时的即时进度回执回调
-	StillValid            func() bool   // 可选的队列代际校验；等待会话锁后用于丢弃已被 reset 作废的事件
+	GroupParticipants     []GroupParticipant
+	OnProgress            func(string) // 认知耗时操作（如签发重型工单）时的即时进度回执回调
+	StillValid            func() bool  // 可选的队列代际校验；等待会话锁后用于丢弃已被 reset 作废的事件
 }
 
 // IsPartnerPrivate 判断当前感知事件是否为核心伙伴在私聊下发起的最高信任级交互

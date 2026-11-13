@@ -2,6 +2,7 @@ package qq
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -130,6 +131,11 @@ type pendingGroupInterjection struct {
 	event     *entity.SensoryEvent
 	timer     *time.Timer
 	scheduled time.Time
+}
+
+type groupBotMention struct {
+	ID   string
+	Name string
 }
 
 const maxQQOutgoingParts = 5
@@ -367,6 +373,8 @@ type QQChannel struct {
 	groupInterjectionSweepAt time.Time
 	pendingInterjectionsMu   sync.Mutex
 	pendingInterjections     map[string]*pendingGroupInterjection
+	knownGroupBotsMu         sync.RWMutex
+	knownGroupBots           map[string]map[string]string
 	historyRecorder          func(context.Context, *entity.SensoryEvent) error
 }
 
@@ -465,6 +473,7 @@ func (q *QQChannel) dispatchPendingGroupInterjection(groupID string, pending *pe
 	}
 	event := pending.event
 	event.GroupInterjection = true
+	event.GroupParticipants = q.recentGroupParticipants(groupID)
 	if !q.debounce.Push(event) {
 		slog.Warn("qq_channel: 群聊插话候选未能进入处理队列", "channelID", groupID, "msgID", event.RawMessageID)
 	}
@@ -477,6 +486,188 @@ func (q *QQChannel) cancelPendingGroupInterjection(groupID string) {
 		delete(q.pendingInterjections, groupID)
 	}
 	q.pendingInterjectionsMu.Unlock()
+}
+
+func (q *QQChannel) loadKnownGroupBots(ctx context.Context) error {
+	value, err := db.DefaultManager().GetRuntimeState(ctx, "qq", "known_group_bots")
+	if err != nil {
+		return err
+	}
+	known := make(map[string]map[string]string)
+	if strings.TrimSpace(value) != "" {
+		if err := json.Unmarshal([]byte(value), &known); err != nil {
+			return fmt.Errorf("decode known group bots: %w", err)
+		}
+	}
+	q.knownGroupBotsMu.Lock()
+	q.knownGroupBots = known
+	q.knownGroupBotsMu.Unlock()
+	return nil
+}
+
+func (q *QQChannel) isKnownGroupBot(groupID, memberID string) bool {
+	q.knownGroupBotsMu.RLock()
+	defer q.knownGroupBotsMu.RUnlock()
+	return q.knownGroupBots[groupID][memberID] != ""
+}
+
+func (q *QQChannel) setKnownGroupBot(ctx context.Context, groupID string, bot groupBotMention, marked bool) error {
+	q.knownGroupBotsMu.Lock()
+	defer q.knownGroupBotsMu.Unlock()
+	value, err := db.DefaultManager().GetRuntimeState(ctx, "qq", "known_group_bots")
+	if err != nil {
+		return err
+	}
+	known := make(map[string]map[string]string)
+	if strings.TrimSpace(value) != "" {
+		if err := json.Unmarshal([]byte(value), &known); err != nil {
+			return fmt.Errorf("decode known group bots: %w", err)
+		}
+	}
+	if known[groupID] == nil {
+		known[groupID] = make(map[string]string)
+	}
+	if marked {
+		if _, exists := known[groupID][bot.ID]; !exists && len(known[groupID]) >= 100 {
+			return fmt.Errorf("群机器人标记已达到每群 100 个的上限")
+		}
+		known[groupID][bot.ID] = bot.Name
+	} else {
+		delete(known[groupID], bot.ID)
+		if len(known[groupID]) == 0 {
+			delete(known, groupID)
+		}
+	}
+	updated, err := json.Marshal(known)
+	if err != nil {
+		return err
+	}
+	if err := db.DefaultManager().SetRuntimeState(ctx, "qq", "known_group_bots", string(updated)); err != nil {
+		return err
+	}
+	q.knownGroupBots = known
+	return nil
+}
+
+func groupBotRegistryRequest(content string) (marked, matched bool) {
+	if !strings.Contains(content, "机器人") {
+		return false, false
+	}
+	if strings.Contains(content, "取消") || strings.Contains(content, "解除") || strings.Contains(content, "不是") {
+		return false, true
+	}
+	return true, strings.Contains(content, "标记") || strings.Contains(content, "记住") || strings.Contains(content, "是机器人")
+}
+
+func qqMentionedGroupMembers(eventData map[string]any) []groupBotMention {
+	mentions, ok := eventData["mentions"].([]any)
+	if !ok {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(mentions))
+	var members []groupBotMention
+	for _, rawMention := range mentions {
+		mention, ok := rawMention.(map[string]any)
+		if !ok {
+			continue
+		}
+		if isYou, _ := mention["is_you"].(bool); isYou {
+			continue
+		}
+		memberID, _ := mention["member_openid"].(string)
+		if memberID == "" {
+			memberID, _ = mention["id"].(string)
+		}
+		memberID = strings.TrimSpace(memberID)
+		if memberID == "" {
+			continue
+		}
+		if _, exists := seen[memberID]; exists {
+			continue
+		}
+		seen[memberID] = struct{}{}
+		name, _ := mention["username"].(string)
+		members = append(members, groupBotMention{ID: memberID, Name: strings.TrimSpace(name)})
+	}
+	return members
+}
+
+func (q *QQChannel) handleGroupBotRegistryRequest(ctx context.Context, groupID, messageID, senderID string, role entity.UserRole, content string, eventData map[string]any) {
+	marked, _ := groupBotRegistryRequest(content)
+	if role != entity.RolePartner {
+		q.replyGroupMessage(ctx, groupID, messageID, "只有核心搭档可以管理群聊中的机器人标记。")
+		return
+	}
+	members := qqMentionedGroupMembers(eventData)
+	if len(members) == 0 {
+		q.replyGroupMessage(ctx, groupID, messageID, "我没有识别到被标记的群成员。请 @ 呆呆，并同时 @ 要标记或取消标记的机器人。")
+		return
+	}
+	if q.historyRecorder != nil {
+		recordCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := q.historyRecorder(recordCtx, &entity.SensoryEvent{
+			Platform: "qq", ChannelID: groupID, IsGroup: true, SenderID: senderID,
+			Content: content, RawMessageID: messageID, OccurredAt: time.Now(), Role: role,
+		})
+		cancel()
+		if err != nil {
+			slog.Warn("qq_channel: 保存群机器人标记操作失败", "channelID", groupID, "msgID", messageID, "err", err)
+		}
+	}
+	var updated []string
+	for _, member := range members {
+		if err := q.setKnownGroupBot(ctx, groupID, member, marked); err != nil {
+			slog.Warn("qq_channel: 保存群机器人标记失败", "channelID", groupID, "memberID", member.ID, "err", err)
+			continue
+		}
+		name := member.Name
+		if name == "" {
+			name = "该成员"
+		}
+		updated = append(updated, name)
+	}
+	if len(updated) == 0 {
+		q.replyGroupMessage(ctx, groupID, messageID, "机器人标记未能保存，请稍后重试。")
+		return
+	}
+	action := "已标记为机器人，后续群消息不会触发呆呆回复。"
+	if !marked {
+		action = "已取消机器人标记，后续群消息会按普通成员消息处理。"
+	}
+	q.replyGroupMessage(ctx, groupID, messageID, strings.Join(updated, "、")+action)
+}
+
+func (q *QQChannel) recentGroupParticipants(groupID string) []core.GroupParticipant {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	recent, err := db.DefaultManager().RecentMessages(ctx, "qq", "group", groupID, 30)
+	if err != nil {
+		slog.Warn("qq_channel: 读取插话点名候选失败", "channelID", groupID, "err", err)
+		return nil
+	}
+	seen := make(map[string]struct{}, len(recent))
+	participants := make([]core.GroupParticipant, 0, len(recent))
+	for _, message := range recent {
+		if message.IsBot || message.UserID == "" || strings.TrimSpace(message.Name) == "" {
+			continue
+		}
+		if _, exists := seen[message.UserID]; exists {
+			continue
+		}
+		seen[message.UserID] = struct{}{}
+		participants = append(participants, core.GroupParticipant{ID: message.UserID, Name: message.Name})
+	}
+	return participants
+}
+
+func (q *QQChannel) replyGroupMessage(ctx context.Context, groupID, messageID, text string) {
+	replyCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := q.Transmit(replyCtx, &entity.Utterance{
+		Platform: "qq", IsGroup: true, ChannelID: groupID, QuoteMsgID: messageID, Text: text,
+	}); err != nil {
+		slog.Warn("qq_channel: 群机器人标记操作的确认消息发送失败", "channelID", groupID, "err", err)
+	}
 }
 
 func (q *QQChannel) reservePassiveReplyBudget(msgID string, count, limit int, window time.Duration) (*passiveReplyBudget, int, bool, error) {
@@ -636,6 +827,11 @@ func (q *QQChannel) Start(ctx context.Context, onSensory func(event *entity.Sens
 	if q.msgCache != nil {
 		q.msgCache.Reopen()
 	}
+	loadBotsCtx, loadBotsCancel := context.WithTimeout(ctx, 3*time.Second)
+	if err := q.loadKnownGroupBots(loadBotsCtx); err != nil {
+		slog.Warn("qq_channel: 已标记的群机器人清单读取失败", "err", err)
+	}
+	loadBotsCancel()
 	chCtx, cancel := context.WithCancel(ctx)
 	q.stopCancel = cancel
 
@@ -789,11 +985,11 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 	default:
 		return true
 	}
-	if qqMessageAuthorIsBot(d) {
+	if qqMessageAuthorIsBot(d) || (isGroup && q.isKnownGroupBot(convID, userID)) {
 		if isGroup {
 			q.cancelPendingGroupInterjection(convID)
 		}
-		slog.Debug("qq: 忽略其他机器人的消息，避免机器人之间互相触发", "eventType", eventType, "channelID", convID, "msgID", msgID)
+		slog.Debug("qq: 忽略机器人消息，避免机器人之间互相触发", "eventType", eventType, "channelID", convID, "msgID", msgID)
 		return true
 	}
 	if msgID != "" && q.dedup != nil && q.dedup.Contains(msgID) {
@@ -894,6 +1090,18 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 		}
 		if q.inbox != nil && (len(files) > 0 || len(images) > 0) {
 			q.inbox.RememberPending(attachmentScope, append(append([]*core.Attachment(nil), files...), images...))
+		}
+		if isGroup && botAddressed {
+			if _, matched := groupBotRegistryRequest(content); matched {
+				q.cancelPendingGroupInterjection(convID)
+				manageCtx, manageCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				q.handleGroupBotRegistryRequest(manageCtx, convID, msgID, userID, role, content, d)
+				manageCancel()
+				if q.dedup != nil {
+					q.dedup.Remember(msgID)
+				}
+				return true
+			}
 		}
 		if fullGroupEvent && !botAddressed {
 			historyAttachmentNote := attachmentHistoryNote(len(images), omittedImages, len(files), omittedFiles)
@@ -1112,6 +1320,7 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) error {
 		}
 		return q.client.SendC2CMessage(ctx, u.ChannelID, part.text, u.QuoteMsgID)
 	}
+	sentParts := 0
 	sendTrackedPart := func(part qqOutgoingPart) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1121,10 +1330,29 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) error {
 			q.commitPassiveReplyAttempt(budget)
 			reservedCount--
 		}
+		if u.GroupInterjection && sentParts == 0 && u.IsGroup && len(u.MentionUserIDs) > 0 && len(part.image) == 0 {
+			var at strings.Builder
+			for _, memberID := range u.MentionUserIDs {
+				if memberID == "" {
+					continue
+				}
+				escapedID := strings.NewReplacer("&", "&amp;", `"`, "&quot;", "<", "&lt;", ">", "&gt;").Replace(memberID)
+				fmt.Fprintf(&at, `<qqbot-at-user id="%s" /> `, escapedID)
+			}
+			if at.Len() > 0 {
+				part.text = at.String() + part.text
+				if len([]rune(part.text)) > 1200 {
+					return fmt.Errorf("群聊插话的 @ 提及标记超过 QQ 单条消息长度限制")
+				}
+				if len(part.image) > 0 {
+					return fmt.Errorf("群聊插话不能同时在图片消息中添加 @ 提及")
+				}
+				return q.client.SendGroupMessage(ctx, u.ChannelID, part.text, u.QuoteMsgID)
+			}
+		}
 		return sendPart(part)
 	}
 
-	sentParts := 0
 	deliveredText := func() string {
 		var delivered strings.Builder
 		for _, part := range parts[:sentParts] {
