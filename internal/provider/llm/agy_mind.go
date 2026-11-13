@@ -51,7 +51,7 @@ func NewAGYMindProvider(cfg AGYMindConfig) *AGYMindProvider {
 	effort := strings.TrimSpace(cfg.Effort)
 	timeout := cfg.Timeout
 	if timeout <= 0 {
-		timeout = 90 * time.Second
+		timeout = 4 * time.Minute
 	}
 	cwd := strings.TrimSpace(cfg.WorkingDir)
 	if cwd == "" {
