@@ -70,13 +70,13 @@ CREATE TABLE IF NOT EXISTS user_facts (
     user_id      TEXT NOT NULL CHECK (length(user_id) > 0),
     scope_type   TEXT NOT NULL DEFAULT 'global' CHECK (scope_type IN ('global', 'group')),
     scope_id     TEXT NOT NULL DEFAULT '',
-    CHECK ((scope_type = 'global' AND scope_id = '') OR (scope_type = 'group' AND length(scope_id) > 0)),
     fact         TEXT NOT NULL CHECK (length(trim(fact)) > 0),
     status       TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'superseded', 'deleted')),
     quote        TEXT NOT NULL DEFAULT '',        -- 来源用户原话
     created_at   INTEGER NOT NULL,                -- 毫秒级时间戳
     updated_at   INTEGER NOT NULL,
-    embedding    BLOB                             -- 可选稠密语义向量 (float32 小端字节序)
+    embedding    BLOB,                            -- 可选稠密语义向量 (float32 小端字节序)
+    CHECK ((scope_type = 'global' AND scope_id = '') OR (scope_type = 'group' AND length(scope_id) > 0))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_active_unique ON user_facts(platform, user_id, scope_type, scope_id, fact) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_facts_page ON user_facts(platform, user_id, scope_type, scope_id, updated_at DESC, id DESC) WHERE status = 'active';
