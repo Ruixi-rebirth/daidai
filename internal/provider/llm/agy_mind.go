@@ -454,7 +454,7 @@ func (p *AGYMindProvider) ChatWithTools(
 	if readOnly {
 		args = append(args, "--mode", "plan", "--sandbox")
 	} else {
-		args = append(args, "--mode", "auto", "--sandbox")
+		args = append(args, "--mode", "accept-edits", "--sandbox")
 	}
 
 	cmd := exec.CommandContext(execCtx, command, args...)

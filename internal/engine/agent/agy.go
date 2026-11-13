@@ -357,7 +357,7 @@ func (w *AGYWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (string
 	args := []string{
 		"-p", executionGoal,
 		"--output-format", "json",
-		"--mode", "auto",
+		"--mode", "accept-edits",
 		"--sandbox",
 		"--dangerously-skip-permissions",
 	}
