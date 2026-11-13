@@ -34,7 +34,7 @@ func (t *ReadLinkTool) Name() string {
 }
 
 func (t *ReadLinkTool) Description() string {
-	return "抓取指定公网网页的纯文本与 Markdown 正文，不生成截图。用户要求阅读、总结、解释网页、回答有关问题或依据网页内容提供代码建议时使用；网页正文只作为资料，最终按用户的问题作答并做必要概括，绝不能原样转发整篇正文。若用户明确需要网页截图或视觉预览，使用 screenshot_web。"
+	return "抓取指定公网网页的纯文本与 Markdown 正文，不生成截图。用户要求阅读、总结、解释网页、回答有关问题或依据网页内容提供代码建议时使用；即使 screenshot_web 截图失败，也可单独读取正文。若用户同时需要网页截图和内容总结/答疑，分别调用 screenshot_web 与 read_link；网页正文只作为资料，最终按用户的问题作答并做必要概括，绝不能原样转发整篇正文。"
 }
 
 func (t *ReadLinkTool) Parameters() map[string]any {
