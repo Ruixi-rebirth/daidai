@@ -1146,6 +1146,11 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 	unlock := a.lockSession(event)
 	defer unlock()
 	if thinkCtx != nil && thinkCtx.Err() != nil {
+		if errors.Is(thinkCtx.Err(), context.DeadlineExceeded) && (event.StillValid == nil || event.StillValid()) {
+			notifyCtx, notifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			a.replyText(notifyCtx, event, "这次处理超过时限，结果还没完成。要我重新处理并补上吗？")
+			notifyCancel()
+		}
 		return
 	}
 	if event.StillValid != nil && !event.StillValid() {
@@ -1189,12 +1194,17 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 				return
 			}
 			if thinkCtx.Err() != nil || (event.StillValid != nil && !event.StillValid()) {
+				if errors.Is(thinkCtx.Err(), context.DeadlineExceeded) && (event.StillValid == nil || event.StillValid()) {
+					notifyCtx, notifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+					a.replyText(notifyCtx, event, "这次处理超过时限，结果还没完成。要我重新处理并补上吗？")
+					notifyCancel()
+				}
 				slog.Info("superagent: 当前会话思考上下文已结束", "channel", event.ChannelID, "err", thinkCtx.Err())
 				return
 			}
 			event.ProcessedAttachments = nil
 			slog.Error("superagent: 思考过程发生异常", "err", err)
-			errorReply := "这次处理没有成功，详细错误已记入本机日志。请稍后重试；如果连续失败，我可以继续排查。"
+			errorReply := "这次处理没有完成（可能是模型调用超时）。要我重新处理并补上吗？"
 			sendCtx, cancel := context.WithTimeout(thinkCtx, 15*time.Second)
 			defer cancel()
 			if sendErr := a.transmitReplyText(sendCtx, event, errorReply); sendErr != nil {

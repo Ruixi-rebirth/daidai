@@ -763,7 +763,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 	linkToolCalls := 0
 	toolCallsUsed := 0
 	mediaUtterance := func() *entity.Utterance {
-		text := "图片已准备好，但我整理说明时遇到超时了。"
+		text := "图片已准备好，但总结和回答没能完成。要我重新处理并补上吗？"
 		if imageOnlyReply {
 			text = ""
 		}
@@ -1042,7 +1042,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 	if fErr == nil && finalResp != nil && strings.TrimSpace(finalResp.Content) != "" {
 		finalText = core.TruncateRunes(sanitizeAssistantSpoken(finalResp.Content), maxAssistantReplyRunes, "\n[回复过长，后续内容已截断]")
 	} else if lastToolText != "" {
-		finalText = "我已经拿到网页或工具结果，但整理成答复时模型超时了，这次没能可靠回答你的问题。"
+		finalText = "我已经拿到网页或工具结果，但总结和回答没能完成。要我重新处理并补上吗？"
 	} else {
 		finalText = "工具调用没有返回可确认的结果。"
 	}
