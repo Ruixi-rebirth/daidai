@@ -673,6 +673,16 @@ func (q *QQChannel) replyGroupMessage(ctx context.Context, groupID, messageID, t
 	}
 }
 
+func (q *QQChannel) replyPrivateMessage(userID, messageID, text string) {
+	replyCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := q.Transmit(replyCtx, &entity.Utterance{
+		Platform: "qq", ChannelID: userID, QuoteMsgID: messageID, Text: text,
+	}); err != nil {
+		slog.Warn("qq_channel: 访客私聊权限提示发送失败", "channelID", userID, "err", err)
+	}
+}
+
 func (q *QQChannel) reservePassiveReplyBudget(msgID string, count, limit int, window time.Duration) (*passiveReplyBudget, int, bool, error) {
 	if msgID == "" {
 		return nil, count, false, nil
@@ -1087,6 +1097,7 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 				q.dedup.Remember(msgID)
 			}
 			slog.Info("qq: 忽略未授权访客的私聊消息", "userID", userID, "messageID", msgID)
+			q.replyPrivateMessage(userID, msgID, "暂未开通私聊权限")
 			return true
 		}
 		botAddressed := botMentioned || (fullGroupEvent && !strings.HasPrefix(strings.TrimSpace(content), "/") && strings.Contains(content, "呆呆"))
