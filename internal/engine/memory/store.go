@@ -578,7 +578,7 @@ func (m *MemoryEngine) backfillUserFactEmbeddings(ctx context.Context, event *en
 	if err != nil {
 		return
 	}
-	for _, f := range confirmedFacts(visibleFacts) {
+	for _, f := range visibleFacts {
 		if ctx.Err() != nil {
 			return
 		}
@@ -633,8 +633,6 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 	if err != nil {
 		return
 	}
-	activeFacts = confirmedFacts(activeFacts)
-
 	emb := m.getEmbedder()
 	// 顺带为尚未生成向量的存量事实异步补齐向量
 	if emb != nil {
@@ -767,14 +765,15 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 						break
 					}
 					normalized = append(normalized, db.FactMutation{
-						Action:       "UPDATE",
-						FactID:       old.ID,
-						Fact:         factText,
-						ExpectedFact: old.Content,
-						ScopeType:    old.ScopeType,
-						ScopeID:      old.ScopeID,
-						Quote:        event.Content,
-						Embedding:    factVec,
+						Action:          "UPDATE",
+						FactID:          old.ID,
+						SourceMessageID: event.HistoryRecordID,
+						Fact:            factText,
+						ExpectedFact:    old.Content,
+						ScopeType:       old.ScopeType,
+						ScopeID:         old.ScopeID,
+						Quote:           event.Content,
+						Embedding:       factVec,
 					})
 					scheduledFactIDs[old.ID] = struct{}{}
 					merged = true
@@ -784,12 +783,13 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 			if !merged {
 				scopeType, scopeID := factScope(event)
 				normalized = append(normalized, db.FactMutation{
-					Action:    "ADD",
-					Fact:      factText,
-					ScopeType: scopeType,
-					ScopeID:   scopeID,
-					Quote:     event.Content,
-					Embedding: factVec,
+					Action:          "ADD",
+					SourceMessageID: event.HistoryRecordID,
+					Fact:            factText,
+					ScopeType:       scopeType,
+					ScopeID:         scopeID,
+					Quote:           event.Content,
+					Embedding:       factVec,
 				})
 				scheduledNewFacts[factText] = struct{}{}
 			}
@@ -810,14 +810,15 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 					}
 				}
 				normalized = append(normalized, db.FactMutation{
-					Action:       "UPDATE",
-					FactID:       mut.FactID,
-					Fact:         factText,
-					ExpectedFact: old.Content,
-					ScopeType:    old.ScopeType,
-					ScopeID:      old.ScopeID,
-					Quote:        event.Content,
-					Embedding:    factVec,
+					Action:          "UPDATE",
+					FactID:          mut.FactID,
+					SourceMessageID: event.HistoryRecordID,
+					Fact:            factText,
+					ExpectedFact:    old.Content,
+					ScopeType:       old.ScopeType,
+					ScopeID:         old.ScopeID,
+					Quote:           event.Content,
+					Embedding:       factVec,
 				})
 				scheduledFactIDs[mut.FactID] = struct{}{}
 			}
@@ -1116,7 +1117,7 @@ func (m *MemoryEngine) RecallProfile(ctx context.Context, platform, userID, quer
 	if err != nil || len(activeFacts) == 0 {
 		return nil, err
 	}
-	return rankProfileFacts(ctx, query, confirmedFacts(activeFacts), maxFacts), nil
+	return rankProfileFacts(ctx, query, activeFacts, maxFacts), nil
 }
 
 // RecallProfileForEvent 只注入当前会话可见范围内的长期事实。
@@ -1132,17 +1133,7 @@ func (m *MemoryEngine) RecallProfileForEvent(ctx context.Context, event *entity.
 	if err != nil || len(facts) == 0 {
 		return nil, err
 	}
-	return rankProfileFacts(ctx, query, confirmedFacts(facts), maxFacts), nil
-}
-
-func confirmedFacts(facts []*core.Fact) []*core.Fact {
-	confirmed := make([]*core.Fact, 0, len(facts))
-	for _, fact := range facts {
-		if fact != nil && !fact.ScopeUnknown {
-			confirmed = append(confirmed, fact)
-		}
-	}
-	return confirmed
+	return rankProfileFacts(ctx, query, facts, maxFacts), nil
 }
 
 func rankProfileFacts(ctx context.Context, query string, activeFacts []*core.Fact, maxFacts int) []*core.Fact {
@@ -1198,7 +1189,7 @@ func factScope(event *entity.SensoryEvent) (string, string) {
 }
 
 func sameFactScope(fact *core.Fact, event *entity.SensoryEvent) bool {
-	if fact == nil || fact.ScopeUnknown {
+	if fact == nil {
 		return false
 	}
 	scopeType, scopeID := factScope(event)

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -48,7 +47,7 @@ func (t *MemoryTool) Name() string {
 }
 
 func (t *MemoryTool) Description() string {
-	return "管理当前用户可见的长期记忆：私聊维护个人全局事实，群聊维护当前用户在本群记录的个人事实，并可检索或列出当前可见事实。用户自然语言询问‘你对我有什么印象’‘你还记得我哪些事’‘说说我是什么样的人’时，调用 profile 生成带印象与已记事实的图文卡片；profile 和 list 记忆很多时支持按页浏览。用户要核对旧记忆来源时，在私聊调用 list_unconfirmed 查看事实 ID 和内容，再按用户明确确认逐条调用 confirm_source；未确认前不得把它当作确定事实。翻页时‘下一页’‘上一页’使用 page_direction，‘看第 3 页’使用 page；只依据当前会话可见范围，绝不拿其他群或私聊的记忆补充。群聊事实不会与其他成员共享。"
+	return "管理当前用户可见的长期记忆：私聊维护个人全局事实，群聊维护当前用户在本群记录的个人事实，并可检索或列出当前可见事实。用户自然语言询问‘你对我有什么印象’‘你还记得我哪些事’‘说说我是什么样的人’时，调用 profile 生成带印象与已记事实的图文卡片；profile 和 list 记忆很多时支持按页浏览。用户询问某条记忆的依据或来源时，调用 source 查看支撑它的原始消息。翻页时‘下一页’‘上一页’使用 page_direction，‘看第 3 页’使用 page；只依据当前会话可见范围，绝不拿其他群或私聊的记忆补充。群聊事实不会与其他成员共享。"
 }
 
 func (t *MemoryTool) Parameters() map[string]any {
@@ -57,8 +56,8 @@ func (t *MemoryTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"action": map[string]any{
 				"type":        "string",
-				"enum":        []string{"add", "update", "delete", "search", "list", "list_unconfirmed", "profile", "confirm_source"},
-				"description": "操作类型：profile 生成当前用户的印象与记忆图卡；list 列出当前页已确认记忆；私聊中的 list_unconfirmed 列出来源范围未确认的旧记忆及 ID，供用户核对。用户问‘未确认的记忆有哪些’‘哪几条待核对’或类似问题时，必须用 list_unconfirmed 展示事实内容和 ID，不要只回答数量。profile、list、list_unconfirmed 默认第 1 页、每页 12 条，下一页或上一页使用 page_direction，指定页码使用 page；search 检索当前范围的长期事实与历史对话，命中事实超过 12 条时每页展示 12 条，翻页沿用相同 query；add、update、delete 管理当前范围的长期事实；confirm_source 仅在用户核对并明确确认后，将来源范围不明的旧事实确认成私聊全局记忆",
+				"enum":        []string{"add", "update", "delete", "search", "list", "profile", "source"},
+				"description": "操作类型：profile 生成当前用户的印象与记忆图卡；list 列出当前页记忆；source 查询指定记忆的原始消息依据；profile、list 默认第 1 页、每页 12 条，下一页或上一页使用 page_direction，指定页码使用 page；search 检索当前范围的长期事实与历史对话，命中事实超过 12 条时每页展示 12 条，翻页沿用相同 query；add、update、delete 管理当前范围的长期事实",
 			},
 			"fact": map[string]any{
 				"type":        "string",
@@ -66,7 +65,7 @@ func (t *MemoryTool) Parameters() map[string]any {
 			},
 			"fact_id": map[string]any{
 				"type":        "integer",
-				"description": "既有事实 ID（对应列表中 [ID: x]；update、delete、confirm_source 时必填）",
+				"description": "既有事实 ID（对应列表中 [ID: x]；update、delete、source 时必填）",
 			},
 			"query": map[string]any{
 				"type":        "string",
@@ -75,12 +74,12 @@ func (t *MemoryTool) Parameters() map[string]any {
 			"page": map[string]any{
 				"type":        "integer",
 				"minimum":     1,
-				"description": "profile、list、list_unconfirmed、search 页码（从 1 开始）；search 翻页时沿用相同 query，用户说下一页、上一页或指定页码时按上下文传入",
+				"description": "profile、list、search 页码（从 1 开始）；search 翻页时沿用相同 query，用户说下一页、上一页或指定页码时按上下文传入",
 			},
 			"page_direction": map[string]any{
 				"type":        "string",
 				"enum":        []string{"next", "previous", "first"},
-				"description": "profile、list、list_unconfirmed 页码方向；翻页时按此参数移动当前列表页，用户指定 page 时优先使用 page",
+				"description": "profile、list 页码方向；翻页时按此参数移动当前列表页，用户指定 page 时优先使用 page",
 			},
 		},
 		"required": []string{"action"},
@@ -117,6 +116,34 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 	switch action {
 	case "PROFILE":
 		return t.profile(ctx, event, args.Page, args.PageDirection)
+	case "SOURCE":
+		if args.FactID <= 0 {
+			return &core.ToolResult{Text: "参数错误：source 操作必须提供有效的 fact_id。"}, nil
+		}
+		sources, err := t.db.ListVisibleFactSources(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup, args.FactID)
+		if err != nil {
+			return nil, fmt.Errorf("读取记忆来源失败: %w", err)
+		}
+		if len(sources) == 0 {
+			return &core.ToolResult{Text: fmt.Sprintf("记忆 ID %d 没有可查看的来源记录，或它不属于当前会话可见范围。", args.FactID)}, nil
+		}
+		var lines []string
+		for i, source := range sources {
+			if i == 5 {
+				break
+			}
+			text := singleLineText(source.Text)
+			text = core.TruncateRunes(text, 300, "…")
+			if source.Excerpt {
+				lines = append(lines, "- 已保存的来源摘录（旧记忆未关联原消息）：“"+text+"”")
+			} else {
+				lines = append(lines, fmt.Sprintf("- %s · 消息 %d：“%s”", source.CreatedAt.Format("2006-01-02 15:04"), source.MessageID, text))
+			}
+		}
+		if len(sources) > 5 {
+			lines = append(lines, fmt.Sprintf("另有 %d 条较早的来源消息。", len(sources)-5))
+		}
+		return &core.ToolResult{Text: fmt.Sprintf("记忆 ID %d 的来源：\n%s", args.FactID, strings.Join(lines, "\n"))}, nil
 
 	case "ADD":
 		if factText == "" {
@@ -130,27 +157,22 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 		if err != nil {
 			return nil, fmt.Errorf("读取长期记忆失败: %w", err)
 		}
-		var duplicateUnconfirmedID int64
 		for _, f := range existing {
 			if !factMatchesScope(f, scopeType, scopeID) {
 				continue
 			}
 			if f.Content == factText {
-				if f.ScopeUnknown {
-					duplicateUnconfirmedID = f.ID
-					continue
-				}
 				return &core.ToolResult{Text: fmt.Sprintf("该记忆已存在 [ID: %d]：%s", f.ID, f.Content)}, nil
 			}
 		}
 		for _, f := range existing {
-			if f.ScopeUnknown || !factMatchesScope(f, scopeType, scopeID) {
+			if !factMatchesScope(f, scopeType, scopeID) {
 				continue
 			}
 			if memory.LexicalOverlap(factText, f.Content) >= 0.78 ||
 				(len(factVec) > 0 && len(f.Embedding) > 0 && memory.CosineSimilarity(factVec, f.Embedding) >= 0.88) {
 				if err := t.db.ApplyFactMutations(ctx, event.Platform, event.SenderID, []db.FactMutation{
-					{Action: "UPDATE", FactID: f.ID, Fact: factText, ExpectedFact: f.Content, ScopeType: scopeType, ScopeID: scopeID, Quote: event.Content, Embedding: factVec},
+					{Action: "UPDATE", FactID: f.ID, SourceMessageID: event.HistoryRecordID, Fact: factText, ExpectedFact: f.Content, ScopeType: scopeType, ScopeID: scopeID, Quote: event.Content, Embedding: factVec},
 				}); err != nil {
 					return nil, fmt.Errorf("更新近似记忆失败: %w", err)
 				}
@@ -158,13 +180,10 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 			}
 		}
 		err = t.db.ApplyFactMutations(ctx, event.Platform, event.SenderID, []db.FactMutation{
-			{Action: "ADD", Fact: factText, ScopeType: scopeType, ScopeID: scopeID, Quote: event.Content, Embedding: factVec},
+			{Action: "ADD", SourceMessageID: event.HistoryRecordID, Fact: factText, ScopeType: scopeType, ScopeID: scopeID, Quote: event.Content, Embedding: factVec},
 		})
 		if err != nil {
 			return nil, fmt.Errorf("写入长期记忆失败: %w", err)
-		}
-		if duplicateUnconfirmedID > 0 {
-			return &core.ToolResult{Text: fmt.Sprintf("已将你本次明确陈述的内容记为已确认长期记忆：%s。旧版记忆 [ID: %d] 的来源仍未确认，我没有合并或自动确认它。", factText, duplicateUnconfirmedID)}, nil
 		}
 		return &core.ToolResult{Text: fmt.Sprintf("已记下长期记忆：%s", factText)}, nil
 
@@ -182,12 +201,9 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 		if !factMatchesScope(target, scopeType, scopeID) {
 			return &core.ToolResult{Text: "群聊中只能更新当前用户在本群记录的个人记忆；全局记忆请在私聊中操作。"}, nil
 		}
-		if target.ScopeUnknown {
-			return &core.ToolResult{Text: fmt.Sprintf("记忆 [ID: %d] 的来源范围尚未确认，不能直接更新。请先核对来源并使用 confirm_source 确认；如果内容不对，可以直接删除。", target.ID)}, nil
-		}
 		factVec := memory.EmbedText(ctx, factText)
 		err = t.db.ApplyFactMutations(ctx, event.Platform, event.SenderID, []db.FactMutation{
-			{Action: "UPDATE", FactID: args.FactID, Fact: factText, ExpectedFact: target.Content, ScopeType: target.ScopeType, ScopeID: target.ScopeID, Quote: event.Content, Embedding: factVec},
+			{Action: "UPDATE", FactID: args.FactID, SourceMessageID: event.HistoryRecordID, Fact: factText, ExpectedFact: target.Content, ScopeType: target.ScopeType, ScopeID: target.ScopeID, Quote: event.Content, Embedding: factVec},
 		})
 		if err != nil {
 			return &core.ToolResult{Text: fmt.Sprintf("更新记忆失败：%v", err)}, nil
@@ -206,78 +222,12 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 			return &core.ToolResult{Text: "群聊中只能删除当前用户在本群记录的个人记忆；全局记忆请在私聊中操作。"}, nil
 		}
 		err = t.db.ApplyFactMutations(ctx, event.Platform, event.SenderID, []db.FactMutation{
-			{Action: "DELETE", FactID: args.FactID, ExpectedFact: target.Content, ScopeType: target.ScopeType, ScopeID: target.ScopeID, Quote: event.Content},
+			{Action: "DELETE", FactID: args.FactID, SourceMessageID: event.HistoryRecordID, ExpectedFact: target.Content, ScopeType: target.ScopeType, ScopeID: target.ScopeID, Quote: event.Content},
 		})
 		if err != nil {
 			return &core.ToolResult{Text: fmt.Sprintf("删除记忆失败：%v", err)}, nil
 		}
 		return &core.ToolResult{Text: fmt.Sprintf("已忘掉记忆 [ID: %d]", args.FactID)}, nil
-
-	case "CONFIRM_SOURCE":
-		if event.IsGroup {
-			return &core.ToolResult{Text: "来源范围核对只能在私聊中进行。"}, nil
-		}
-		if args.FactID <= 0 {
-			return &core.ToolResult{Text: "参数错误：confirm_source 操作必须提供有效的 fact_id。"}, nil
-		}
-		if !explicitlyConfirmsFactSource(event.Content, args.FactID) {
-			return &core.ToolResult{Text: fmt.Sprintf("确认记忆来源前，请在私聊中明确发送‘确认记忆 ID %d’。", args.FactID)}, nil
-		}
-		target, err := t.visibleFact(ctx, event, args.FactID)
-		if err != nil {
-			return nil, err
-		}
-		if !target.ScopeUnknown {
-			return &core.ToolResult{Text: fmt.Sprintf("记忆 [ID: %d] 的来源范围已经确认。", target.ID)}, nil
-		}
-		if err := t.db.ConfirmLegacyFactScope(ctx, event.Platform, event.SenderID, target.ID); err != nil {
-			return &core.ToolResult{Text: fmt.Sprintf("确认记忆来源失败：%v", err)}, nil
-		}
-		return &core.ToolResult{Text: fmt.Sprintf("已将记忆 [ID: %d] 确认为你的私聊全局记忆；它仍不会在群聊中共享。", target.ID)}, nil
-
-	case "LIST_UNCONFIRMED":
-		if event.IsGroup {
-			return &core.ToolResult{Text: "来源范围未确认的旧记忆只允许在私聊中核对，请私聊我查看。"}, nil
-		}
-		pageKey := profilePageKey(event) + ":unconfirmed"
-		page := t.resolveProfilePage(pageKey, args.Page, args.PageDirection)
-		facts, total, err := t.db.PageUnconfirmedVisibleFacts(ctx, event.Platform, event.SenderID, page, memoryFactsPerPage)
-		if err != nil {
-			return nil, fmt.Errorf("读取待核对旧记忆失败: %w", err)
-		}
-		totalPages := (total + memoryFactsPerPage - 1) / memoryFactsPerPage
-		if totalPages == 0 {
-			totalPages = 1
-		}
-		page, atLastPage := t.reconcileProfilePage(pageKey, page, totalPages, args.Page, args.PageDirection)
-		if atLastPage {
-			return &core.ToolResult{Text: fmt.Sprintf("已经是待核对旧记忆的最后一页（共 %d 页）。", totalPages)}, nil
-		}
-		if page > totalPages {
-			return &core.ToolResult{Text: fmt.Sprintf("待核对旧记忆共 %d 页，没有第 %d 页。", totalPages, page)}, nil
-		}
-		if len(facts) == 0 && total > 0 {
-			facts, _, err = t.db.PageUnconfirmedVisibleFacts(ctx, event.Platform, event.SenderID, page, memoryFactsPerPage)
-			if err != nil {
-				return nil, fmt.Errorf("重新读取待核对旧记忆失败: %w", err)
-			}
-		}
-		if total == 0 {
-			return &core.ToolResult{Text: "当前没有来源范围未确认的旧记忆。"}, nil
-		}
-		if len(facts) == 0 {
-			return &core.ToolResult{Text: "待核对旧记忆刚刚发生变化，请重新查看列表。"}, nil
-		}
-		lines := make([]string, 0, len(facts))
-		for _, fact := range facts {
-			if fact == nil {
-				continue
-			}
-			lines = append(lines, fmt.Sprintf("- [ID: %d] %s", fact.ID, fact.Content))
-		}
-		result := fmt.Sprintf("【待核对的旧记忆 · 第 %d/%d 页 · 共 %d 条】\n%s\n\n请逐条核对。只有你明确确认某条确实是你的私聊记忆后，我才会将它纳入私聊全局记忆；可直接说‘确认记忆 ID %d’。", page, totalPages, total, strings.Join(lines, "\n"), facts[0].ID)
-		t.setProfilePage(pageKey, page)
-		return &core.ToolResult{Text: result}, nil
 
 	case "LIST", "SEARCH":
 		q := strings.TrimSpace(args.Query)
@@ -286,12 +236,11 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 		}
 		var facts []*core.Fact
 		page, totalFacts := 0, 0
-		totalUnknown := 0
 		var err error
 		if action == "LIST" {
 			pageKey := profilePageKey(event)
 			page = t.resolveProfilePage(pageKey, args.Page, args.PageDirection)
-			facts, totalFacts, totalUnknown, err = t.db.PageVisibleFacts(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup, page, memoryFactsPerPage)
+			facts, totalFacts, err = t.db.PageVisibleFacts(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup, page, memoryFactsPerPage)
 			if err != nil {
 				return nil, fmt.Errorf("读取长期记忆失败: %w", err)
 			}
@@ -307,7 +256,7 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 				return &core.ToolResult{Text: fmt.Sprintf("记忆列表共 %d 页，没有第 %d 页。", totalPages, page)}, nil
 			}
 			if len(facts) == 0 && totalFacts > 0 {
-				facts, _, totalUnknown, err = t.db.PageVisibleFacts(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup, page, memoryFactsPerPage)
+				facts, _, err = t.db.PageVisibleFacts(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup, page, memoryFactsPerPage)
 				if err != nil {
 					return nil, fmt.Errorf("重新读取长期记忆失败: %w", err)
 				}
@@ -317,15 +266,6 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 			if err != nil {
 				return nil, fmt.Errorf("读取长期记忆失败: %w", err)
 			}
-			// Source-unknown legacy facts must stay in the dedicated review flow;
-			// otherwise search could present them as established memories.
-			confirmed := facts[:0]
-			for _, fact := range facts {
-				if fact != nil && !fact.ScopeUnknown {
-					confirmed = append(confirmed, fact)
-				}
-			}
-			facts = confirmed
 		}
 		searchTotalPages, searchTotalMatches, searchPage := 0, 0, 1
 		if action == "SEARCH" && q != "" {
@@ -376,9 +316,6 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 			if totalFacts > 0 {
 				totalPages := (totalFacts + memoryFactsPerPage - 1) / memoryFactsPerPage
 				sections = append(sections, fmt.Sprintf("第 %d/%d 页 · 共 %d 条已确认记忆。可以说‘下一页’或‘上一页’继续浏览。", page, totalPages, totalFacts))
-			}
-			if totalUnknown > 0 {
-				sections = append(sections, fmt.Sprintf("另有 %d 条旧记忆的来源尚未核对；私聊中核对后才能纳入已确认列表。", totalUnknown))
 			}
 		}
 
@@ -435,24 +372,15 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 func (t *MemoryTool) profile(ctx context.Context, event *entity.SensoryEvent, requestedPage int, direction string) (*core.ToolResult, error) {
 	pageKey := profilePageKey(event)
 	page := t.resolveProfilePage(pageKey, requestedPage, direction)
-	facts, totalConfirmedFacts, totalUnconfirmedFacts, err := t.db.PageVisibleFacts(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup, page, memoryFactsPerPage)
+	facts, totalFacts, err := t.db.PageVisibleFacts(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup, page, memoryFactsPerPage)
 	if err != nil {
 		return nil, fmt.Errorf("读取当前范围记忆失败: %w", err)
 	}
 	impressionFacts := facts
 	if page != 1 {
-		impressionFacts, _, _, err = t.db.PageVisibleFacts(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup, 1, memoryFactsPerPage)
+		impressionFacts, _, err = t.db.PageVisibleFacts(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup, 1, memoryFactsPerPage)
 		if err != nil {
 			return nil, fmt.Errorf("读取画像所需的近期记忆失败: %w", err)
-		}
-	}
-	var unconfirmedPreview []*core.Fact
-	if !event.IsGroup && totalUnconfirmedFacts > 0 {
-		previewSize := min(3, totalUnconfirmedFacts)
-		unconfirmedPreview, _, err = t.db.PageUnconfirmedVisibleFacts(ctx, event.Platform, event.SenderID, 1, previewSize)
-		if err != nil {
-			slog.Warn("memory: 读取画像卡片待核对旧记忆失败", "platform", event.Platform, "err", err)
-			unconfirmedPreview = nil
 		}
 	}
 
@@ -478,7 +406,7 @@ func (t *MemoryTool) profile(ctx context.Context, event *entity.SensoryEvent, re
 			impressionFactLines = append(impressionFactLines, content)
 		}
 	}
-	totalPages := (totalConfirmedFacts + memoryFactsPerPage - 1) / memoryFactsPerPage
+	totalPages := (totalFacts + memoryFactsPerPage - 1) / memoryFactsPerPage
 	if totalPages == 0 {
 		totalPages = 1
 	}
@@ -490,7 +418,7 @@ func (t *MemoryTool) profile(ctx context.Context, event *entity.SensoryEvent, re
 		if page > totalPages {
 			return &core.ToolResult{Text: fmt.Sprintf("记忆卡片共 %d 页，没有第 %d 页。", totalPages, page)}, nil
 		}
-		facts, _, totalUnconfirmedFacts, err = t.db.PageVisibleFacts(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup, page, memoryFactsPerPage)
+		facts, _, err = t.db.PageVisibleFacts(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup, page, memoryFactsPerPage)
 		if err != nil {
 			return nil, fmt.Errorf("重新读取当前范围记忆失败: %w", err)
 		}
@@ -579,22 +507,8 @@ func (t *MemoryTool) profile(ctx context.Context, event *entity.SensoryEvent, re
 			fmt.Fprintf(&card, "- %s\n", fact)
 		}
 		if totalPages > 1 {
-			fmt.Fprintf(&card, "\n*第 %d/%d 页 · 共 %d 条记忆 · 可以说“下一页”或“上一页”继续浏览。*\n", page, totalPages, totalConfirmedFacts)
+			fmt.Fprintf(&card, "\n*第 %d/%d 页 · 共 %d 条记忆 · 可以说“下一页”或“上一页”继续浏览。*\n", page, totalPages, totalFacts)
 		}
-	}
-	if len(unconfirmedPreview) > 0 {
-		fmt.Fprintf(&card, "\n### 🕰️ 待核对的旧记忆\n\n")
-		for _, fact := range unconfirmedPreview {
-			if fact != nil {
-				fmt.Fprintf(&card, "- **ID %d** · %s\n", fact.ID, singleLineText(fact.Content))
-			}
-		}
-		if totalUnconfirmedFacts > len(unconfirmedPreview) {
-			fmt.Fprintf(&card, "\n*另有 %d 条；可以让我分页列出全部。*\n", totalUnconfirmedFacts-len(unconfirmedPreview))
-		}
-		card.WriteString("\n*确认某条后说“确认记忆 ID <数字>”；不确认也可以让我删除。*\n")
-	} else if totalUnconfirmedFacts > 0 && !event.IsGroup {
-		fmt.Fprintf(&card, "\n*另有 %d 条旧记忆的来源尚未核对；可以让我分页列出内容。*\n", totalUnconfirmedFacts)
 	}
 	fmt.Fprintf(&card, "\n---\n\n*%s 记错了可以直接告诉我。*", scopeDescription)
 	content := card.String()
@@ -616,15 +530,6 @@ func (t *MemoryTool) profile(ctx context.Context, event *entity.SensoryEvent, re
 	result.ImageData = png
 	t.setProfilePage(pageKey, page)
 	return result, nil
-}
-
-func explicitlyConfirmsFactSource(message string, factID int64) bool {
-	fields := strings.Fields(strings.TrimSpace(message))
-	if len(fields) != 3 || fields[0] != "确认记忆" || !strings.EqualFold(fields[1], "ID") {
-		return false
-	}
-	confirmedID, err := strconv.ParseInt(strings.Trim(fields[2], ".,!?，。！？；;:："), 10, 64)
-	return err == nil && confirmedID == factID
 }
 
 func profilePageKey(event *entity.SensoryEvent) string {

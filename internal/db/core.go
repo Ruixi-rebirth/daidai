@@ -43,46 +43,53 @@ func decodeFloat32Slice(blob []byte) []float32 {
 }
 
 const schema = `
-CREATE TABLE IF NOT EXISTS app_migrations (
-    name       TEXT PRIMARY KEY,
-    applied_at INTEGER NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS messages (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    platform     TEXT NOT NULL,
-    chat_type    TEXT NOT NULL DEFAULT 'private', -- 'private' 或 'group'
-    conv_id      TEXT NOT NULL,                   -- 纯净会话ID (纯群号或纯私聊标识)
+    platform     TEXT NOT NULL CHECK (length(platform) > 0),
+    chat_type    TEXT NOT NULL DEFAULT 'private' CHECK (chat_type IN ('private', 'group')),
+    conv_id      TEXT NOT NULL CHECK (length(conv_id) > 0),
     user_id      TEXT NOT NULL,                   -- 纯净用户ID (纯QQ号或OpenID)
     name         TEXT NOT NULL,
     text         TEXT NOT NULL,
-    is_bot       INTEGER NOT NULL DEFAULT 0,
+    is_bot       INTEGER NOT NULL DEFAULT 0 CHECK (is_bot IN (0, 1)),
     created_at   INTEGER NOT NULL,                -- 毫秒级时间戳
     reply_to_uid TEXT NOT NULL DEFAULT '',
     platform_msg_id TEXT NOT NULL DEFAULT '',
     embedding    BLOB                             -- 可选稠密语义向量 (float32 小端字节序)
 );
 CREATE INDEX IF NOT EXISTS idx_messages_lookup ON messages(platform, chat_type, conv_id, id);
-CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(platform, conv_id, id);
-CREATE INDEX IF NOT EXISTS idx_messages_time ON messages(platform, chat_type, conv_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_time ON messages(platform, chat_type, conv_id, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_messages_reset ON messages(conv_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_inbound_event ON messages(platform, chat_type, conv_id, platform_msg_id)
+    WHERE is_bot = 0 AND platform_msg_id <> '';
+CREATE INDEX IF NOT EXISTS idx_messages_reply_lookup ON messages(platform, chat_type, conv_id, user_id, is_bot, id DESC);
 
 CREATE TABLE IF NOT EXISTS user_facts (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    platform     TEXT NOT NULL,
-    user_id      TEXT NOT NULL,
-    scope_type   TEXT NOT NULL DEFAULT 'global',  -- 'global': 跨场景全局画像, 'group': 特定群专属画像
-    scope_id     TEXT NOT NULL DEFAULT '',        -- 当 scope_type 为 group 时的纯群号
-    fact         TEXT NOT NULL,
-    status       TEXT NOT NULL DEFAULT 'active',  -- 'active': 生效, 'superseded': 已被新事实覆盖, 'deleted': 用户否定废弃
+    platform     TEXT NOT NULL CHECK (length(platform) > 0),
+    user_id      TEXT NOT NULL CHECK (length(user_id) > 0),
+    scope_type   TEXT NOT NULL DEFAULT 'global' CHECK (scope_type IN ('global', 'group')),
+    scope_id     TEXT NOT NULL DEFAULT '',
+    CHECK ((scope_type = 'global' AND scope_id = '') OR (scope_type = 'group' AND length(scope_id) > 0)),
+    fact         TEXT NOT NULL CHECK (length(trim(fact)) > 0),
+    status       TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'superseded', 'deleted')),
     quote        TEXT NOT NULL DEFAULT '',        -- 来源用户原话
-    scope_unknown INTEGER NOT NULL DEFAULT 0,     -- 升级前事实来源范围未知；仅私聊可见
     created_at   INTEGER NOT NULL,                -- 毫秒级时间戳
     updated_at   INTEGER NOT NULL,
     embedding    BLOB                             -- 可选稠密语义向量 (float32 小端字节序)
 );
-CREATE INDEX IF NOT EXISTS idx_facts_lookup ON user_facts(platform, user_id, status);
-CREATE INDEX IF NOT EXISTS idx_facts_scope ON user_facts(platform, user_id, scope_type, scope_id, status);
-CREATE INDEX IF NOT EXISTS idx_facts_page ON user_facts(platform, user_id, scope_type, status, updated_at DESC, id DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_active_unique ON user_facts(platform, user_id, scope_type, scope_id, fact) WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_facts_page ON user_facts(platform, user_id, scope_type, scope_id, updated_at DESC, id DESC) WHERE status = 'active';
+
+CREATE TABLE IF NOT EXISTS user_fact_sources (
+    fact_id     INTEGER NOT NULL,
+    message_id  INTEGER NOT NULL,
+    linked_at   INTEGER NOT NULL,
+    PRIMARY KEY (fact_id, message_id),
+    FOREIGN KEY (fact_id) REFERENCES user_facts(id) ON DELETE CASCADE,
+    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_fact_sources_message ON user_fact_sources(message_id, fact_id);
 
 CREATE TABLE IF NOT EXISTS msg_cache (
     msg_id     TEXT PRIMARY KEY,
@@ -94,14 +101,14 @@ CREATE TABLE IF NOT EXISTS msg_cache (
 CREATE INDEX IF NOT EXISTS idx_msg_cache_time ON msg_cache(updated_at);
 
 CREATE TABLE IF NOT EXISTS channel_workspaces (
-    channel_id     TEXT NOT NULL,
-    workspace_path TEXT NOT NULL,
+    channel_id     TEXT NOT NULL CHECK (length(channel_id) > 0),
+    workspace_path TEXT NOT NULL CHECK (length(workspace_path) > 0),
     project_name   TEXT NOT NULL,
-    is_current     INTEGER NOT NULL DEFAULT 0,
+    is_current     INTEGER NOT NULL DEFAULT 0 CHECK (is_current IN (0, 1)),
     last_active_at INTEGER NOT NULL,
     PRIMARY KEY (channel_id, workspace_path)
 );
-CREATE INDEX IF NOT EXISTS idx_workspace_channel ON channel_workspaces(channel_id, is_current);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_one_current ON channel_workspaces(channel_id) WHERE is_current = 1;
 
 CREATE TABLE IF NOT EXISTS session_resets (
     conv_id    TEXT PRIMARY KEY,
@@ -120,8 +127,8 @@ CREATE TABLE IF NOT EXISTS pending_notifications (
     platform     TEXT NOT NULL,
     recipient_id TEXT NOT NULL,
     dedupe_key   TEXT NOT NULL,
-    category     TEXT NOT NULL,
-    body         TEXT NOT NULL,
+    category     TEXT NOT NULL CHECK (length(category) > 0),
+    body         TEXT NOT NULL CHECK (length(body) > 0),
     created_at   INTEGER NOT NULL,
     UNIQUE(platform, recipient_id, dedupe_key)
 );
@@ -135,7 +142,7 @@ CREATE TABLE IF NOT EXISTS agent_tickets (
     worker          TEXT NOT NULL DEFAULT '',
     workspace       TEXT NOT NULL DEFAULT '',
     model           TEXT NOT NULL DEFAULT '',
-    status          TEXT NOT NULL,
+    status          TEXT NOT NULL CHECK (status IN ('pending', 'running', 'stopping', 'completed', 'failed', 'aborted', 'interrupted')),
     output          TEXT NOT NULL DEFAULT '',
     allow_sensitive INTEGER NOT NULL DEFAULT 0,
     created_at      INTEGER NOT NULL,
@@ -220,7 +227,7 @@ func (m *Manager) GetConn(platform string) (*sql.DB, error) {
 	}
 
 	dbPath := filepath.Join(m.baseDir, p+".db")
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)", dbPath)
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)", dbPath)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %s failed: %w", dbPath, err)
@@ -231,41 +238,6 @@ func (m *Manager) GetConn(platform string) (*sql.DB, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("init schema for %s failed: %w", p, err)
 	}
-	// 幂等兼容升级旧数据库；只忽略“字段已存在”，其他迁移错误必须阻止启动。
-	for _, migration := range []struct {
-		table  string
-		column string
-		def    string
-	}{
-		{table: "messages", column: "embedding", def: "BLOB"},
-		{table: "user_facts", column: "embedding", def: "BLOB"},
-		{table: "session_resets", column: "reset_id", def: "INTEGER"},
-		{table: "messages", column: "platform_msg_id", def: "TEXT NOT NULL DEFAULT ''"},
-		{table: "user_facts", column: "scope_unknown", def: "INTEGER NOT NULL DEFAULT 0"},
-		{table: "msg_cache", column: "chat_type", def: "TEXT NOT NULL DEFAULT ''"},
-		{table: "msg_cache", column: "conv_id", def: "TEXT NOT NULL DEFAULT ''"},
-	} {
-		if err := ensureColumn(db, migration.table, migration.column, migration.def); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("migrate %s.%s failed: %w", migration.table, migration.column, err)
-		}
-	}
-	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_messages_platform_msg_id ON messages(platform, platform_msg_id)"); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("create platform message ID index for %s failed: %w", p, err)
-	}
-	if err := markLegacyFactScopesUnknown(db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("mark legacy memory scope for %s failed: %w", p, err)
-	}
-	if err := redactLegacyAuthMessages(db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("redact legacy OAuth authorization messages for %s failed: %w", p, err)
-	}
-	if err := redactLegacyAuthMessageCache(db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("redact legacy OAuth message cache for %s failed: %w", p, err)
-	}
 	if err := os.Chmod(dbPath, 0600); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("secure database file permissions for %s failed: %w", p, err)
@@ -273,30 +245,6 @@ func (m *Manager) GetConn(platform string) (*sql.DB, error) {
 
 	m.conns[p] = db
 	return db, nil
-}
-
-func markLegacyFactScopesUnknown(db *sql.DB) error {
-	const migrationName = "mark_legacy_fact_scope_unknown_v1"
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	var applied int
-	err = tx.QueryRow("SELECT 1 FROM app_migrations WHERE name = ?", migrationName).Scan(&applied)
-	if err == nil {
-		return nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-	if _, err := tx.Exec("UPDATE user_facts SET scope_unknown = 1 WHERE scope_type = 'global'"); err != nil {
-		return err
-	}
-	if _, err := tx.Exec("INSERT INTO app_migrations (name, applied_at) VALUES (?, ?)", migrationName, time.Now().UnixMilli()); err != nil {
-		return err
-	}
-	return tx.Commit()
 }
 
 // GetRuntimeState loads a small persisted service state value from the platform database.
@@ -354,29 +302,18 @@ func (m *Manager) EnqueuePendingNotification(ctx context.Context, platform, reci
 	if err != nil {
 		return false, err
 	}
-	tx, err := db.BeginTx(ctx, nil)
+	result, err := db.ExecContext(ctx, `INSERT INTO pending_notifications
+		(platform, recipient_id, dedupe_key, category, body, created_at) VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(platform, recipient_id, dedupe_key) DO NOTHING`,
+		platform, recipientID, dedupeKey, category, body, time.Now().UnixMilli())
 	if err != nil {
 		return false, err
 	}
-	defer func() { _ = tx.Rollback() }()
-	var exists int
-	err = tx.QueryRowContext(ctx, `SELECT 1 FROM pending_notifications
-		WHERE platform=? AND recipient_id=? AND dedupe_key=?`, platform, recipientID, dedupeKey).Scan(&exists)
-	if err == nil {
-		return false, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	inserted, err := result.RowsAffected()
+	if err != nil {
 		return false, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO pending_notifications
-		(platform, recipient_id, dedupe_key, category, body, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		platform, recipientID, dedupeKey, category, body, time.Now().UnixMilli()); err != nil {
-		return false, err
-	}
-	if err := tx.Commit(); err != nil {
-		return false, err
-	}
-	return true, nil
+	return inserted > 0, nil
 }
 
 func (m *Manager) ListPendingNotifications(ctx context.Context, platform, recipientID string, limit int) ([]PendingNotification, error) {
@@ -567,181 +504,6 @@ func (m *Manager) DeleteAGYSessions(ctx context.Context, platform, channelID, wo
 	return err
 }
 
-func redactLegacyAuthMessages(db *sql.DB) error {
-	const migrationName = "redact_legacy_oauth_authorization_messages_v1"
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	var applied int
-	err = tx.QueryRow("SELECT 1 FROM app_migrations WHERE name = ?", migrationName).Scan(&applied)
-	if err == nil {
-		return nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-
-	const batchSize = 500
-	var lastID int64
-	for {
-		rows, err := tx.Query("SELECT id, text FROM messages WHERE id > ? AND instr(lower(text), '/agy') > 0 ORDER BY id LIMIT ?", lastID, batchSize)
-		if err != nil {
-			return err
-		}
-		type message struct {
-			id   int64
-			text string
-		}
-		batch := make([]message, 0, batchSize)
-		for rows.Next() {
-			var item message
-			if err := rows.Scan(&item.id, &item.text); err != nil {
-				_ = rows.Close()
-				return err
-			}
-			batch = append(batch, item)
-		}
-		rowsErr := rows.Err()
-		closeErr := rows.Close()
-		if rowsErr != nil {
-			return rowsErr
-		}
-		if closeErr != nil {
-			return closeErr
-		}
-		if len(batch) == 0 {
-			break
-		}
-		for _, item := range batch {
-			lastID = item.id
-			if !isLegacyOAuthCodeMessage(item.text) {
-				continue
-			}
-			if _, err := tx.Exec("UPDATE messages SET text = ?, embedding = NULL WHERE id = ?", "[OAuth authorization code redacted]", item.id); err != nil {
-				return err
-			}
-		}
-	}
-	_, err = tx.Exec("INSERT INTO app_migrations (name, applied_at) VALUES (?, ?)", migrationName, time.Now().UnixMilli())
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-func redactLegacyAuthMessageCache(db *sql.DB) error {
-	const migrationName = "delete_legacy_oauth_message_cache_v1"
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	var applied int
-	err = tx.QueryRow("SELECT 1 FROM app_migrations WHERE name = ?", migrationName).Scan(&applied)
-	if err == nil {
-		return nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-
-	const batchSize = 500
-	var lastRowID int64
-	for {
-		rows, err := tx.Query(`SELECT rowid, msg_id, content FROM msg_cache
-			WHERE rowid > ? AND instr(lower(content), '/agy') > 0 ORDER BY rowid LIMIT ?`, lastRowID, batchSize)
-		if err != nil {
-			return err
-		}
-		type cachedMessage struct {
-			rowID   int64
-			msgID   string
-			content string
-		}
-		batch := make([]cachedMessage, 0, batchSize)
-		for rows.Next() {
-			var item cachedMessage
-			if err := rows.Scan(&item.rowID, &item.msgID, &item.content); err != nil {
-				_ = rows.Close()
-				return err
-			}
-			batch = append(batch, item)
-		}
-		rowsErr := rows.Err()
-		closeErr := rows.Close()
-		if rowsErr != nil {
-			return rowsErr
-		}
-		if closeErr != nil {
-			return closeErr
-		}
-		if len(batch) == 0 {
-			break
-		}
-		for _, item := range batch {
-			lastRowID = item.rowID
-			if isLegacyOAuthCodeMessage(item.content) {
-				if _, err := tx.Exec("DELETE FROM msg_cache WHERE msg_id = ?", item.msgID); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	if _, err := tx.Exec("INSERT INTO app_migrations (name, applied_at) VALUES (?, ?)", migrationName, time.Now().UnixMilli()); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-func isLegacyOAuthCodeMessage(content string) bool {
-	command := strings.ToLower(strings.TrimSpace(content))
-	for strings.HasPrefix(command, "<@!") {
-		end := strings.IndexByte(command, '>')
-		if end < 0 {
-			break
-		}
-		command = strings.TrimSpace(command[end+1:])
-	}
-	parts := strings.Fields(command)
-	return len(parts) >= 3 && parts[0] == "/agy" && (parts[1] == "code" || parts[1] == "auth")
-}
-
-func ensureColumn(db *sql.DB, table, column, definition string) error {
-	rows, err := db.Query("PRAGMA table_info(" + table + ")")
-	if err != nil {
-		return err
-	}
-	found := false
-	for rows.Next() {
-		var cid, notNull, primaryKey int
-		var name, columnType string
-		var defaultValue sql.NullString
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		if name == column {
-			found = true
-		}
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return err
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if found {
-		return nil
-	}
-	_, err = db.Exec("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition)
-	return err
-}
-
 // Close 关闭所有数据库连接
 func (m *Manager) Close() error {
 	m.mu.Lock()
@@ -796,11 +558,8 @@ func (m *Manager) LogInboundMessage(ctx context.Context, platform, chatType, con
 	}
 	result, err := database.ExecContext(ctx, `
 		INSERT INTO messages (platform, chat_type, conv_id, user_id, name, text, is_bot, created_at, reply_to_uid, platform_msg_id)
-		SELECT ?, ?, ?, ?, ?, ?, 0, ?, '', ?
-		WHERE NOT EXISTS (
-			SELECT 1 FROM messages
-			WHERE platform = ? AND chat_type = ? AND conv_id = ? AND platform_msg_id = ? AND is_bot = 0
-		)`, p, chatType, convID, userID, name, text, time.Now().UnixMilli(), platformMsgID, p, chatType, convID, platformMsgID)
+		VALUES (?, ?, ?, ?, ?, ?, 0, ?, '', ?)
+		ON CONFLICT DO NOTHING`, p, chatType, convID, userID, name, text, time.Now().UnixMilli(), platformMsgID)
 	if err != nil {
 		return 0, err
 	}
@@ -892,6 +651,68 @@ type StoredMessage struct {
 	IsBot     bool
 	Embedding []float32
 	CreatedAt time.Time
+}
+
+type FactSource struct {
+	MessageID int64
+	Text      string
+	CreatedAt time.Time
+	Excerpt   bool
+}
+
+// ListVisibleFactSources returns source messages only when the fact belongs to
+// the user's currently visible scope. It also exposes the saved quote for facts
+// created before message-level provenance was recorded.
+func (m *Manager) ListVisibleFactSources(ctx context.Context, platform, userID, groupID string, isGroup bool, factID int64) ([]FactSource, error) {
+	database, err := m.GetConn(platform)
+	if err != nil {
+		return nil, err
+	}
+	scopeType, scopeID := "global", ""
+	if isGroup {
+		if strings.TrimSpace(groupID) == "" {
+			return nil, fmt.Errorf("group ID is required to read group fact sources")
+		}
+		scopeType, scopeID = "group", groupID
+	}
+	var quote string
+	err = database.QueryRowContext(ctx, `SELECT quote FROM user_facts
+		WHERE id = ? AND platform = ? AND user_id = ? AND scope_type = ? AND scope_id = ? AND status = 'active'`,
+		factID, NormPlatform(platform), userID, scopeType, scopeID).Scan(&quote)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	rows, err := database.QueryContext(ctx, `SELECT m.id, m.text, m.created_at
+		FROM user_fact_sources s
+		JOIN user_facts f ON f.id = s.fact_id
+		JOIN messages m ON m.id = s.message_id AND m.platform = f.platform AND m.user_id = f.user_id AND m.is_bot = 0
+			AND ((f.scope_type = 'global' AND m.chat_type = 'private') OR (f.scope_type = 'group' AND m.chat_type = 'group' AND m.conv_id = f.scope_id))
+		WHERE s.fact_id = ? AND f.platform = ? AND f.user_id = ? AND f.scope_type = ? AND f.scope_id = ? AND f.status = 'active'
+		ORDER BY s.linked_at DESC, m.id DESC LIMIT 20`, factID, NormPlatform(platform), userID, scopeType, scopeID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	sources := make([]FactSource, 0, 4)
+	for rows.Next() {
+		var source FactSource
+		var createdAt int64
+		if err := rows.Scan(&source.MessageID, &source.Text, &createdAt); err != nil {
+			return nil, err
+		}
+		source.CreatedAt = time.UnixMilli(createdAt)
+		sources = append(sources, source)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(sources) == 0 && strings.TrimSpace(quote) != "" {
+		sources = append(sources, FactSource{Text: quote, Excerpt: true})
+	}
+	return sources, nil
 }
 
 // UpdateMessageEmbedding 异步回填消息的稠密语义向量
@@ -1388,108 +1209,48 @@ func (m *Manager) ListVisibleFacts(ctx context.Context, platform, userID, groupI
 	return m.listFacts(ctx, platform, userID, `AND scope_type = 'global'`, "")
 }
 
-// PageVisibleFacts returns one page of confirmed facts, plus total confirmed
-// and source-unknown counts, without loading the full memory list into memory.
-func (m *Manager) PageVisibleFacts(ctx context.Context, platform, userID, groupID string, isGroup bool, page, pageSize int) ([]*core.Fact, int, int, error) {
+// PageVisibleFacts returns one page of facts visible in the current conversation.
+func (m *Manager) PageVisibleFacts(ctx context.Context, platform, userID, groupID string, isGroup bool, page, pageSize int) ([]*core.Fact, int, error) {
 	if page < 1 || pageSize < 1 || pageSize > 100 {
-		return nil, 0, 0, fmt.Errorf("invalid visible fact page %d with page size %d", page, pageSize)
+		return nil, 0, fmt.Errorf("invalid visible fact page %d with page size %d", page, pageSize)
 	}
 	maxInt := int(^uint(0) >> 1)
 	if page-1 > maxInt/pageSize {
-		return nil, 0, 0, fmt.Errorf("visible fact page %d is too large", page)
+		return nil, 0, fmt.Errorf("visible fact page %d is too large", page)
 	}
 	scopeFilter := `AND scope_type = 'global'`
 	args := []any{NormPlatform(platform), userID}
 	if isGroup {
 		if strings.TrimSpace(groupID) == "" {
-			return nil, 0, 0, nil
+			return nil, 0, nil
 		}
 		scopeFilter = `AND scope_type = 'group' AND scope_id = ?`
 		args = append(args, groupID)
 	}
 	database, err := m.GetConn(platform)
 	if err != nil {
-		return nil, 0, 0, err
-	}
-	var totalConfirmed, totalUnknown int
-	countQuery := `SELECT COUNT(*) FROM user_facts WHERE platform = ? AND user_id = ? AND status = 'active' ` + scopeFilter
-	if err := database.QueryRowContext(ctx, countQuery+` AND scope_unknown = 0`, args...).Scan(&totalConfirmed); err != nil {
-		return nil, 0, 0, err
-	}
-	if err := database.QueryRowContext(ctx, countQuery+` AND scope_unknown = 1`, args...).Scan(&totalUnknown); err != nil {
-		return nil, 0, 0, err
-	}
-	maxPage := totalConfirmed / pageSize
-	if totalConfirmed%pageSize != 0 {
-		maxPage++
-	}
-	if maxPage == 0 {
-		maxPage = 1
-	}
-	if page > maxPage {
-		return []*core.Fact{}, totalConfirmed, totalUnknown, nil
-	}
-	query := fmt.Sprintf(`
-		SELECT id, user_id, scope_type, scope_id, substr(fact, 1, %d), updated_at, embedding, scope_unknown
-		FROM user_facts
-		WHERE platform = ? AND user_id = ? AND status = 'active' %s AND scope_unknown = 0
-		ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`, core.MaxFactContentRunes+1, scopeFilter)
-	pageArgs := append(append([]any(nil), args...), pageSize, (page-1)*pageSize)
-	rows, err := database.QueryContext(ctx, query, pageArgs...)
-	if err != nil {
-		return nil, 0, 0, err
-	}
-	defer func() { _ = rows.Close() }()
-	facts := make([]*core.Fact, 0, pageSize)
-	for rows.Next() {
-		var fact core.Fact
-		var updatedAt int64
-		var embedding []byte
-		var scopeUnknown int
-		if err := rows.Scan(&fact.ID, &fact.UserID, &fact.ScopeType, &fact.ScopeID, &fact.Content, &updatedAt, &embedding, &scopeUnknown); err != nil {
-			return nil, 0, 0, err
-		}
-		fact.ConvID = fact.ScopeID
-		fact.UpdatedAt = time.UnixMilli(updatedAt)
-		fact.Embedding = decodeFloat32Slice(embedding)
-		fact.ScopeUnknown = scopeUnknown == 1
-		facts = append(facts, &fact)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, 0, err
-	}
-	return facts, totalConfirmed, totalUnknown, nil
-}
-
-// PageUnconfirmedVisibleFacts pages source-unknown facts for private review.
-// Legacy global facts must not be exposed in group conversations.
-func (m *Manager) PageUnconfirmedVisibleFacts(ctx context.Context, platform, userID string, page, pageSize int) ([]*core.Fact, int, error) {
-	if page < 1 || pageSize < 1 || pageSize > 100 {
-		return nil, 0, fmt.Errorf("invalid unconfirmed fact page %d with page size %d", page, pageSize)
-	}
-	maxInt := int(^uint(0) >> 1)
-	if page-1 > maxInt/pageSize {
-		return nil, 0, fmt.Errorf("unconfirmed fact page %d is too large", page)
-	}
-	database, err := m.GetConn(platform)
-	if err != nil {
 		return nil, 0, err
 	}
-	args := []any{NormPlatform(platform), userID}
-	const where = `platform = ? AND user_id = ? AND scope_type = 'global' AND status = 'active' AND scope_unknown = 1`
 	var total int
-	if err := database.QueryRowContext(ctx, `SELECT COUNT(*) FROM user_facts WHERE `+where, args...).Scan(&total); err != nil {
+	countQuery := `SELECT COUNT(*) FROM user_facts WHERE platform = ? AND user_id = ? AND status = 'active' ` + scopeFilter
+	if err := database.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	maxPage := total / pageSize
 	if total%pageSize != 0 {
 		maxPage++
 	}
+	if maxPage == 0 {
+		maxPage = 1
+	}
 	if page > maxPage {
 		return []*core.Fact{}, total, nil
 	}
-	query := fmt.Sprintf(`SELECT id, user_id, scope_type, scope_id, substr(fact, 1, %d), updated_at, embedding
-		FROM user_facts WHERE %s ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`, core.MaxFactContentRunes+1, where)
+	query := fmt.Sprintf(`
+		SELECT id, user_id, scope_type, scope_id, substr(fact, 1, %d), updated_at, embedding
+		FROM user_facts
+		WHERE platform = ? AND user_id = ? AND status = 'active' %s
+		ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`, core.MaxFactContentRunes+1, scopeFilter)
 	pageArgs := append(append([]any(nil), args...), pageSize, (page-1)*pageSize)
 	rows, err := database.QueryContext(ctx, query, pageArgs...)
 	if err != nil {
@@ -1507,7 +1268,6 @@ func (m *Manager) PageUnconfirmedVisibleFacts(ctx context.Context, platform, use
 		fact.ConvID = fact.ScopeID
 		fact.UpdatedAt = time.UnixMilli(updatedAt)
 		fact.Embedding = decodeFloat32Slice(embedding)
-		fact.ScopeUnknown = true
 		facts = append(facts, &fact)
 	}
 	if err := rows.Err(); err != nil {
@@ -1524,7 +1284,7 @@ func (m *Manager) listFacts(ctx context.Context, platform, userID, scopeFilter, 
 	}
 
 	query := `
-		SELECT id, user_id, scope_type, scope_id, substr(fact, 1, %d), updated_at, embedding, scope_unknown
+		SELECT id, user_id, scope_type, scope_id, substr(fact, 1, %d), updated_at, embedding
 		FROM user_facts 
 		WHERE platform = ? AND user_id = ? AND status = 'active' ` + scopeFilter + `
 		ORDER BY id ASC
@@ -1543,28 +1303,26 @@ func (m *Manager) listFacts(ctx context.Context, platform, userID, scopeFilter, 
 	var facts []*core.Fact
 	for rows.Next() {
 		var (
-			id           int64
-			uID          string
-			scopeType    string
-			scID         string
-			factText     string
-			updatedMs    int64
-			embBlob      []byte
-			scopeUnknown int
+			id        int64
+			uID       string
+			scopeType string
+			scID      string
+			factText  string
+			updatedMs int64
+			embBlob   []byte
 		)
-		if err := rows.Scan(&id, &uID, &scopeType, &scID, &factText, &updatedMs, &embBlob, &scopeUnknown); err != nil {
+		if err := rows.Scan(&id, &uID, &scopeType, &scID, &factText, &updatedMs, &embBlob); err != nil {
 			return nil, err
 		}
 		facts = append(facts, &core.Fact{
-			ID:           id,
-			UserID:       uID,
-			ScopeType:    scopeType,
-			ScopeID:      scID,
-			ConvID:       scID,
-			Content:      factText,
-			Embedding:    decodeFloat32Slice(embBlob),
-			UpdatedAt:    time.UnixMilli(updatedMs),
-			ScopeUnknown: scopeUnknown == 1,
+			ID:        id,
+			UserID:    uID,
+			ScopeType: scopeType,
+			ScopeID:   scID,
+			ConvID:    scID,
+			Content:   factText,
+			Embedding: decodeFloat32Slice(embBlob),
+			UpdatedAt: time.UnixMilli(updatedMs),
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -1573,41 +1331,17 @@ func (m *Manager) listFacts(ctx context.Context, platform, userID, scopeFilter, 
 	return facts, nil
 }
 
-// ConfirmLegacyFactScope confirms an older source-ambiguous global fact as intentional private memory.
-func (m *Manager) ConfirmLegacyFactScope(ctx context.Context, platform, userID string, factID int64) error {
-	if factID <= 0 || strings.TrimSpace(userID) == "" {
-		return fmt.Errorf("user ID and valid fact ID are required")
-	}
-	db, err := m.GetConn(platform)
-	if err != nil {
-		return err
-	}
-	result, err := db.ExecContext(ctx, `UPDATE user_facts SET scope_unknown = 0, updated_at = ?
-		WHERE id = ? AND platform = ? AND user_id = ? AND scope_type = 'global' AND scope_unknown = 1 AND status = 'active'`,
-		time.Now().UnixMilli(), factID, NormPlatform(platform), userID)
-	if err != nil {
-		return err
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
-		return fmt.Errorf("legacy fact not found or already confirmed")
-	}
-	return nil
-}
-
 // FactMutation 长期记忆事实演进指令
 type FactMutation struct {
-	Action       string    `json:"action"`               // ADD, UPDATE 或 DELETE
-	FactID       int64     `json:"fact_id,omitempty"`    // 当 UPDATE 或 DELETE 时指定的目标事实 ID
-	Fact         string    `json:"fact,omitempty"`       // 新增或更新后的事实陈述
-	ExpectedFact string    `json:"-"`                    // 非空时要求修改前事实仍与读取时一致
-	ScopeType    string    `json:"scope_type,omitempty"` // global 或 group
-	ScopeID      string    `json:"scope_id,omitempty"`   // 群号 (若是群专属事实)
-	Quote        string    `json:"quote,omitempty"`      // 来源原话
-	Embedding    []float32 `json:"-"`                    // 可选稠密语义向量
+	Action          string    `json:"action"`               // ADD, UPDATE 或 DELETE
+	FactID          int64     `json:"fact_id,omitempty"`    // 当 UPDATE 或 DELETE 时指定的目标事实 ID
+	SourceMessageID int64     `json:"-"`                    // 支撑该事实的入站消息记录 ID
+	Fact            string    `json:"fact,omitempty"`       // 新增或更新后的事实陈述
+	ExpectedFact    string    `json:"-"`                    // 非空时要求修改前事实仍与读取时一致
+	ScopeType       string    `json:"scope_type,omitempty"` // global 或 group
+	ScopeID         string    `json:"scope_id,omitempty"`   // 群号 (若是群专属事实)
+	Quote           string    `json:"quote,omitempty"`      // 来源原话
+	Embedding       []float32 `json:"-"`                    // 可选稠密语义向量
 }
 
 // ApplyFactMutations 事务内批量执行事实新增、原地更新与删除（保持 FactID 稳定并校验目标存在性）
@@ -1662,20 +1396,30 @@ func (m *Manager) ApplyFactMutations(ctx context.Context, platform, userID strin
 			}
 			var existingID int64
 			err := tx.QueryRowContext(ctx,
-				"SELECT id FROM user_facts WHERE platform = ? AND user_id = ? AND scope_type = ? AND scope_id = ? AND status = 'active' AND scope_unknown = 0 AND fact = ? LIMIT 1",
+				"SELECT id FROM user_facts WHERE platform = ? AND user_id = ? AND scope_type = ? AND scope_id = ? AND status = 'active' AND fact = ? LIMIT 1",
 				p, userID, scopeType, scopeID, factText,
 			).Scan(&existingID)
 			if err == nil && existingID > 0 {
+				if err := insertFactSource(ctx, tx, existingID, mut.SourceMessageID, p, userID, scopeType, scopeID, nowMs); err != nil {
+					return err
+				}
 				continue
 			}
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
-			_, err = tx.ExecContext(ctx,
+			result, err := tx.ExecContext(ctx,
 				"INSERT INTO user_facts (platform, user_id, scope_type, scope_id, fact, status, quote, created_at, updated_at, embedding) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)",
 				p, userID, scopeType, scopeID, factText, mut.Quote, nowMs, nowMs, encodeFloat32Slice(mut.Embedding),
 			)
 			if err != nil {
+				return err
+			}
+			insertedFactID, err := result.LastInsertId()
+			if err != nil {
+				return err
+			}
+			if err := insertFactSource(ctx, tx, insertedFactID, mut.SourceMessageID, p, userID, scopeType, scopeID, nowMs); err != nil {
 				return err
 			}
 
@@ -1692,7 +1436,7 @@ func (m *Manager) ApplyFactMutations(ctx context.Context, platform, userID strin
 			}
 			var duplicateID int64
 			err := tx.QueryRowContext(ctx,
-				"SELECT id FROM user_facts WHERE platform = ? AND user_id = ? AND scope_type = ? AND scope_id = ? AND status = 'active' AND scope_unknown = 0 AND fact = ? AND id <> ? LIMIT 1",
+				"SELECT id FROM user_facts WHERE platform = ? AND user_id = ? AND scope_type = ? AND scope_id = ? AND status = 'active' AND fact = ? AND id <> ? LIMIT 1",
 				p, userID, scopeType, scopeID, factText, mut.FactID,
 			).Scan(&duplicateID)
 			if err == nil {
@@ -1701,7 +1445,7 @@ func (m *Manager) ApplyFactMutations(ctx context.Context, platform, userID strin
 			if !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
-			query := "UPDATE user_facts SET fact = ?, quote = ?, updated_at = ?, embedding = ? WHERE id = ? AND platform = ? AND user_id = ? AND scope_type = ? AND scope_id = ? AND status = 'active' AND scope_unknown = 0"
+			query := "UPDATE user_facts SET fact = ?, quote = ?, updated_at = ?, embedding = ? WHERE id = ? AND platform = ? AND user_id = ? AND scope_type = ? AND scope_id = ? AND status = 'active'"
 			args := []any{factText, mut.Quote, nowMs, encodeFloat32Slice(mut.Embedding), mut.FactID, p, userID, scopeType, scopeID}
 			if mut.ExpectedFact != "" {
 				query += " AND fact = ?"
@@ -1716,6 +1460,14 @@ func (m *Manager) ApplyFactMutations(ctx context.Context, platform, userID strin
 					return fmt.Errorf("ID 为 %d 的记忆事实已变化或不再生效，拒绝覆盖旧版本", mut.FactID)
 				}
 				return fmt.Errorf("未找到 ID 为 %d 的生效记忆事实", mut.FactID)
+			}
+			if mut.SourceMessageID > 0 {
+				if _, err := tx.ExecContext(ctx, `DELETE FROM user_fact_sources WHERE fact_id = ?`, mut.FactID); err != nil {
+					return err
+				}
+				if err := insertFactSource(ctx, tx, mut.FactID, mut.SourceMessageID, p, userID, scopeType, scopeID, nowMs); err != nil {
+					return err
+				}
 			}
 
 		case "DELETE":
@@ -1742,6 +1494,38 @@ func (m *Manager) ApplyFactMutations(ctx context.Context, platform, userID strin
 	}
 
 	return tx.Commit()
+}
+
+func insertFactSource(ctx context.Context, tx *sql.Tx, factID, messageID int64, platform, userID, scopeType, scopeID string, linkedAt int64) error {
+	if messageID <= 0 {
+		return nil
+	}
+	chatType := "private"
+	convID := ""
+	if scopeType == "group" {
+		chatType = "group"
+		convID = scopeID
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO user_fact_sources (fact_id, message_id, linked_at)
+		SELECT ?, id, ? FROM messages
+		WHERE id = ? AND platform = ? AND user_id = ? AND chat_type = ? AND conv_id = ? AND is_bot = 0
+		ON CONFLICT(fact_id, message_id) DO NOTHING`,
+		factID, linkedAt, messageID, platform, userID, chatType, convID)
+	if err != nil {
+		return err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return err
+	} else if affected == 0 {
+		var exists int
+		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM user_fact_sources WHERE fact_id = ? AND message_id = ?`, factID, messageID).Scan(&exists); err == nil {
+			return nil
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		return fmt.Errorf("memory source message %d is missing or outside the fact scope", messageID)
+	}
+	return nil
 }
 
 // SaveMsgCache 保存平台消息 ID 到原文的映射 (用于引用回复反查)
