@@ -286,10 +286,6 @@ func (m *Manager) GetConn(platform string) (*sql.DB, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("init schema for %s failed: %w", p, err)
 	}
-	if err := ensureUserRoleSchema(db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("upgrade user role schema for %s failed: %w", p, err)
-	}
 	if err := os.Chmod(dbPath, 0600); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("secure database file permissions for %s failed: %w", p, err)
@@ -297,45 +293,6 @@ func (m *Manager) GetConn(platform string) (*sql.DB, error) {
 
 	m.conns[p] = db
 	return db, nil
-}
-
-// ensureUserRoleSchema upgrades the original collaborator-only CHECK constraint transactionally.
-func ensureUserRoleSchema(db *sql.DB) error {
-	var definition string
-	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='user_roles'`).Scan(&definition); err != nil {
-		return err
-	}
-	if strings.Contains(definition, "'friend'") {
-		return nil
-	}
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err = tx.Exec(`DROP INDEX IF EXISTS idx_user_roles_role`); err != nil {
-		return err
-	}
-	if _, err = tx.Exec(`ALTER TABLE user_roles RENAME TO user_roles_legacy`); err != nil {
-		return err
-	}
-	if _, err = tx.Exec(`CREATE TABLE user_roles (
-		platform TEXT NOT NULL, user_id TEXT NOT NULL CHECK(length(user_id)>0),
-		role TEXT NOT NULL CHECK(role IN ('friend','collaborator')),
-		granted_by TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-		PRIMARY KEY(platform,user_id))`); err != nil {
-		return err
-	}
-	if _, err = tx.Exec(`INSERT INTO user_roles SELECT * FROM user_roles_legacy`); err != nil {
-		return err
-	}
-	if _, err = tx.Exec(`DROP TABLE user_roles_legacy`); err != nil {
-		return err
-	}
-	if _, err = tx.Exec(`CREATE INDEX idx_user_roles_role ON user_roles(platform,role,updated_at DESC)`); err != nil {
-		return err
-	}
-	return tx.Commit()
 }
 
 // GetRuntimeState loads a small persisted service state value from the platform database.
