@@ -1078,6 +1078,17 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 		pendingImages, omittedPendingImages = q.inbox.PendingKind(attachmentScope, core.AttachmentImage)
 	}
 	if convID != "" && userID != "" && (content != "" || len(images) > 0 || len(files) > 0 || len(pendingFiles) > 0 || len(pendingImages) > 0 || omittedPendingFiles > 0 || omittedPendingImages > 0) {
+		role := entity.RoleGuest
+		if q.immune != nil {
+			role = q.immune.ResolveRole(userID)
+		}
+		if !isGroup && role == entity.RoleGuest {
+			if q.dedup != nil {
+				q.dedup.Remember(msgID)
+			}
+			slog.Info("qq: 忽略未授权访客的私聊消息", "userID", userID, "messageID", msgID)
+			return true
+		}
 		botAddressed := botMentioned || (fullGroupEvent && !strings.HasPrefix(strings.TrimSpace(content), "/") && strings.Contains(content, "呆呆"))
 		trimmedContent := strings.TrimSpace(content)
 		if trimmedContent != "" && !strings.HasPrefix(trimmedContent, "/") && trimmedContent != "继续" && q.msgCache != nil && !entity.IsSensitiveAuthCommand(content) {
@@ -1086,10 +1097,6 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 				chatType = "group"
 			}
 			q.msgCache.SetAsync(msgID, content, chatType, convID)
-		}
-		role := entity.RoleGuest
-		if q.immune != nil {
-			role = q.immune.ResolveRole(userID)
 		}
 		if q.inbox != nil && (len(files) > 0 || len(images) > 0) {
 			q.inbox.RememberPending(attachmentScope, append(append([]*core.Attachment(nil), files...), images...))
