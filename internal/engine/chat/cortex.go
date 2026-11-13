@@ -762,16 +762,8 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 	imageOnlyReply := false
 	linkToolCalls := 0
 	toolCallsUsed := 0
-	mediaUtterance := func(text string) *entity.Utterance {
-		text = core.TruncateRunes(sanitizeAssistantSpoken(text), maxAssistantReplyRunes, "\n[回复过长，后续内容已截断]")
-		switch text {
-		case "卡片图片已成功渲染生成":
-			text = cardFallbackCaption(directCardFallbackText)
-		case "":
-			if !imageOnlyReply {
-				text = "图片已准备好。"
-			}
-		}
+	mediaUtterance := func() *entity.Utterance {
+		text := "图片已准备好，但我整理说明时遇到超时了。"
 		if imageOnlyReply {
 			text = ""
 		}
@@ -808,7 +800,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 			}
 			if len(directCardData) > 0 {
 				slog.Warn("cortex: 图片已生成但模型配文失败，直接交付图片", "err", err)
-				return mediaUtterance(lastToolText), nil
+				return mediaUtterance(), nil
 			}
 			return nil, fmt.Errorf("cortex reasoning failed: %w", err)
 		}
@@ -818,7 +810,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 		if resp == nil {
 			if len(directCardData) > 0 {
 				slog.Warn("cortex: 图片已生成但模型未返回配文，直接交付图片")
-				return mediaUtterance(lastToolText), nil
+				return mediaUtterance(), nil
 			}
 			return nil, fmt.Errorf("cortex reasoning failed: model returned an empty response")
 		}
@@ -860,14 +852,14 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 		if len(resp.ToolCalls) > maxToolCallsPerThink {
 			if len(directCardData) > 0 {
 				slog.Warn("cortex: 图片已生成但模型超出工具调用上限，直接交付图片", "calls", len(resp.ToolCalls))
-				return mediaUtterance(lastToolText), nil
+				return mediaUtterance(), nil
 			}
 			return nil, fmt.Errorf("cortex reasoning failed: model returned %d tool calls; limit is %d", len(resp.ToolCalls), maxToolCallsPerThink)
 		}
 		if err := validateToolCalls(resp.ToolCalls); err != nil {
 			if len(directCardData) > 0 {
 				slog.Warn("cortex: 图片已生成但模型工具响应无效，直接交付图片", "err", err)
-				return mediaUtterance(lastToolText), nil
+				return mediaUtterance(), nil
 			}
 			return nil, fmt.Errorf("cortex reasoning failed: invalid model tool calls: %w", err)
 		}
@@ -1004,6 +996,9 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 				if imageFallback == "" {
 					imageFallback = strings.TrimSpace(toolRes.Text)
 				}
+				if tc.Function.Name == "screenshot_web" {
+					imageFallback = ""
+				}
 				if imageFallback != "" {
 					if directCardFallbackText != "" {
 						directCardFallbackText += "\n\n"
@@ -1047,7 +1042,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 	if fErr == nil && finalResp != nil && strings.TrimSpace(finalResp.Content) != "" {
 		finalText = core.TruncateRunes(sanitizeAssistantSpoken(finalResp.Content), maxAssistantReplyRunes, "\n[回复过长，后续内容已截断]")
 	} else if lastToolText != "" {
-		finalText = sanitizeAssistantSpoken(lastToolText)
+		finalText = "我已经拿到网页或工具结果，但整理成答复时模型超时了，这次没能可靠回答你的问题。"
 	} else {
 		finalText = "工具调用没有返回可确认的结果。"
 	}
