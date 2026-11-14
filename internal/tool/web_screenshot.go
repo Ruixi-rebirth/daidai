@@ -67,7 +67,7 @@ const (
 	maxExternalURLBytes          = 8 << 10
 	screenshotBrowserTimeout     = 20 * time.Second
 	screenshotBrowserLoadTimeout = 15 * time.Second
-	screenshotVirtualTimeBudget  = 3 * time.Second
+	screenshotVirtualTimeBudget  = 5 * time.Second
 )
 
 func normalizeExternalURL(raw string) (string, error) {
