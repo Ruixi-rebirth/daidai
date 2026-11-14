@@ -749,6 +749,7 @@ func ValidateTrustedMediaURL(rawURL string) error {
 		".qq.com",
 		".qq.com.cn",
 		".myqcloud.com",
+		".ugcimg.cn",
 	}
 	trusted := false
 	for _, suf := range trustedSuffixes {

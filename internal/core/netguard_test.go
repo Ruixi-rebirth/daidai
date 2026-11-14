@@ -37,6 +37,9 @@ func TestNetGuard_RedactSensitiveIPsAndValidateMediaURL(t *testing.T) {
 	if err := ValidateTrustedMediaURL("https://gchat.qpic.cn/gchatpic_new/123/0"); err != nil {
 		t.Errorf("expected qpic.cn media domain to be allowed, got: %v", err)
 	}
+	if err := ValidateTrustedMediaURL("https://qqbot.ugcimg.cn/download?file=voice.wav"); err != nil {
+		t.Errorf("expected ugcimg.cn media domain to be allowed, got: %v", err)
+	}
 	if err := ValidateTrustedMediaURL("https://ifconfig.me/ip"); err == nil {
 		t.Errorf("expected third-party IP probe domain to be rejected")
 	}
