@@ -1000,7 +1000,7 @@ func (a *SuperAgent) notifyTicketCompletion(ctx context.Context, ticket *Ticket,
 	var message strings.Builder
 	fmt.Fprintf(&message, "%s：%s\n编号：%s\n", state, core.TruncateRunes(strings.TrimSpace(ticket.Goal), 180, "…"), ticket.ID)
 	if result != "" {
-		fmt.Fprintf(&message, "\n%s\n", core.TruncateRunes(result, 700, "\n[后续结果已保存]"))
+		fmt.Fprintf(&message, "\n%s\n", ticketResultPreview(result, 700))
 	}
 	if ticket.Status != TicketCompleted {
 		message.WriteString("\n目前保留的阶段结果可用 `/task ")
@@ -1056,6 +1056,30 @@ func (a *SuperAgent) notifyTicketCompletion(ctx context.Context, ticket *Ticket,
 	if !queued {
 		slog.Warn("superagent: 工单完成通知没有持久化的延迟副本", "ticketID", ticket.ID)
 	}
+}
+
+func ticketResultPreview(result string, limit int) string {
+	runes := []rune(result)
+	if limit <= 0 {
+		return ""
+	}
+	if len(runes) <= limit {
+		return result
+	}
+	preview := string(runes[:limit])
+	parts := strings.Split(preview, "```")
+	if len(parts)%2 == 0 {
+		preview = strings.TrimRight(preview, "\n") + "\n```"
+	} else {
+		inlineTicks := 0
+		for i := 0; i < len(parts); i += 2 {
+			inlineTicks += strings.Count(parts[i], "`")
+		}
+		if inlineTicks%2 != 0 {
+			preview += "`"
+		}
+	}
+	return preview + "\n[后续结果已保存]"
 }
 
 func (a *SuperAgent) commitProactiveBotReply(platform string, isGroup bool, channelID, senderID, text string) {
