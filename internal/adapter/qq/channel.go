@@ -10,6 +10,7 @@ import (
 	"image/png"
 	"log/slog"
 	"mime"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1112,6 +1113,39 @@ func qqMessageElementType(element map[string]any) int {
 	}
 }
 
+func qqQuotedImageURLs(content string) []string {
+	var imageURLs []string
+	seen := make(map[string]struct{})
+	for remaining := content; ; {
+		start := strings.Index(remaining, "https://")
+		if start < 0 {
+			break
+		}
+		remaining = remaining[start:]
+		end := strings.IndexAny(remaining, " \t\r\n<>\"'")
+		candidate := remaining
+		if end >= 0 {
+			candidate = remaining[:end]
+		}
+		candidate = strings.TrimRight(candidate, ").,;:!?]}`")
+		if _, err := url.ParseRequestURI(candidate); err == nil && core.ValidateTrustedMediaURL(candidate) == nil {
+			if _, exists := seen[candidate]; !exists {
+				seen[candidate] = struct{}{}
+				imageURLs = append(imageURLs, candidate)
+			}
+		}
+		if end < 0 {
+			break
+		}
+		remaining = remaining[end:]
+		if remaining == "" {
+			break
+		}
+		remaining = remaining[1:]
+	}
+	return imageURLs
+}
+
 func qqReferencedMessageIndex(message map[string]any) string {
 	scene, _ := message["message_scene"].(map[string]any)
 	extensions, _ := scene["ext"].([]any)
@@ -1121,6 +1155,17 @@ func qqReferencedMessageIndex(message map[string]any) string {
 		if strings.HasPrefix(value, prefix) {
 			return strings.TrimPrefix(value, prefix)
 		}
+	}
+	return ""
+}
+
+func qqReferenceCacheKey(message map[string]any) string {
+	if index := qqReferencedMessageIndex(message); index != "" {
+		return index
+	}
+	if reference, ok := message["message_reference"].(map[string]any); ok {
+		index, _ := reference["message_id"].(string)
+		return index
 	}
 	return ""
 }
@@ -1176,7 +1221,19 @@ func qqQuotedMessageContext(element map[string]any, depth int) *entity.SensoryEv
 	if author, ok := element["author"].(map[string]any); ok {
 		authorName, _ = author["username"].(string)
 	}
+	sourceMessageID, _ := element["msg_idx"].(string)
 	quoted := &entity.SensoryEvent{Content: content, SenderName: strings.TrimSpace(authorName)}
+	quotedImageURLs := qqQuotedImageURLs(content)
+	for _, imageURL := range quotedImageURLs {
+		quoted.Images = append(quoted.Images, &core.Attachment{
+			Kind:            core.AttachmentImage,
+			URL:             imageURL,
+			MimeType:        "image/jpeg",
+			Name:            "引用图片",
+			SourceMessageID: sourceMessageID,
+			Quoted:          true,
+		})
+	}
 	if attachments, ok := element["attachments"].([]any); ok {
 		for _, item := range attachments {
 			attachment, ok := item.(map[string]any)
@@ -1215,7 +1272,16 @@ func qqQuotedMessageContext(element map[string]any, depth int) *entity.SensoryEv
 				Quoted:          true,
 			}
 			if kind == core.AttachmentImage {
-				quoted.Images = append(quoted.Images, quotedAttachment)
+				alreadyIncluded := false
+				for _, existing := range quoted.Images {
+					if existing != nil && existing.URL == quotedAttachment.URL {
+						alreadyIncluded = true
+						break
+					}
+				}
+				if !alreadyIncluded {
+					quoted.Images = append(quoted.Images, quotedAttachment)
+				}
 			} else {
 				quoted.Files = append(quoted.Files, quotedAttachment)
 			}
@@ -1480,25 +1546,25 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 			replyCtx = qqQuotedMessageContext(quote, 0)
 			if replyCtx != nil {
 				refIndex, _ := quote["msg_idx"].(string)
-				if refIndex == "" {
-					refIndex = qqReferencedMessageIndex(d)
-				}
-				if refIndex != "" && q.msgCache != nil {
-					chatType := "private"
-					if isGroup {
-						chatType = "group"
-					}
-					if cached := q.msgCache.Get(refIndex, chatType, convID); cached != "" {
-						replyCtx.Content = entity.SanitizeQuotedMessageContent(cached)
-						slog.Info("qq: 引用命中本机器人出站正文缓存", "msgID", msgID, "refMsgIdx", refIndex, "refContentBytes", len(replyCtx.Content))
-					}
-				}
 				slog.Info("qq: 从 v2 msg_elements 中解析出引用消息", "msgID", msgID, "refMsgIdx", refIndex, "refContentBytes", len(replyCtx.Content), "hasNestedQuote", replyCtx.ReplyContext != nil)
 			}
 		}
 		if replyCtx == nil && qqMessageElementType(d) == 103 && qqQuoteElementCount(d) > 1 {
 			replyCtx = &entity.SensoryEvent{Content: "[QQ 消息包含多个引用片段，但无法根据引用索引确定本轮目标]"}
 			slog.Warn("qq: 引用消息候选不唯一且缺少匹配索引", "msgID", msgID, "quoteCount", qqQuoteElementCount(d))
+		}
+	}
+	if replyCtx != nil && q.msgCache != nil {
+		cacheKey := qqReferenceCacheKey(d)
+		if cacheKey != "" {
+			chatType := "private"
+			if isGroup {
+				chatType = "group"
+			}
+			if cached := q.msgCache.Get(cacheKey, chatType, convID); cached != "" {
+				replyCtx.Content = entity.SanitizeQuotedMessageContent(cached)
+				slog.Info("qq: 引用命中本地消息正文缓存", "msgID", msgID, "hasRefIndex", strings.HasPrefix(cacheKey, "REFIDX_"), "refContentBytes", len(replyCtx.Content))
+			}
 		}
 	}
 
