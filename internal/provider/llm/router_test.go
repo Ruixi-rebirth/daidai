@@ -331,3 +331,36 @@ func TestMindRouter_CanceledContextDoesNotFallback(t *testing.T) {
 		t.Fatalf("expected fallback provider NOT to be called when context is canceled")
 	}
 }
+
+func TestModelStatusShowsConfiguredFallback(t *testing.T) {
+	router := NewMindRouter(MindRouterConfig{StatePath: filepath.Join(t.TempDir(), "mind.json"), FallbackChannel: "API"})
+	agy := &mockCustomAgentProvider{model: "gemini-test"}
+	router.RegisterChannel(ChannelRegistration{Channel: "AGY", Provider: agy, Models: []ModelInfo{{ID: "gemini-test", Name: "Gemini Test", Channel: "AGY"}}})
+	api := NewOpenAIProvider(OpenAIConfig{Model: "deepseek-chat"})
+	router.RegisterChannel(ChannelRegistration{Channel: "API", Provider: api, Models: []ModelInfo{{ID: "deepseek-chat", Channel: "API"}, {ID: "deepseek-reasoner", Channel: "API"}}})
+	status := router.FormatCurrentStatus()
+	for _, want := range []string{"首选聊天模型", "gemini-test", "备用与访客聊天模型", "deepseek-chat"} {
+		if !strings.Contains(status, want) {
+			t.Fatalf("missing %q in %s", want, status)
+		}
+	}
+	model, usage := router.ChannelModelUsage("API")
+	if model != "deepseek-chat" || usage != "备用 / 访客聊天" {
+		t.Fatalf("wrong fallback: %s %s", model, usage)
+	}
+	// Display the live provider configuration, not the first discovered model.
+	api.SetModel("deepseek-reasoner")
+	if status := router.FormatCurrentStatus(); !strings.Contains(status, "deepseek-reasoner") || strings.Contains(status, "deepseek-chat") {
+		t.Fatal(status)
+	}
+	result, err := router.SwitchMind(SwitchRequest{Target: "deepseek-chat", Channel: "API"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "success" {
+		t.Fatalf("switch failed: %+v", result)
+	}
+	if status := router.FormatCurrentStatus(); strings.Contains(status, "备用与访客聊天模型") {
+		t.Fatal("preferred API duplicated as fallback", status)
+	}
+}

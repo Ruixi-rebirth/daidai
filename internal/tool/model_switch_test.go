@@ -99,7 +99,7 @@ func TestModelSwitchTool_Flow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query agy usage: %v", err)
 	}
-	if !strings.Contains(agyUsageRes.Text, "AGY 通道") || !strings.Contains(agyUsageRes.Text, "Google Antigravity") {
+	if !strings.Contains(agyUsageRes.Text, "AGY 通道") || !strings.Contains(agyUsageRes.Text, "首选聊天") {
 		t.Fatalf("agy usage output unexpected: %s", agyUsageRes.Text)
 	}
 

@@ -272,7 +272,7 @@ func (r *MindRouter) FormatCurrentStatus() string {
 	curr := r.active
 	models := cloneModelInfos(r.models)
 	fallbackChannel := r.fallbackChannel
-	fallbackAvailable := r.providers[fallbackChannel] != nil
+	fallbackProvider := r.providers[fallbackChannel]
 	r.mu.RUnlock()
 
 	if curr.Model == "" && curr.Channel == "" {
@@ -290,16 +290,49 @@ func (r *MindRouter) FormatCurrentStatus() string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("🧠 当前模型路由\n")
-	fmt.Fprintf(&sb, "🤖 激活模型：%s\n", modelName)
+	sb.WriteString("### 首选聊天模型\n")
+	fmt.Fprintf(&sb, "🤖 模型：%s\n", modelName)
+	if modelName != curr.Model {
+		fmt.Fprintf(&sb, "模型 ID：`%s`\n", curr.Model)
+	}
 	fmt.Fprintf(&sb, "🔌 通道：%s\n", curr.Channel)
 	if curr.Effort != "" {
 		fmt.Fprintf(&sb, "💭 思考强度：%s\n", curr.Effort)
 	}
-	if fallbackAvailable && !strings.EqualFold(curr.Channel, fallbackChannel) {
-		fmt.Fprintf(&sb, "🔁 首选通道调用失败时，可能将本轮内容交由 %s 通道处理；这不会改变首选设置。\n", fallbackChannel)
+	if fallbackProvider != nil && !strings.EqualFold(curr.Channel, fallbackChannel) {
+		fmt.Fprintf(&sb, "\n### 备用与访客聊天模型\n模型：`%s`\n通道：%s\n首选调用失败或访客请求时使用；不会改变首选设置。\n", providerModelID(fallbackProvider), fallbackChannel)
 	}
+	sb.WriteString("\n以上为路由设置，不代表每一轮实际使用的模型。")
 	return strings.TrimSpace(sb.String())
+}
+
+func providerModelID(provider core.LLMProvider) string {
+	if configured, ok := provider.(interface{ GetModel() string }); ok {
+		return configured.GetModel()
+	}
+	if configured, ok := provider.(interface{ GetModelAndEffort() (string, string) }); ok {
+		model, _ := configured.GetModelAndEffort()
+		return model
+	}
+	return "未提供模型 ID"
+}
+
+// ChannelModelUsage identifies the model actually configured on a provider,
+// including a fallback model that differs from the preferred route.
+func (r *MindRouter) ChannelModelUsage(channel string) (string, string) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	provider := r.providers[channel]
+	if provider == nil {
+		return "", ""
+	}
+	if strings.EqualFold(channel, r.active.Channel) {
+		return r.active.Model, "首选聊天"
+	}
+	if strings.EqualFold(channel, r.fallbackChannel) {
+		return providerModelID(provider), "备用 / 访客聊天"
+	}
+	return providerModelID(provider), "通道配置"
 }
 
 // ListModels 列出所有已探测/注册的可用模型定义

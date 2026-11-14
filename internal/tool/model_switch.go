@@ -188,12 +188,10 @@ func (t *ModelSwitchTool) handleList(ctx context.Context, channelFilter string) 
 
 	for _, ch := range channelOrder {
 		chModels := channelsMap[ch]
+		configuredModel, modelUsage := t.router.ChannelModelUsage(ch)
 		fmt.Fprintf(&sb, "### %s 通道\n", ch)
-		switch ch {
-		case "AGY":
-			sb.WriteString("- 通道属性：Google Antigravity 自驱智能体沙箱（走本地官方授权配额，0 额外 Token 计费开销）\n")
-		case "API":
-			sb.WriteString("- 通道属性：OpenAI 兼容协议高可用端点（按 Token 计费）\n")
+		if configuredModel != "" {
+			fmt.Fprintf(&sb, "%s：`%s`\n", modelUsage, configuredModel)
 		}
 		if status, ok := t.router.ModelDiscoveryStatus(ch); ok && status.Failed {
 			if status.LastSuccess.IsZero() {
@@ -220,7 +218,9 @@ func (t *ModelSwitchTool) handleList(ctx context.Context, channelFilter string) 
 				if curr.Effort != "" {
 					effortDesc = fmt.Sprintf(", 思考强度: %s", curr.Effort)
 				}
-				activeTag = fmt.Sprintf(" *(当前激活%s)*", effortDesc)
+				activeTag = fmt.Sprintf(" *(首选聊天%s)*", effortDesc)
+			} else if m.ID == configuredModel {
+				activeTag = " *(" + modelUsage + ")*"
 			}
 			efforts := ""
 			if len(m.SupportedEfforts) > 0 {
