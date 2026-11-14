@@ -12,7 +12,7 @@ graph TD
         C --> D["创建模型、记忆、视觉与工作区服务"]
         D --> E["注册工具并组装 SuperAgent"]
         E --> F["启动 QQ 被动消息通道"]
-        B --> G["HTTP 健康检查接口：GET /healthz 存活 · GET /readyz 就绪（非 QQ 命令）"]
+        B --> G["HTTP 健康检查接口：GET /healthz 存活 · GET /readyz 就绪"]
     end
 
     subgraph Message [消息处理]
