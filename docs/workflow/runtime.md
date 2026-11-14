@@ -10,7 +10,7 @@
 5. `HandsRegistry` 按确定顺序注册可用工具。启动时验证的 OCI 客户端由账单和 IP 工具共用；客户端只接受长度不超过 63 字节的字母、数字和连字符 region 标识，避免 region 被拼接成非 OCI 请求域名；Nix 搜索按配置启用。
 6. Cortex、QQ Channel 和 SuperAgent 组装完成后启动通道。QQ 启用且凭据存在时先刷新 Token，再运行 WebSocket 自动重连。
 7. OCI 启用且 QQ 通道和 `qq.owner_openid` 已配置时，启动每日账单报告、每小时轻量费用检查和每 6 小时一次的资源巡检。资源巡检遍历租户的 compartment；卷和预留公网 IP 检查限于配置 region。日报默认按配置时区 08:30 发送；费用首次告警后，累计额每增加 `oci.cost_alert_delta` 再告警（默认 1 个计价单位）；资源风险类别按 UTC 日去重。日报尝试次数和告警状态持久化到 SQLite。主动消息通过 C2C API 发送；日报获取失败，或发送失败且未能进入待发队列时，每 5 分钟重试，连续失败 3 次后停止当天重试。发送失败但成功入队的完整报告会在用户下次私聊时投递。
-   HTTP 服务提供 GET/HEAD `/healthz` 和 `/readyz`，并限制请求/连接时长和 Header 大小。`/healthz` 表示进程存活；`/readyz` 返回 JSON 检查项，要求 QQ 启用时网关已 READY/RESUMED、当前模型路由已配置，且 OCI 启用时调度器仍在运行。`qq_gateway` 检查的是 WebSocket 收消息链路；它断开时机器人不能通过 QQ 收到新的聊天指令，但 C2C 主动发送 API 不由此项探测，已有运行中的 OCI 日报或告警仍可能发送成功。模型项只验证本地路由已配置，不会主动调用模型 API。若 HTTP 服务意外停止，主进程执行停机清理后以失败退出。
+   HTTP 健康检查接口供监控程序访问，不是 QQ slash 命令；在 QQ 中查看状态请发送 `/sysinfo` 或 `/status`。接口支持 GET/HEAD，并限制请求/连接时长和 Header 大小。`GET /healthz` 表示进程存活；`GET /readyz` 返回 JSON 检查项，要求 QQ 启用时网关已 READY/RESUMED、当前模型路由已配置，且 OCI 启用时调度器仍在运行。`qq_gateway` 检查的是 WebSocket 收消息链路；它断开时机器人不能通过 QQ 收到新的聊天指令，但 C2C 主动发送 API 不由此项探测，已有运行中的 OCI 日报或告警仍可能发送成功。模型项只验证本地路由已配置，不会主动调用模型 API。若 HTTP 服务意外停止，主进程执行停机清理后以失败退出。
 8. 收到 SIGINT/SIGTERM 后取消根上下文，终止在途 AGY OAuth PTY 会话，再停止通道、等待 QQ 和消息 Actor 收敛、关闭 HTTP 与 SQLite。优雅停机最多等待 4 分钟，以便 OCI 不确定的变更请求完成状态核对与旧 IP 回滚；NixOS systemd 停止期限设为 5 分钟。启动阶段的目录、会话重置或通道初始化失败会以非零退出码结束。
 
 NixOS 模块默认以专用 `daidai` 系统用户运行，`/var/lib/daidai` 同时作为其 home 与受限状态目录。宿主配置可以覆盖运行用户，因此部署时应核对最终 systemd 的 User/Group；systemd 使用 `UMask=0077`，停止期限为 5 分钟。
