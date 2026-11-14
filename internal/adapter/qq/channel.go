@@ -1094,31 +1094,33 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 					ext == ".slk" || ext == ".silk" || ext == ".amr"
 
 				if isVoice {
-					if asrReferText != "" {
-						slog.Info("qq: 从语音消息中获取到官方 ASR 转录文本", "msgID", msgID, "asrText", asrReferText)
+					audioURL := voiceWavURL
+					if audioURL == "" {
+						audioURL = fileURL
+					}
+					var recognizedText string
+					// 优先调用多模态大模型原生倾听音频原声，支持全球全语种（中、英、日、韩等）且彻底杜绝平台空耳
+					if audioURL != "" {
+						recognizedText = q.transcribeVoiceAudio(context.Background(), audioURL, fileName)
+						if recognizedText != "" {
+							slog.Info("qq: 语音消息多模态原生转录成功", "msgID", msgID, "text", recognizedText)
+						}
+					}
+					// 若多模态转录未产生结果（如临时网络超时），回落至官方 ASR 文本兜底
+					if recognizedText == "" && asrReferText != "" {
+						slog.Info("qq: 多模态转录未命中，采用官方 ASR 文本兜底", "msgID", msgID, "asrText", asrReferText)
+						recognizedText = asrReferText
+					}
+					if recognizedText != "" {
 						if content == "" {
-							content = asrReferText
+							content = recognizedText
 						} else {
-							content = content + "\n" + asrReferText
+							content = content + "\n" + recognizedText
 						}
 					} else {
-						audioURL := voiceWavURL
-						if audioURL == "" {
-							audioURL = fileURL
-						}
-						transcribed := q.transcribeVoiceAudio(context.Background(), audioURL, fileName)
-						if transcribed != "" {
-							slog.Info("qq: 语音消息转录成功", "msgID", msgID, "text", transcribed)
-							if content == "" {
-								content = transcribed
-							} else {
-								content = content + "\n" + transcribed
-							}
-						} else {
-							slog.Warn("qq: 语音消息未获取到 ASR 文本且兜底转写失败", "msgID", msgID)
-							if content == "" {
-								content = "【收到一段语音消息，但未能识别出文字内容】"
-							}
+						slog.Warn("qq: 语音消息未能解析出文字内容", "msgID", msgID)
+						if content == "" {
+							content = "【收到一段语音消息，但未能识别出文字内容】"
 						}
 					}
 					// 语音消息已提取为文本，绝不作为普通文件附件推入 files，避免误触发附件处理拦截

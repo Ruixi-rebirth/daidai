@@ -72,7 +72,7 @@ func (q *QQChannel) transcribeVoiceAudio(ctx context.Context, audioURL, fileName
 		return ""
 	}
 
-	prompt := "请仅调用 read_file 工具读取以下音频文件并直接输出转录出的文字内容，严禁运行其他工具或命令。如果无法识别或听不清则输出空，不要包含任何多余解释：\n" + wavPath
+	prompt := "请仅调用 read_file 工具读取以下音频文件并直接输出转录出的文字内容（无论说话者使用的是中文、日语、英语还是其他任何语言，请忠实输出说话者所用原语言的文本）。严禁运行其他工具或命令。如果无法识别或听不清则输出空，不要包含任何多余解释：\n" + wavPath
 	args := []string{"-p", prompt, "--output-format", "text", "--mode", "plan", "--sandbox"}
 
 	cmd := exec.CommandContext(callCtx, "agy", args...)
