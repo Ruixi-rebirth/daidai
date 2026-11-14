@@ -1098,6 +1098,91 @@ func (q *QQChannel) IngestRaw(event *entity.SensoryEvent) bool {
 	return q.debounce.Push(event)
 }
 
+func qqMessageElementType(element map[string]any) int {
+	switch value := element["message_type"].(type) {
+	case float64:
+		return int(value)
+	case int:
+		return value
+	default:
+		return 0
+	}
+}
+
+func qqReferencedMessageIndex(message map[string]any) string {
+	scene, _ := message["message_scene"].(map[string]any)
+	extensions, _ := scene["ext"].([]any)
+	for _, extension := range extensions {
+		value, _ := extension.(string)
+		const prefix = "ref_msg_idx="
+		if strings.HasPrefix(value, prefix) {
+			return strings.TrimPrefix(value, prefix)
+		}
+	}
+	return ""
+}
+
+// qqReferencedMessageElement uses QQ's ref_msg_idx when available. A single
+// quote element is a safe fallback; choosing the first type-103 element is not,
+// because forwarded/parallel messages can also contain multiple elements.
+func qqReferencedMessageElement(message map[string]any) map[string]any {
+	elements, _ := message["msg_elements"].([]any)
+	if len(elements) == 0 {
+		return nil
+	}
+	refIndex := qqReferencedMessageIndex(message)
+	var onlyQuote map[string]any
+	quoteCount := 0
+	for _, value := range elements {
+		element, _ := value.(map[string]any)
+		if element == nil || qqMessageElementType(element) != 103 {
+			continue
+		}
+		quoteCount++
+		onlyQuote = element
+		index, _ := element["msg_idx"].(string)
+		if refIndex != "" && index == refIndex {
+			return element
+		}
+	}
+	if quoteCount == 1 {
+		return onlyQuote
+	}
+	return nil
+}
+
+func qqQuoteElementCount(message map[string]any) int {
+	elements, _ := message["msg_elements"].([]any)
+	count := 0
+	for _, value := range elements {
+		element, _ := value.(map[string]any)
+		if element != nil && qqMessageElementType(element) == 103 {
+			count++
+		}
+	}
+	return count
+}
+
+func qqQuotedMessageContext(element map[string]any, depth int) *entity.SensoryEvent {
+	if element == nil || depth >= 4 {
+		return nil
+	}
+	content, _ := element["content"].(string)
+	content = entity.SanitizeQuotedMessageContent(content)
+	authorName := ""
+	if author, ok := element["author"].(map[string]any); ok {
+		authorName, _ = author["username"].(string)
+	}
+	if content == "" {
+		return nil
+	}
+	quoted := &entity.SensoryEvent{Content: content, SenderName: strings.TrimSpace(authorName)}
+	if nested := qqReferencedMessageElement(element); nested != nil {
+		quoted.ReplyContext = qqQuotedMessageContext(nested, depth+1)
+	}
+	return quoted
+}
+
 // dispatchEvent 解析 WebSocket 网关下发的消息事件并推入防抖队列 (零前缀纯净 ID)
 func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 	d, ok := payload["d"].(map[string]any)
@@ -1314,30 +1399,16 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 
 	// 适配 QQ 官方 v2 协议原生引用消息 (message_type: 103)
 	if replyCtx == nil {
-		if elements, ok := d["msg_elements"].([]any); ok {
-			for _, el := range elements {
-				if elMap, ok := el.(map[string]any); ok {
-					var elType int
-					switch vt := elMap["message_type"].(type) {
-					case float64:
-						elType = int(vt)
-					case int:
-						elType = vt
-					}
-					if elType == 103 {
-						if c, ok := elMap["content"].(string); ok && strings.TrimSpace(c) != "" {
-							refMsgID, _ := elMap["id"].(string)
-							c = entity.SanitizeQuotedMessageContent(c)
-							replyCtx = &entity.SensoryEvent{
-								Content:      c,
-								RawMessageID: refMsgID,
-							}
-							slog.Info("qq: 从 v2 msg_elements 中成功解析出引用消息", "msgID", msgID, "refMsgID", refMsgID, "refContentBytes", len(c))
-							break
-						}
-					}
-				}
+		if quote := qqReferencedMessageElement(d); quote != nil {
+			replyCtx = qqQuotedMessageContext(quote, 0)
+			if replyCtx != nil {
+				refIndex, _ := quote["msg_idx"].(string)
+				slog.Info("qq: 从 v2 msg_elements 中解析出引用消息", "msgID", msgID, "refMsgIdx", refIndex, "refContentBytes", len(replyCtx.Content), "hasNestedQuote", replyCtx.ReplyContext != nil)
 			}
+		}
+		if replyCtx == nil && qqMessageElementType(d) == 103 && qqQuoteElementCount(d) > 1 {
+			replyCtx = &entity.SensoryEvent{Content: "[QQ 消息包含多个引用片段，但无法根据引用索引确定本轮目标]"}
+			slog.Warn("qq: 引用消息候选不唯一且缺少匹配索引", "msgID", msgID, "quoteCount", qqQuoteElementCount(d))
 		}
 	}
 
