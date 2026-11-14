@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +25,51 @@ const (
 	attachmentIntentTimeout     = 5 * time.Second
 	groupInterjectionSilence    = "[[NO_GROUP_INTERJECTION]]"
 )
+
+func extractToolURLs(toolName, arguments string) []string {
+	var value string
+	switch toolName {
+	case "screenshot_web":
+		var args struct {
+			URL string `json:"url"`
+		}
+		if json.Unmarshal([]byte(arguments), &args) == nil {
+			value = args.URL
+		}
+	case "search_web":
+		var args struct {
+			Query string `json:"query"`
+		}
+		if json.Unmarshal([]byte(arguments), &args) == nil {
+			value = args.Query
+		}
+	case "read_link":
+		var args struct {
+			URL string `json:"url"`
+		}
+		if json.Unmarshal([]byte(arguments), &args) == nil {
+			value = args.URL
+		}
+	default:
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var urls []string
+	for _, part := range strings.Fields(value) {
+		candidate := strings.TrimRight(part, "\"'`.,;:!?)]}>")
+		u, err := url.Parse(candidate)
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+			continue
+		}
+		key := u.String()
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		urls = append(urls, key)
+	}
+	return urls
+}
 
 // Cortex 具体双轨认知大脑实现 (实现 entity.Cognition)
 type Cortex struct {
@@ -761,7 +807,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 	var directCardData [][]byte
 	var directCardFallbackText string
 	imageOnlyReply := false
-	linkToolCalls := 0
+	processedLinks := make(map[string]struct{})
 	toolCallsUsed := 0
 	mediaUtterance := func() *entity.Utterance {
 		text := "图片已准备好，但总结和回答没能完成。要我重新处理并补上吗？"
@@ -929,18 +975,27 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 				})
 				continue
 			}
-			if tc.Function.Name == "screenshot_web" {
-				linkToolCalls++
-				if linkToolCalls > 2 {
-					slog.Info("cortex: 拦截超限的链接处理调用（单次上限 2 个）", "name", tc.Function.Name)
-					lastToolText = "已达到单次会话链接处理上限，后续链接没有处理。"
+			linkURLs := extractToolURLs(tc.Function.Name, tc.Function.Arguments)
+			if tc.Function.Name == "search_web" || tc.Function.Name == "screenshot_web" || tc.Function.Name == "read_link" {
+				newLinks := make([]string, 0, len(linkURLs))
+				for _, link := range linkURLs {
+					if _, seen := processedLinks[link]; !seen {
+						newLinks = append(newLinks, link)
+					}
+				}
+				if len(processedLinks)+len(newLinks) > 2 {
+					slog.Info("cortex: 拦截超限的网页处理调用", "name", tc.Function.Name, "uniqueLinks", len(processedLinks))
+					lastToolText = "本轮最多处理两个不同网页链接，超出的链接已跳过；请先根据已读取页面回答，并明确告知哪些链接尚未处理。"
 					messages = append(messages, core.ChatMessage{
 						Role:       core.RoleTool,
 						ToolCallID: tc.ID,
 						Name:       tc.Function.Name,
-						Content:    "已达单次会话链接处理上限（最多处理 2 个链接）。本链接已跳过，请在回复末尾自然带一句：'一口气发这么多容易刷屏，先帮你捞了前两个～后面那几个如果有想深入看的直接单独甩给我就行。'",
+						Content:    lastToolText,
 					})
 					continue
+				}
+				for _, link := range newLinks {
+					processedLinks[link] = struct{}{}
 				}
 			}
 

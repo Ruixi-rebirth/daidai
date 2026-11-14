@@ -43,7 +43,7 @@ func (t *ScreenshotTool) Name() string {
 }
 
 func (t *ScreenshotTool) Description() string {
-	return "网页可视区域截图工具：截取并随回复发送指定网页初始可视区域。当用户发送网页链接、网址，或需要查看网页时调用；正文总结与分析直接在回复中完成。"
+	return "网页可视区域截图工具：截取并随回复发送指定网页初始可视区域。仅当用户明确要求截图、看页面长什么样、检查布局或视觉设计时调用；单纯发链接、要求总结正文或回答网页内容问题时不要调用本工具，改用 search_web 读取链接并完成用户原话中的任务。截图不读取或总结网页正文。"
 }
 
 func (t *ScreenshotTool) Parameters() map[string]any {
