@@ -65,8 +65,9 @@ type screenshotArgs struct {
 
 const (
 	maxExternalURLBytes          = 8 << 10
-	screenshotBrowserTimeout     = 15 * time.Second
-	screenshotBrowserLoadTimeout = 12 * time.Second
+	screenshotBrowserTimeout     = 20 * time.Second
+	screenshotBrowserLoadTimeout = 15 * time.Second
+	screenshotVirtualTimeBudget  = 3 * time.Second
 )
 
 func normalizeExternalURL(raw string) (string, error) {
@@ -188,6 +189,7 @@ func captureChromiumScreenshot(ctx context.Context, targetURL string) ([]byte, e
 		"--window-size=1280,900",
 		"--force-device-scale-factor=1",
 		fmt.Sprintf("--timeout=%d", screenshotBrowserLoadTimeout.Milliseconds()),
+		fmt.Sprintf("--virtual-time-budget=%d", screenshotVirtualTimeBudget.Milliseconds()),
 		"--disable-background-networking",
 		"--disable-sync",
 		"--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
