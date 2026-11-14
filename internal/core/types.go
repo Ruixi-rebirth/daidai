@@ -121,6 +121,7 @@ type Attachment struct {
 	Name            string
 	Path            string
 	SourceMessageID string // 所属平台消息 ID，仅用于避免并发处理清除后续重发的相同附件
+	Quoted          bool   // 来自用户本轮明确引用的消息，不代表当前用户本人上传
 }
 
 type GroupParticipant struct {

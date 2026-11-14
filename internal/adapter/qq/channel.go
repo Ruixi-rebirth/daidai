@@ -948,7 +948,7 @@ func NewQQChannel(cfg Config, immune *entity.ImmuneSystem) *QQChannel {
 		msgCache: cache,
 		dedup:    newDedupCache(2000),
 	}
-	cli.SetOnMessageSent(func(msgID, content, targetType, targetID string) {
+	cli.SetOnMessageSent(func(msgID, refIndex, content, targetType, targetID string) {
 		// If QQ reflects an outbound group message through GROUP_MESSAGE_CREATE,
 		// its accepted send ID lets the inbound path drop that exact echo.
 		if channel.dedup != nil {
@@ -959,6 +959,9 @@ func NewQQChannel(cfg Config, immune *entity.ImmuneSystem) *QQChannel {
 			chatType = "group"
 		}
 		cache.SetAsync(msgID, content, chatType, targetID)
+		if refIndex != "" && refIndex != msgID {
+			cache.SetAsync(refIndex, content, chatType, targetID)
+		}
 	})
 	return channel
 }
@@ -1173,14 +1176,85 @@ func qqQuotedMessageContext(element map[string]any, depth int) *entity.SensoryEv
 	if author, ok := element["author"].(map[string]any); ok {
 		authorName, _ = author["username"].(string)
 	}
-	if content == "" {
+	quoted := &entity.SensoryEvent{Content: content, SenderName: strings.TrimSpace(authorName)}
+	if attachments, ok := element["attachments"].([]any); ok {
+		for _, item := range attachments {
+			attachment, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			fileURL, _ := attachment["url"].(string)
+			name, _ := attachment["filename"].(string)
+			if name == "" {
+				name, _ = attachment["name"].(string)
+			}
+			name = core.TruncateRunes(strings.TrimSpace(name), 160, "…")
+			mimeType, _ := attachment["content_type"].(string)
+			mimeType = strings.ToLower(strings.TrimSpace(strings.SplitN(mimeType, ";", 2)[0]))
+			if mimeType == "" || mimeType == "application/octet-stream" || mimeType == "binary/octet-stream" {
+				mimeType = strings.ToLower(strings.TrimSpace(strings.SplitN(mime.TypeByExtension(filepath.Ext(name)), ";", 2)[0]))
+			}
+			kind := core.AttachmentFile
+			if strings.HasPrefix(mimeType, "image/") {
+				kind = core.AttachmentImage
+			}
+			if fileURL == "" || len(fileURL) > core.MaxAttachmentURLBytes {
+				if kind == core.AttachmentImage {
+					quoted.OmittedImages++
+				} else {
+					quoted.OmittedFiles++
+				}
+				continue
+			}
+			quotedAttachment := &core.Attachment{
+				Kind:            kind,
+				URL:             fileURL,
+				MimeType:        core.TruncateRunes(mimeType, 128, ""),
+				Name:            name,
+				SourceMessageID: qqReferencedMessageIndex(element),
+				Quoted:          true,
+			}
+			if kind == core.AttachmentImage {
+				quoted.Images = append(quoted.Images, quotedAttachment)
+			} else {
+				quoted.Files = append(quoted.Files, quotedAttachment)
+			}
+		}
+	}
+	if content == "" && (len(quoted.Images)+len(quoted.Files) > 0 || quoted.OmittedImages+quoted.OmittedFiles > 0) {
+		content = "[引用消息仅包含图片或文件附件]"
+		quoted.Content = content
+	}
+	if content == "" && len(quoted.Images)+len(quoted.Files) == 0 {
 		return nil
 	}
-	quoted := &entity.SensoryEvent{Content: content, SenderName: strings.TrimSpace(authorName)}
 	if nested := qqReferencedMessageElement(element); nested != nil {
 		quoted.ReplyContext = qqQuotedMessageContext(nested, depth+1)
 	}
 	return quoted
+}
+
+func qqQuotedFiles(event *entity.SensoryEvent) ([]*core.Attachment, int) {
+	var files []*core.Attachment
+	seen := make(map[string]struct{})
+	omitted := 0
+	for current, depth := event, 0; current != nil && depth < 4; current, depth = current.ReplyContext, depth+1 {
+		for _, attachment := range current.Files {
+			if attachment == nil || attachment.URL == "" {
+				continue
+			}
+			if _, exists := seen[attachment.URL]; exists {
+				continue
+			}
+			seen[attachment.URL] = struct{}{}
+			if len(files) < core.MaxIncomingFilesPerRequest {
+				files = append(files, attachment)
+			} else {
+				omitted++
+			}
+		}
+	}
+	return files, omitted
 }
 
 // dispatchEvent 解析 WebSocket 网关下发的消息事件并推入防抖队列 (零前缀纯净 ID)
@@ -1397,12 +1471,28 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 		}
 	}
 
+	currentImageCount, currentOmittedImages := len(images), omittedImages
+	currentFileCount, currentOmittedFiles := len(files), omittedFiles
+
 	// 适配 QQ 官方 v2 协议原生引用消息 (message_type: 103)
 	if replyCtx == nil {
 		if quote := qqReferencedMessageElement(d); quote != nil {
 			replyCtx = qqQuotedMessageContext(quote, 0)
 			if replyCtx != nil {
 				refIndex, _ := quote["msg_idx"].(string)
+				if refIndex == "" {
+					refIndex = qqReferencedMessageIndex(d)
+				}
+				if refIndex != "" && q.msgCache != nil {
+					chatType := "private"
+					if isGroup {
+						chatType = "group"
+					}
+					if cached := q.msgCache.Get(refIndex, chatType, convID); cached != "" {
+						replyCtx.Content = entity.SanitizeQuotedMessageContent(cached)
+						slog.Info("qq: 引用命中本机器人出站正文缓存", "msgID", msgID, "refMsgIdx", refIndex, "refContentBytes", len(replyCtx.Content))
+					}
+				}
 				slog.Info("qq: 从 v2 msg_elements 中解析出引用消息", "msgID", msgID, "refMsgIdx", refIndex, "refContentBytes", len(replyCtx.Content), "hasNestedQuote", replyCtx.ReplyContext != nil)
 			}
 		}
@@ -1471,7 +1561,7 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 			if entity.IsSensitiveAuthCommand(accessMessage) {
 				accessMessage = "[敏感认证指令内容已隐藏]"
 			} else if accessMessage == "" {
-				accessMessage = attachmentHistoryNote(len(images), omittedImages, len(files), omittedFiles)
+				accessMessage = attachmentHistoryNote(currentImageCount, currentOmittedImages, currentFileCount, currentOmittedFiles)
 			}
 			accessMessage = core.TruncateRunes(accessMessage, 500, "…")
 			if q.accessRequests != nil {
@@ -1515,7 +1605,7 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 			}
 		}
 		if fullGroupEvent && !botAddressed {
-			historyAttachmentNote := attachmentHistoryNote(len(images), omittedImages, len(files), omittedFiles)
+			historyAttachmentNote := attachmentHistoryNote(currentImageCount, currentOmittedImages, currentFileCount, currentOmittedFiles)
 			if content == "" && historyAttachmentNote == "" {
 				if q.dedup != nil {
 					q.dedup.Remember(msgID)
@@ -1567,6 +1657,22 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 		if fullGroupEvent && botAddressed {
 			q.cancelPendingGroupInterjection(convID)
 		}
+		if replyCtx != nil {
+			quotedFiles, omittedQuotedFiles := qqQuotedFiles(replyCtx)
+			available := core.MaxIncomingFilesPerRequest - len(files)
+			if available < 0 {
+				available = 0
+			}
+			if len(quotedFiles) > available {
+				omittedFiles += len(quotedFiles) - available
+				quotedFiles = quotedFiles[:available]
+			}
+			files = append(files, quotedFiles...)
+			omittedFiles += omittedQuotedFiles
+			for current := replyCtx; current != nil; current = current.ReplyContext {
+				omittedFiles += current.OmittedFiles
+			}
+		}
 		accepted := q.IngestRaw(&entity.SensoryEvent{
 			Platform:              "qq",
 			ChannelID:             convID,
@@ -1576,7 +1682,7 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 			Role:                  role,
 			PrivateAccessGranted:  privateAccessGranted,
 			Content:               strings.TrimSpace(content),
-			HistoryAttachmentNote: attachmentHistoryNote(len(images), omittedImages, len(files), omittedFiles),
+			HistoryAttachmentNote: attachmentHistoryNote(currentImageCount, currentOmittedImages, currentFileCount, currentOmittedFiles),
 			Images:                images,
 			OmittedImages:         omittedImages,
 			PendingImages:         pendingImages,
@@ -1724,14 +1830,19 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) error {
 	defer func() { q.releasePassiveReplyReservations(budget, reservedCount) }()
 
 	sendPart := func(part qqOutgoingPart) error {
+		quoteContext := strings.TrimSpace(u.FallbackText)
+		if quoteContext == "" {
+			quoteContext = part.text
+		}
+		quoteContext = core.TruncateRunes(quoteContext, core.MaxUserMessageRunes, "\n[引用正文过长，后续内容已截断]")
 		if u.IsGroup {
 			if len(part.image) > 0 {
-				return q.client.SendGroupMediaMessage(ctx, u.ChannelID, part.text, part.image, u.QuoteMsgID)
+				return q.client.SendGroupMediaMessageWithContext(ctx, u.ChannelID, part.text, part.image, u.QuoteMsgID, quoteContext)
 			}
 			return q.client.SendGroupMessage(ctx, u.ChannelID, part.text, u.QuoteMsgID)
 		}
 		if len(part.image) > 0 {
-			return q.client.SendC2CMediaMessage(ctx, u.ChannelID, part.text, part.image, u.QuoteMsgID)
+			return q.client.SendC2CMediaMessageWithContext(ctx, u.ChannelID, part.text, part.image, u.QuoteMsgID, quoteContext)
 		}
 		return q.client.SendC2CMessage(ctx, u.ChannelID, part.text, u.QuoteMsgID)
 	}

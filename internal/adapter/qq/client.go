@@ -41,11 +41,11 @@ type Client struct {
 	expiresAt   time.Time
 
 	msgSeq        uint32
-	onMessageSent func(msgID, content, targetType, targetID string)
+	onMessageSent func(msgID, refIndex, content, targetType, targetID string)
 }
 
 // SetOnMessageSent 注册发送成功后的消息记录回调
-func (c *Client) SetOnMessageSent(fn func(msgID, content, targetType, targetID string)) {
+func (c *Client) SetOnMessageSent(fn func(msgID, refIndex, content, targetType, targetID string)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.onMessageSent = fn
@@ -60,11 +60,14 @@ func (c *Client) notifySent(respBytes []byte, content, targetType, targetID stri
 		return
 	}
 	var res struct {
-		ID string `json:"id"`
+		ID      string `json:"id"`
+		ExtInfo struct {
+			RefIndex string `json:"ref_idx"`
+		} `json:"ext_info"`
 	}
 	if err := json.Unmarshal(respBytes, &res); err == nil && res.ID != "" {
-		slog.Info("qq: 成功登记出站消息 ID", "id", res.ID)
-		fn(res.ID, content, targetType, targetID)
+		slog.Info("qq: 成功登记出站消息 ID", "id", res.ID, "hasRefIndex", res.ExtInfo.RefIndex != "")
+		fn(res.ID, res.ExtInfo.RefIndex, content, targetType, targetID)
 	} else {
 		slog.Warn("qq: 发送成功但响应未包含可解析的消息 ID")
 	}
@@ -374,15 +377,27 @@ func (c *Client) sendMessage(ctx context.Context, targetType, targetID, content,
 
 // SendGroupMediaMessage 发送 QQ 群聊富媒体消息
 func (c *Client) SendGroupMediaMessage(ctx context.Context, groupOpenID string, content string, imageData []byte, msgID string) error {
-	return c.sendMediaMessage(ctx, "groups", groupOpenID, content, imageData, msgID)
+	return c.sendMediaMessage(ctx, "groups", groupOpenID, content, imageData, msgID, content)
 }
 
 // SendC2CMediaMessage 发送 QQ 私聊富媒体消息
 func (c *Client) SendC2CMediaMessage(ctx context.Context, userOpenID string, content string, imageData []byte, msgID string) error {
-	return c.sendMediaMessage(ctx, "users", userOpenID, content, imageData, msgID)
+	return c.sendMediaMessage(ctx, "users", userOpenID, content, imageData, msgID, content)
 }
 
-func (c *Client) sendMediaMessage(ctx context.Context, targetType, targetID, content string, imageData []byte, msgID string) error {
+// SendGroupMediaMessageWithContext associates the full text representation with
+// the image message so a later quote can recover the card's content.
+func (c *Client) SendGroupMediaMessageWithContext(ctx context.Context, groupOpenID, content string, imageData []byte, msgID, quoteContext string) error {
+	return c.sendMediaMessage(ctx, "groups", groupOpenID, content, imageData, msgID, quoteContext)
+}
+
+// SendC2CMediaMessageWithContext associates the full text representation with
+// the image message so a later quote can recover the card's content.
+func (c *Client) SendC2CMediaMessageWithContext(ctx context.Context, userOpenID, content string, imageData []byte, msgID, quoteContext string) error {
+	return c.sendMediaMessage(ctx, "users", userOpenID, content, imageData, msgID, quoteContext)
+}
+
+func (c *Client) sendMediaMessage(ctx context.Context, targetType, targetID, content string, imageData []byte, msgID, quoteContext string) error {
 	fileInfo, err := c.UploadMedia(ctx, targetType, targetID, 1, imageData)
 	if err != nil {
 		return fmt.Errorf("%s image upload error: %w", targetType, err)
@@ -407,7 +422,11 @@ func (c *Client) sendMediaMessage(ctx context.Context, targetType, targetID, con
 
 	resp, err := c.doPostJSON(ctx, url, payload)
 	if err == nil {
-		c.notifySent(resp, content, targetType, targetID)
+		cacheContent := strings.TrimSpace(quoteContext)
+		if cacheContent == "" {
+			cacheContent = content
+		}
+		c.notifySent(resp, cacheContent, targetType, targetID)
 	}
 	return err
 }
