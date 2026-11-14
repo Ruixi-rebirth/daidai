@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -27,6 +28,27 @@ const systemPrompt = `你是图片描述助手，目标是让一个看不到图�
 
 const maxVisionAPIResponseBytes = 1 << 20
 const maxConcurrentVisionRequests = 2
+
+type visionAPIError struct {
+	status int
+	body   string
+}
+
+func (e *visionAPIError) Error() string {
+	return fmt.Sprintf("vision api returned status %d: %s", e.status, e.body)
+}
+
+func (e *visionAPIError) authenticationRejected() bool {
+	if e == nil {
+		return false
+	}
+	if e.status == http.StatusUnauthorized || e.status == http.StatusForbidden {
+		return true
+	}
+	body := strings.ToLower(e.body)
+	return e.status == http.StatusBadRequest && strings.Contains(body, "api key") &&
+		(strings.Contains(body, "valid") || strings.Contains(body, "invalid"))
+}
 
 // Config 视觉引擎配置
 type Config struct {
@@ -113,7 +135,29 @@ func (e *Engine) DescribeWithImages(ctx context.Context, imageURLs []string, use
 		return e.describeWithCLI(ctx, imageURLs, userText)
 	}
 
-	return e.describeWithAPI(ctx, imageURLs, userText)
+	caption, indexes, err := e.describeWithAPI(ctx, imageURLs, userText)
+	if err == nil {
+		return caption, indexes, nil
+	}
+	var apiErr *visionAPIError
+	if !errors.As(err, &apiErr) || !apiErr.authenticationRejected() {
+		return "", nil, err
+	}
+	cliCmd := e.cliCommand()
+	if cliCmd == "" {
+		return "", nil, err
+	}
+	if _, lookupErr := exec.LookPath(cliCmd); lookupErr != nil {
+		return "", nil, err
+	}
+	if e.cfg.RequireAGYAuth {
+		if authErr := llm.CheckAGYAuth(); authErr != nil {
+			slog.Warn("vision: API 凭证被拒绝且 CLI 认证不可用，无法回退", "err", authErr)
+			return "", nil, err
+		}
+	}
+	slog.Warn("vision: API 凭证被拒绝，回退到本地多模态 CLI", "status", apiErr.status, "command", cliCmd)
+	return e.describeWithCLI(ctx, imageURLs, userText)
 }
 
 // describeWithCLI 利用本地多模态 CLI 引擎进行图像感知与文字提取
@@ -317,7 +361,7 @@ func (e *Engine) describeWithAPI(ctx context.Context, imageURLs []string, userTe
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", nil, fmt.Errorf("vision api returned status %d: %s", resp.StatusCode, summarizeResponse(respBytes))
+		return "", nil, &visionAPIError{status: resp.StatusCode, body: summarizeResponse(respBytes)}
 	}
 
 	var res struct {
