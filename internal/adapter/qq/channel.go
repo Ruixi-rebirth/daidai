@@ -1332,7 +1332,7 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 								Content:      c,
 								RawMessageID: refMsgID,
 							}
-							slog.Info("qq: 从 v2 msg_elements 中成功解析出引用消息", "msgID", msgID)
+							slog.Info("qq: 从 v2 msg_elements 中成功解析出引用消息", "msgID", msgID, "refMsgID", refMsgID, "refContentBytes", len(c))
 							break
 						}
 					}

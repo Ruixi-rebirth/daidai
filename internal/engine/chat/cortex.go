@@ -710,7 +710,8 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 	if event.ReplyContext != nil && event.ReplyContext.Content != "" {
 		quotedContent := entity.SanitizeQuotedMessageContent(event.ReplyContext.Content)
 		quoted := "> " + strings.ReplaceAll(quotedContent, "\n", "\n> ")
-		userContent = quoted + "\n\n" + userContent
+		userContent = "【你这次引用的消息，作为当前请求的上下文】\n" + quoted +
+			"\n\n【你本轮新发的内容】\n" + userContent
 	}
 	imageOmissionNotice := ""
 	if event.OmittedImages > 0 {
