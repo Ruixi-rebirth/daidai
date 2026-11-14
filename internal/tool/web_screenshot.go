@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,7 +43,7 @@ func (t *ScreenshotTool) Name() string {
 }
 
 func (t *ScreenshotTool) Description() string {
-	return "网页可视区域截图工具：只负责截取并随回复发送页面初始可视区域，不读取网页正文。用户要求截图或视觉预览时调用；如果用户同时要求阅读、总结或回答网页内容，也必须另行调用 read_link 获取正文，即使截图失败也照常读取并回答。截图失败时如实告知截图不可用，不要生成整页文摘长图。多个链接时仅对首个核心链接截图。"
+	return "网页可视区域截图工具：截取并随回复发送指定网页初始可视区域。当用户发送网页链接、网址，或需要查看网页时调用；正文总结与分析直接在回复中完成。"
 }
 
 func (t *ScreenshotTool) Parameters() map[string]any {
@@ -63,9 +64,52 @@ type screenshotArgs struct {
 }
 
 const (
+	maxExternalURLBytes          = 8 << 10
 	screenshotBrowserTimeout     = 15 * time.Second
 	screenshotBrowserLoadTimeout = 12 * time.Second
 )
+
+func normalizeExternalURL(raw string) (string, error) {
+	target := strings.TrimSpace(raw)
+	if target == "" {
+		return "", fmt.Errorf("网页链接不能为空")
+	}
+	if len(target) > maxExternalURLBytes {
+		return "", fmt.Errorf("网页链接不能超过 %d 字节", maxExternalURLBytes)
+	}
+	schemeSeparator := strings.Index(target, "://")
+	firstPathSlash := strings.IndexByte(target, '/')
+	if schemeSeparator < 0 || (firstPathSlash >= 0 && schemeSeparator > firstPathSlash) {
+		target = "https://" + target
+	}
+	if len(target) > maxExternalURLBytes {
+		return "", fmt.Errorf("网页链接不能超过 %d 字节", maxExternalURLBytes)
+	}
+
+	u, err := url.Parse(target)
+	if err != nil {
+		return "", fmt.Errorf("无效的网页链接: %w", err)
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("网页链接只支持 HTTP/HTTPS")
+	}
+	if u.Host == "" || u.Hostname() == "" {
+		return "", fmt.Errorf("网页链接缺少有效主机名")
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("网页链接不能包含用户名或密码")
+	}
+	return u.String(), nil
+}
+
+func safeLogURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		return "[invalid URL]"
+	}
+	return u.Scheme + "://" + u.Hostname()
+}
 
 func (t *ScreenshotTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.ToolResult, error) {
 	var args screenshotArgs
@@ -102,13 +146,13 @@ func (t *ScreenshotTool) Execute(ctx context.Context, rawArgs json.RawMessage) (
 		slog.Info("screenshot_web: Chromium 网页截图成功", "host", safeLogURL(targetURL), "size", len(pngBytes))
 
 		return &core.ToolResult{
-			Text:      fmt.Sprintf("网页初始可视区域截图成功，已随回复发送：%s。如果用户还要求阅读、总结或回答网页内容，请继续调用 read_link 获取正文。", displayURL),
+			Text:      fmt.Sprintf("网页初始可视区域截图成功，已随回复发送：%s", displayURL),
 			ImageData: pngBytes,
 		}, nil
 	}
 
 	slog.Warn("screenshot_web: Chromium 可视区域截图未完成", "host", safeLogURL(targetURL), "errorType", fmt.Sprintf("%T", shotErr))
-	return &core.ToolResult{Text: fmt.Sprintf("网页可视区域截图失败：%v。若用户还要求阅读、总结或回答网页内容，请仍然调用 read_link 获取正文并完成回答；不要生成整页文摘长图。", shotErr)}, nil
+	return &core.ToolResult{Text: fmt.Sprintf("网页可视区域截图未能完成：%v", shotErr)}, nil
 }
 
 // captureChromiumScreenshot 执行无头 Chromium 截图，强制绑定 Cloudflare WARP 本地代理出口

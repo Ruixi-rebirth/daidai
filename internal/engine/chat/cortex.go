@@ -929,7 +929,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 				})
 				continue
 			}
-			if tc.Function.Name == "screenshot_web" || tc.Function.Name == "read_link" {
+			if tc.Function.Name == "screenshot_web" {
 				linkToolCalls++
 				if linkToolCalls > 2 {
 					slog.Info("cortex: 拦截超限的链接处理调用（单次上限 2 个）", "name", tc.Function.Name)

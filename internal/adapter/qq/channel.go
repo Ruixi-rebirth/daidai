@@ -31,6 +31,13 @@ type Config struct {
 	OwnerOpenID string
 }
 
+const (
+	// VoiceModeMulti 多语精准模式：优先大模型原生多模态倾听原声，杜绝空耳，支持中英日等多语种
+	VoiceModeMulti = "multi"
+	// VoiceModeFast 极速模式：优先腾讯官方 ASR 毫秒级直出，适合普通中文对话
+	VoiceModeFast = "fast"
+)
+
 type dedupCache struct {
 	mu   sync.Mutex
 	seen map[string]int64
@@ -382,6 +389,8 @@ type QQChannel struct {
 	knownGroupBotsMu         sync.RWMutex
 	knownGroupBots           map[string]map[string]string
 	historyRecorder          func(context.Context, *entity.SensoryEvent) error
+	voiceModeMu              sync.RWMutex
+	voiceMode                string
 }
 
 // SetHistoryRecorder installs the callback used to persist each raw inbound
@@ -972,6 +981,45 @@ func (q *QQChannel) SetAccessRequestStore(database *db.Manager) {
 	q.accessRequests = database
 }
 
+// GetVoiceMode 返回当前的语音识别模式 (fast / multi)
+func (q *QQChannel) GetVoiceMode() string {
+	if q == nil {
+		return VoiceModeMulti
+	}
+	q.voiceModeMu.RLock()
+	defer q.voiceModeMu.RUnlock()
+	if q.voiceMode == "" {
+		return VoiceModeMulti
+	}
+	return q.voiceMode
+}
+
+// SetVoiceMode 设置并持久化语音识别模式
+func (q *QQChannel) SetVoiceMode(mode string) error {
+	if q == nil {
+		return errors.New("nil channel")
+	}
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode != VoiceModeFast && mode != VoiceModeMulti {
+		return fmt.Errorf("unknown voice mode: %s (expected %s or %s)", mode, VoiceModeFast, VoiceModeMulti)
+	}
+	q.voiceModeMu.Lock()
+	q.voiceMode = mode
+	q.voiceModeMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	mgr := q.accessRequests
+	if mgr == nil {
+		mgr = db.DefaultManager()
+	}
+	if err := mgr.SetRuntimeState(ctx, "qq", "voice_mode", mode); err != nil {
+		slog.Warn("qq: failed to persist voice mode to runtime_state", "err", err)
+		return err
+	}
+	return nil
+}
+
 func (q *QQChannel) Start(ctx context.Context, onSensory func(event *entity.SensoryEvent)) error {
 	q.wsReady.Store(false)
 	if q.msgCache != nil {
@@ -982,6 +1030,26 @@ func (q *QQChannel) Start(ctx context.Context, onSensory func(event *entity.Sens
 		slog.Warn("qq_channel: 已标记的群机器人清单读取失败", "err", err)
 	}
 	loadBotsCancel()
+
+	loadVoiceCtx, loadVoiceCancel := context.WithTimeout(ctx, 3*time.Second)
+	voiceMgr := q.accessRequests
+	if voiceMgr == nil {
+		voiceMgr = db.DefaultManager()
+	}
+	storedVoiceMode, voiceErr := voiceMgr.GetRuntimeState(loadVoiceCtx, "qq", "voice_mode")
+	loadVoiceCancel()
+	if voiceErr == nil && (storedVoiceMode == VoiceModeFast || storedVoiceMode == VoiceModeMulti) {
+		q.voiceModeMu.Lock()
+		q.voiceMode = storedVoiceMode
+		q.voiceModeMu.Unlock()
+		slog.Info("qq: 已加载持久化语音识别模式", "mode", storedVoiceMode)
+	} else {
+		q.voiceModeMu.Lock()
+		if q.voiceMode == "" {
+			q.voiceMode = VoiceModeMulti
+		}
+		q.voiceModeMu.Unlock()
+	}
 	chCtx, cancel := context.WithCancel(ctx)
 	q.stopCancel = cancel
 
@@ -1099,17 +1167,31 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 						audioURL = fileURL
 					}
 					var recognizedText string
-					// 优先调用多模态大模型原生倾听音频原声，支持全球全语种（中、英、日、韩等）且彻底杜绝平台空耳
-					if audioURL != "" {
-						recognizedText = q.transcribeVoiceAudio(context.Background(), audioURL, fileName)
-						if recognizedText != "" {
-							slog.Info("qq: 语音消息多模态原生转录成功", "msgID", msgID, "text", recognizedText)
+					currentMode := q.GetVoiceMode()
+					if currentMode == VoiceModeFast {
+						// 极速模式：优先使用腾讯官方 ASR（0ms 延时），若无识别结果则尝试多模态转录兜底
+						if asrReferText != "" {
+							slog.Info("qq: 语音消息使用极速模式 ASR 转录", "msgID", msgID, "text", asrReferText)
+							recognizedText = asrReferText
+						} else if audioURL != "" {
+							recognizedText = q.transcribeVoiceAudio(context.Background(), audioURL, fileName)
+							if recognizedText != "" {
+								slog.Info("qq: 极速模式 ASR 未命中，多模态原生转录成功", "msgID", msgID, "text", recognizedText)
+							}
 						}
-					}
-					// 若多模态转录未产生结果（如临时网络超时），回落至官方 ASR 文本兜底
-					if recognizedText == "" && asrReferText != "" {
-						slog.Info("qq: 多模态转录未命中，采用官方 ASR 文本兜底", "msgID", msgID, "asrText", asrReferText)
-						recognizedText = asrReferText
+					} else {
+						// 多语精准模式：优先调用多模态大模型原生倾听音频原声，支持全球全语种（中、英、日、韩等）且彻底杜绝平台空耳
+						if audioURL != "" {
+							recognizedText = q.transcribeVoiceAudio(context.Background(), audioURL, fileName)
+							if recognizedText != "" {
+								slog.Info("qq: 语音消息多模态原生转录成功", "msgID", msgID, "text", recognizedText)
+							}
+						}
+						// 若多模态转录未产生结果（如临时网络超时），回落至官方 ASR 文本兜底
+						if recognizedText == "" && asrReferText != "" {
+							slog.Info("qq: 多模态转录未命中，采用官方 ASR 文本兜底", "msgID", msgID, "asrText", asrReferText)
+							recognizedText = asrReferText
+						}
 					}
 					if recognizedText != "" {
 						if content == "" {

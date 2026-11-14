@@ -260,11 +260,13 @@ func isImmediateControlEvent(content string) bool {
 		"/agy status", "/agy logout", "/stop",
 		"/reset", "/new", "/clear", "/ws clear", "/ws reset",
 		"/pwd", "/workspaces", "/ws", "/ws exit", "/workspaces exit",
-		"/ws clean", "/clean", "/help", "/task":
+		"/ws clean", "/clean", "/help", "/task",
+		"/voice":
 		return true
 	}
 	if strings.HasPrefix(command, "/task ") || strings.HasPrefix(command, "/cd ") || command == "/cd" ||
-		strings.HasPrefix(command, "/ws rm ") || strings.HasPrefix(command, "/workspaces rm ") {
+		strings.HasPrefix(command, "/ws rm ") || strings.HasPrefix(command, "/workspaces rm ") ||
+		strings.HasPrefix(command, "/voice ") {
 		return true
 	}
 	// Authorization-code parsing is case-insensitive in SuperAgent.

@@ -50,7 +50,6 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 	}
 	h.Register(NewChatSummaryTool(nil, cfg.Router))
 	h.Register(NewWebSearchToolWithCommand(cfg.Router, cfg.AGYCommand))
-	h.Register(NewReadLinkTool())
 	h.Register(NewScreenshotTool())
 	h.Register(NewSingboxLinksTool(cfg.Immune))
 	if cfg.Workspaces != nil {

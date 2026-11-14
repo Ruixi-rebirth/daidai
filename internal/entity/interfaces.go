@@ -16,6 +16,12 @@ type Channel interface {
 	Stop(ctx context.Context) error
 }
 
+// VoiceModedChannel 具备语音识别模式切换能力的通道
+type VoiceModedChannel interface {
+	GetVoiceMode() string
+	SetVoiceMode(mode string) error
+}
+
 // Hands 原生原子双手系统接口
 type Hands interface {
 	Register(t core.Tool)
@@ -27,7 +33,7 @@ type Hands interface {
 // guest model and when enforcing tool execution at the registry boundary.
 func GuestToolAllowed(name string) bool {
 	switch name {
-	case "render_card", "get_system_status", "manage_memory", "summarize_chat", "search_web", "read_link", "screenshot_web", "search_nix_package", "express_face":
+	case "render_card", "get_system_status", "manage_memory", "summarize_chat", "search_web", "screenshot_web", "search_nix_package", "express_face":
 		return true
 	default:
 		return false

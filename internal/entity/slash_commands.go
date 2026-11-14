@@ -51,6 +51,7 @@ func slashCommandRegistry(a *SuperAgent) []slashCommand {
 		{section: "状态与模型", usage: "/model", help: "查看当前对话使用的模型；此命令不会切换模型", access: "仅核心搭档/协作者", match: exact("/model"), handle: a.handleModelCommand},
 		{section: "状态与模型", usage: "/models", help: "列出可用模型", access: "仅核心搭档/协作者", match: exact("/models"), handle: a.handleModelsCommand},
 		{section: "状态与模型", usage: "/usage", help: "查看模型用量", access: "仅核心搭档/协作者", match: exact("/usage"), handle: a.handleUsageCommand},
+		{section: "状态与模型", usage: "/voice [fast|multi]", help: "查看或切换语音识别模式（fast 极速 / multi 多语精准）", access: "仅核心搭档/协作者", match: prefix("/voice"), handle: a.handleVoiceCommand},
 		{section: "工程工单", usage: "/tasks", help: "查看当前会话的近期工单", access: "仅核心搭档/协作者", match: exact("/tasks"), handle: a.handleTasksCommand},
 		{section: "工程工单", usage: "/task <ID> [页码]", help: "查看工单状态和输出", access: "仅核心搭档/协作者", match: prefix("/task"), handle: a.handleTaskCommand},
 		{section: "工作空间", usage: "/pwd", help: "查看当前工作空间", access: "仅核心搭档/协作者", match: exact("/pwd"), handle: a.handlePwdCommand},
@@ -388,6 +389,65 @@ func (a *SuperAgent) handleUsageCommand(ctx context.Context, event *SensoryEvent
 		usage = a.Cognition.ModelUsage()
 	}
 	a.replyInfo(ctx, event, "📊 模型用量", usage)
+}
+
+func (a *SuperAgent) handleVoiceCommand(ctx context.Context, event *SensoryEvent, content string) {
+	if err := a.delegationPermissionError(event.Role); err != nil {
+		a.replyText(ctx, event, err.Error())
+		return
+	}
+	if a.Channels == nil {
+		a.replyText(ctx, event, "未初始化通道管理器。")
+		return
+	}
+	ch, ok := a.Channels.Get(event.Platform)
+	if !ok {
+		a.replyText(ctx, event, fmt.Sprintf("未找到平台通道：%s", event.Platform))
+		return
+	}
+	vmc, ok := ch.(VoiceModedChannel)
+	if !ok {
+		a.replyText(ctx, event, fmt.Sprintf("当前平台（%s）暂不支持语音模式切换。", event.Platform))
+		return
+	}
+
+	parts := strings.Fields(strings.TrimSpace(content))
+	if len(parts) == 1 || (len(parts) == 2 && (parts[1] == "status" || parts[1] == "info")) {
+		current := vmc.GetVoiceMode()
+		var desc, switchHint string
+		if current == "fast" {
+			desc = "极速模式 (fast)\n- 特点：腾讯官方 ASR 毫秒级直出，零等待即时响应（适合普通中文对话）\n- 兜底：若官方未提供 ASR 文本，自动调用多模态原声转录"
+			switchHint = "发送 `/voice multi` 切换为多语精准模式"
+		} else {
+			desc = "多语精准模式 (multi)\n- 特点：Gemini 原生多模态音频原声倾听，精准识别日语、英语及中英混杂，杜绝空耳（耗时约 3.5s）\n- 兜底：若网络波动转录超时，自动回退腾讯官方 ASR"
+			switchHint = "发送 `/voice fast` 切换为极速模式"
+		}
+		msg := fmt.Sprintf("【语音识别设置】\n当前模式：%s\n\n💡 提示：%s", desc, switchHint)
+		a.replyInfo(ctx, event, "🎙️ 语音识别设置", msg)
+		return
+	}
+
+	if len(parts) == 2 {
+		target := strings.ToLower(parts[1])
+		switch target {
+		case "fast", "quick", "speed":
+			if err := vmc.SetVoiceMode("fast"); err != nil {
+				a.replyText(ctx, event, fmt.Sprintf("切换极速语音模式失败：%v", err))
+				return
+			}
+			a.replyInfo(ctx, event, "🎙️ 语音模式已切换", "已切换为 **极速模式 (fast)**。\n优先使用腾讯官方 ASR 毫秒级直出，快速响应中文（官方无 ASR 文本时自动回退多模态转录兜底）。")
+			return
+		case "multi", "accurate", "gemini":
+			if err := vmc.SetVoiceMode("multi"); err != nil {
+				a.replyText(ctx, event, fmt.Sprintf("切换多语精准模式失败：%v", err))
+				return
+			}
+			a.replyInfo(ctx, event, "🎙️ 语音模式已切换", "已切换为 **多语精准模式 (multi)**。\n优先调用 Gemini 原生多模态音频倾听原声，精准识别日语/英语/多语种，杜绝空耳（超时自动回退官方 ASR 兜底）。")
+			return
+		}
+	}
+
+	a.replyText(ctx, event, "用法：\n- `/voice` 或 `/voice status`：查看当前语音识别模式\n- `/voice fast`：切换为极速模式（腾讯 ASR 零延时）\n- `/voice multi`：切换为多语精准模式（Gemini 原生倾听日语/英语/多语）")
 }
 
 func (a *SuperAgent) checkModelCommandPermission(ctx context.Context, event *SensoryEvent) bool {
