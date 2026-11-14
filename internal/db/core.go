@@ -99,14 +99,18 @@ CREATE TABLE IF NOT EXISTS user_fact_sources (
 );
 CREATE INDEX IF NOT EXISTS idx_fact_sources_message ON user_fact_sources(message_id, fact_id);
 
-CREATE TABLE IF NOT EXISTS msg_cache (
-    msg_id     TEXT PRIMARY KEY,
-    content    TEXT NOT NULL,
-    chat_type  TEXT NOT NULL DEFAULT '',
-    conv_id    TEXT NOT NULL DEFAULT '',
-    updated_at INTEGER NOT NULL
+CREATE TABLE IF NOT EXISTS qq_quote_records (
+    msg_id        TEXT NOT NULL,
+    chat_type     TEXT NOT NULL CHECK (chat_type IN ('private', 'group')),
+    conv_id       TEXT NOT NULL CHECK (length(conv_id) > 0),
+    direction     TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound', 'legacy')),
+    content       TEXT NOT NULL DEFAULT '',
+    content_kind  TEXT NOT NULL CHECK (content_kind IN ('text', 'text_card', 'mixed_media', 'image', 'file', 'unknown')),
+    text_complete INTEGER NOT NULL CHECK (text_complete IN (0, 1)),
+    updated_at    INTEGER NOT NULL,
+    PRIMARY KEY (msg_id, chat_type, conv_id)
 );
-CREATE INDEX IF NOT EXISTS idx_msg_cache_time ON msg_cache(updated_at);
+CREATE INDEX IF NOT EXISTS idx_qq_quote_records_time ON qq_quote_records(updated_at);
 
 CREATE TABLE IF NOT EXISTS channel_workspaces (
     channel_id     TEXT NOT NULL CHECK (length(channel_id) > 0),
@@ -2035,32 +2039,6 @@ func insertFactSource(ctx context.Context, tx *sql.Tx, factID, messageID int64, 
 	return nil
 }
 
-// SaveMsgCache 保存平台消息 ID 到原文的映射 (用于引用回复反查)
-
-func (m *Manager) SaveMsgCache(ctx context.Context, platform, msgID, content, chatType, convID string) error {
-	if msgID == "" || content == "" {
-		return nil
-	}
-	if (chatType != "private" && chatType != "group") || strings.TrimSpace(convID) == "" {
-		return fmt.Errorf("message cache requires a valid chat type and conversation ID")
-	}
-	content = core.TruncateRunes(content, core.MaxUserMessageRunes, "…[消息已截断]")
-	db, err := m.GetConn(platform)
-	if err != nil {
-		return err
-	}
-	nowMs := time.Now().UnixMilli()
-	_, err = db.ExecContext(ctx,
-		`INSERT INTO msg_cache (msg_id, content, chat_type, conv_id, updated_at) VALUES (?, ?, ?, ?, ?)
-		 ON CONFLICT(msg_id) DO UPDATE SET content = excluded.content, chat_type = excluded.chat_type, conv_id = excluded.conv_id, updated_at = excluded.updated_at`,
-		msgID, content, chatType, convID, nowMs,
-	)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
 // DeleteMsgCache 删除指定的平台消息缓存条目。
 func (m *Manager) DeleteMsgCache(platform, msgID string) error {
 	if msgID == "" {
@@ -2071,47 +2049,137 @@ func (m *Manager) DeleteMsgCache(platform, msgID string) error {
 		return err
 	}
 	_, err = db.Exec("DELETE FROM msg_cache WHERE msg_id = ?", msgID)
+	if err != nil && strings.Contains(err.Error(), "no such table: msg_cache") {
+		return nil
+	}
 	return err
 }
 
-// MsgCacheEntry 消息缓存条目 (保持时间升序)
-type MsgCacheEntry struct {
-	MsgID    string
-	Content  string
-	ChatType string
-	ConvID   string
+// QQQuoteRecord stores the semantic content available when a QQ message is
+// quoted. It keeps rendered transport payloads separate from readable text.
+type QQQuoteRecord struct {
+	MsgID        string
+	Content      string
+	ChatType     string
+	ConvID       string
+	Direction    string
+	ContentKind  string
+	TextComplete bool
 }
 
-// LoadMsgCache 按时间升序加载最近 limit 条平台消息缓存到内存；更早的持久化记录保留，仍可通过 GetMsgCache 按 ID 查询。
-func (m *Manager) LoadMsgCache(platform string, limit int) ([]MsgCacheEntry, error) {
+func (m *Manager) SaveQQQuoteRecord(ctx context.Context, record QQQuoteRecord) error {
+	if record.MsgID == "" || (record.ChatType != "private" && record.ChatType != "group") || strings.TrimSpace(record.ConvID) == "" {
+		return fmt.Errorf("QQ quote record requires message ID and valid conversation scope")
+	}
+	if record.Direction != "inbound" && record.Direction != "outbound" && record.Direction != "legacy" {
+		return fmt.Errorf("invalid QQ quote direction %q", record.Direction)
+	}
+	switch record.ContentKind {
+	case "text", "text_card", "mixed_media", "image", "file", "unknown":
+	default:
+		return fmt.Errorf("invalid QQ quote content kind %q", record.ContentKind)
+	}
+	if record.ContentKind == "image" || record.ContentKind == "file" {
+		record.Content = ""
+		record.TextComplete = false
+	}
+	if record.Content == "" {
+		record.TextComplete = false
+	}
+	if len([]rune(record.Content)) > core.MaxUserMessageRunes {
+		record.Content = core.TruncateRunes(record.Content, core.MaxUserMessageRunes, "…[引用正文已截断]")
+		record.TextComplete = false
+	}
+	database, err := m.GetConn("qq")
+	if err != nil {
+		return err
+	}
+	_, err = database.ExecContext(ctx, `
+		INSERT INTO qq_quote_records (msg_id, chat_type, conv_id, direction, content, content_kind, text_complete, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(msg_id, chat_type, conv_id) DO UPDATE SET
+			direction = excluded.direction,
+			content = excluded.content,
+			content_kind = excluded.content_kind,
+			text_complete = excluded.text_complete,
+			updated_at = excluded.updated_at`,
+		record.MsgID, record.ChatType, record.ConvID, record.Direction, record.Content, record.ContentKind, boolToSQLite(record.TextComplete), time.Now().UnixMilli())
+	return err
+}
+
+func (m *Manager) LoadQQQuoteRecords(limit int) ([]QQQuoteRecord, error) {
 	if limit <= 0 {
 		limit = 1000
 	}
-	db, err := m.GetConn(platform)
+	database, err := m.GetConn("qq")
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT msg_id, substr(content, 1, ?), chat_type, conv_id FROM msg_cache
-		WHERE chat_type IN ('private', 'group') AND conv_id <> ''
-		AND msg_id IN (SELECT msg_id FROM msg_cache WHERE chat_type IN ('private', 'group') AND conv_id <> '' ORDER BY updated_at DESC, rowid DESC LIMIT ?)
-		ORDER BY updated_at ASC`, core.MaxUserMessageRunes+1, limit)
+	rows, err := database.Query(`
+		SELECT msg_id, content, chat_type, conv_id, direction, content_kind, text_complete
+		FROM qq_quote_records
+		WHERE (msg_id, chat_type, conv_id) IN (
+			SELECT msg_id, chat_type, conv_id FROM qq_quote_records ORDER BY updated_at DESC, rowid DESC LIMIT ?
+		)
+		ORDER BY updated_at ASC, rowid ASC`, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-
-	var res []MsgCacheEntry
+	var records []QQQuoteRecord
 	for rows.Next() {
-		var id, content, chatType, convID string
-		if err := rows.Scan(&id, &content, &chatType, &convID); err != nil {
+		var record QQQuoteRecord
+		var complete int
+		if err := rows.Scan(&record.MsgID, &record.Content, &record.ChatType, &record.ConvID, &record.Direction, &record.ContentKind, &complete); err != nil {
 			return nil, err
 		}
-		res = append(res, MsgCacheEntry{MsgID: id, Content: core.TruncateRunes(content, core.MaxUserMessageRunes, "…[消息已截断]"), ChatType: chatType, ConvID: convID})
+		record.TextComplete = complete == 1
+		records = append(records, record)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	return records, rows.Err()
+}
+
+func (m *Manager) GetQQQuoteRecord(ctx context.Context, msgID, chatType, convID string) (QQQuoteRecord, bool, error) {
+	if msgID == "" || (chatType != "private" && chatType != "group") || strings.TrimSpace(convID) == "" {
+		return QQQuoteRecord{}, false, nil
 	}
-	return res, nil
+	database, err := m.GetConn("qq")
+	if err != nil {
+		return QQQuoteRecord{}, false, err
+	}
+	var record QQQuoteRecord
+	var complete int
+	err = database.QueryRowContext(ctx, `
+		SELECT msg_id, content, chat_type, conv_id, direction, content_kind, text_complete
+		FROM qq_quote_records WHERE msg_id = ? AND chat_type = ? AND conv_id = ?`,
+		msgID, chatType, convID).Scan(&record.MsgID, &record.Content, &record.ChatType, &record.ConvID, &record.Direction, &record.ContentKind, &complete)
+	if errors.Is(err, sql.ErrNoRows) {
+		return QQQuoteRecord{}, false, nil
+	}
+	if err != nil {
+		return QQQuoteRecord{}, false, err
+	}
+	record.TextComplete = complete == 1
+	return record, true, nil
+}
+
+func (m *Manager) DeleteQQQuoteRecord(msgID, chatType, convID string) error {
+	if msgID == "" || (chatType != "private" && chatType != "group") || strings.TrimSpace(convID) == "" {
+		return nil
+	}
+	database, err := m.GetConn("qq")
+	if err != nil {
+		return err
+	}
+	_, err = database.Exec(`DELETE FROM qq_quote_records WHERE msg_id = ? AND chat_type = ? AND conv_id = ?`, msgID, chatType, convID)
+	return err
+}
+
+func boolToSQLite(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 // GetMsgCache reads a durable reference body when it is no longer in the bounded in-memory cache.
@@ -2125,6 +2193,9 @@ func (m *Manager) GetMsgCache(ctx context.Context, platform, msgID, chatType, co
 	}
 	var content string
 	err = db.QueryRowContext(ctx, "SELECT substr(content, 1, ?) FROM msg_cache WHERE msg_id = ? AND chat_type = ? AND conv_id = ?", core.MaxUserMessageRunes+1, msgID, chatType, convID).Scan(&content)
+	if err != nil && strings.Contains(err.Error(), "no such table: msg_cache") {
+		return "", nil
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}

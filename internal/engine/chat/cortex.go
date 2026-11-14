@@ -29,6 +29,7 @@ const (
 type quotedMessageContext struct {
 	Author           string                `json:"author,omitempty"`
 	Content          string                `json:"content"`
+	ContentKind      string                `json:"content_kind,omitempty"`
 	ContentComplete  bool                  `json:"content_complete,omitempty"`
 	ImageObservation string                `json:"image_observation,omitempty"`
 	OmittedImages    int                   `json:"omitted_images,omitempty"`
@@ -58,6 +59,7 @@ func quotedMessageContextFromEvent(event *entity.SensoryEvent, depth int, remain
 	quoted := &quotedMessageContext{
 		Author:           strings.TrimSpace(event.SenderName),
 		Content:          content,
+		ContentKind:      event.ContentKind,
 		ContentComplete:  event.ContentComplete,
 		ImageObservation: core.TruncateRunes(strings.TrimSpace(event.VisionSummary), core.MaxVisionSummaryRunes, "\n[引用图片观察已截断]"),
 		OmittedImages:    event.OmittedImages,
@@ -72,7 +74,7 @@ func quotedImagesFromEvent(event *entity.SensoryEvent) ([]*core.Attachment, int)
 	seen := make(map[string]struct{})
 	omitted := 0
 	for current, depth := event, 0; current != nil && depth < 4; current, depth = current.ReplyContext, depth+1 {
-		if current.ContentComplete {
+		if current.ContentComplete && current.ContentKind == "text_card" {
 			continue
 		}
 		for _, image := range current.Images {
@@ -91,7 +93,7 @@ func quotedImagesFromEvent(event *entity.SensoryEvent) ([]*core.Attachment, int)
 		}
 	}
 	for current := event; current != nil; current = current.ReplyContext {
-		if !current.ContentComplete {
+		if !(current.ContentComplete && current.ContentKind == "text_card") {
 			omitted += current.OmittedImages
 		}
 	}

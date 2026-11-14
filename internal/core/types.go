@@ -153,7 +153,8 @@ type SensoryEvent struct {
 	ReplyDelivered        bool          // 发声通道是否接受本轮回复（允许部分送达）；用于提交交付后生效的状态
 	VisionSummary         string        // 多模态看图提炼出的视觉观察摘要（用于持久化至工作记忆）
 	ReplyContext          *SensoryEvent // 引用的前置消息上下文
-	ContentComplete       bool          // 引用正文已从完整出站文本缓存还原；无需把渲染图当作唯一内容来源
+	ContentComplete       bool          // 引用的文字正文已完整保存
+	ContentKind           string        // 引用内容类型：text、text_card、mixed_media、image、file、unknown
 	RawMessageID          string        // 原始平台消息 ID (用于被动回复凭证)
 	OccurredAt            time.Time     // 事件发生时间
 	GroupMessageObserved  bool          // 未 @ 机器人的 QQ 群消息；写入本群历史，但默认不触发认知回复

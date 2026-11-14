@@ -1409,6 +1409,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 							if renderErr != nil || len(pages) == 0 {
 								slog.Warn("superagent: 长回复卡片渲染失败，回退为文字", "platform", event.Platform, "channel", event.ChannelID, "err", renderErr)
 							} else {
+								utterance.InlineNonTextImageCount = len(images)
 								images = append(images, pages...)
 								fallbackParts := []string{strings.TrimSpace(utterance.FallbackText), replyContent}
 								utterance.FallbackText = strings.TrimSpace(strings.Join(nonEmptyStrings(fallbackParts), "\n\n"))

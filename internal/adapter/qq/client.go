@@ -29,6 +29,13 @@ const (
 	maxQQMediaBytes     = core.MaxImageBytes
 )
 
+// QuoteMetadata describes the semantic content associated with a sent QQ message.
+type QuoteMetadata struct {
+	Text         string // 供引用恢复的语义文字，不是平台显示 payload
+	Kind         string // text、text_card、mixed_media、image、file
+	TextComplete bool   // Text 是否完整；保存时若被裁剪会自动置为 false
+}
+
 // Client 负责与 QQ 开放平台 OpenAPI 进行鉴权和 REST API 通信
 type Client struct {
 	appID      string
@@ -41,17 +48,17 @@ type Client struct {
 	expiresAt   time.Time
 
 	msgSeq        uint32
-	onMessageSent func(msgID, refIndex, content, targetType, targetID string, completeText bool)
+	onMessageSent func(msgID, refIndex, targetType, targetID string, metadata QuoteMetadata)
 }
 
 // SetOnMessageSent 注册发送成功后的消息记录回调
-func (c *Client) SetOnMessageSent(fn func(msgID, refIndex, content, targetType, targetID string, completeText bool)) {
+func (c *Client) SetOnMessageSent(fn func(msgID, refIndex, targetType, targetID string, metadata QuoteMetadata)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.onMessageSent = fn
 }
 
-func (c *Client) notifySent(respBytes []byte, content, targetType, targetID string, completeText bool) {
+func (c *Client) notifySent(respBytes []byte, targetType, targetID string, metadata QuoteMetadata) {
 	c.mu.RLock()
 	fn := c.onMessageSent
 	c.mu.RUnlock()
@@ -67,7 +74,7 @@ func (c *Client) notifySent(respBytes []byte, content, targetType, targetID stri
 	}
 	if err := json.Unmarshal(respBytes, &res); err == nil && res.ID != "" {
 		slog.Info("qq: 成功登记出站消息 ID", "id", res.ID, "hasRefIndex", res.ExtInfo.RefIndex != "")
-		fn(res.ID, res.ExtInfo.RefIndex, content, targetType, targetID, completeText)
+		fn(res.ID, res.ExtInfo.RefIndex, targetType, targetID, metadata)
 	} else {
 		slog.Warn("qq: 发送成功但响应未包含可解析的消息 ID")
 	}
@@ -348,8 +355,11 @@ func (c *Client) SendGroupMessage(ctx context.Context, groupOpenID string, conte
 	return c.sendMessage(ctx, "groups", groupOpenID, content, msgID)
 }
 
-func (c *Client) SendGroupMessageWithContext(ctx context.Context, groupOpenID, content, msgID, quoteContext string, completeText bool) error {
-	return c.sendMessageWithContext(ctx, "groups", groupOpenID, content, msgID, quoteContext, completeText)
+func (c *Client) SendGroupMessageWithContext(ctx context.Context, groupOpenID, content, msgID string, metadata QuoteMetadata) error {
+	if metadata.Kind == "" {
+		metadata.Kind = qqQuoteTextCard
+	}
+	return c.sendMessageWithContext(ctx, "groups", groupOpenID, content, msgID, metadata)
 }
 
 // SendC2CMessage 发送 QQ 私聊 Markdown 消息。
@@ -357,15 +367,18 @@ func (c *Client) SendC2CMessage(ctx context.Context, userOpenID string, content 
 	return c.sendMessage(ctx, "users", userOpenID, content, msgID)
 }
 
-func (c *Client) SendC2CMessageWithContext(ctx context.Context, userOpenID, content, msgID, quoteContext string, completeText bool) error {
-	return c.sendMessageWithContext(ctx, "users", userOpenID, content, msgID, quoteContext, completeText)
+func (c *Client) SendC2CMessageWithContext(ctx context.Context, userOpenID, content, msgID string, metadata QuoteMetadata) error {
+	if metadata.Kind == "" {
+		metadata.Kind = qqQuoteTextCard
+	}
+	return c.sendMessageWithContext(ctx, "users", userOpenID, content, msgID, metadata)
 }
 
 func (c *Client) sendMessage(ctx context.Context, targetType, targetID, content, msgID string) error {
-	return c.sendMessageWithContext(ctx, targetType, targetID, content, msgID, content, true)
+	return c.sendMessageWithContext(ctx, targetType, targetID, content, msgID, QuoteMetadata{Text: content, Kind: qqQuoteText, TextComplete: true})
 }
 
-func (c *Client) sendMessageWithContext(ctx context.Context, targetType, targetID, content, msgID, quoteContext string, completeText bool) error {
+func (c *Client) sendMessageWithContext(ctx context.Context, targetType, targetID, content, msgID string, metadata QuoteMetadata) error {
 	url := fmt.Sprintf("%s/v2/%s/%s/messages", apiBaseURL, targetType, targetID)
 
 	mdPayload := map[string]any{
@@ -381,11 +394,14 @@ func (c *Client) sendMessageWithContext(ctx context.Context, targetType, targetI
 
 	resp, err := c.doPostJSON(ctx, url, mdPayload)
 	if err == nil {
-		cacheContent := strings.TrimSpace(quoteContext)
-		if cacheContent == "" {
-			cacheContent = content
+		metadata.Text = strings.TrimSpace(metadata.Text)
+		if metadata.Text == "" && metadata.Kind != qqQuoteTextCard {
+			metadata.Text = content
 		}
-		c.notifySent(resp, cacheContent, targetType, targetID, completeText)
+		if metadata.Kind == "" {
+			metadata.Kind = qqQuoteText
+		}
+		c.notifySent(resp, targetType, targetID, metadata)
 		return nil
 	}
 	return fmt.Errorf("send QQ markdown message: %w", err)
@@ -393,27 +409,43 @@ func (c *Client) sendMessageWithContext(ctx context.Context, targetType, targetI
 
 // SendGroupMediaMessage 发送 QQ 群聊富媒体消息
 func (c *Client) SendGroupMediaMessage(ctx context.Context, groupOpenID string, content string, imageData []byte, msgID string) error {
-	return c.sendMediaMessage(ctx, "groups", groupOpenID, content, imageData, msgID, content, false)
+	return c.sendMediaMessage(ctx, "groups", groupOpenID, content, imageData, msgID, mediaQuoteMetadata(content))
 }
 
 // SendC2CMediaMessage 发送 QQ 私聊富媒体消息
 func (c *Client) SendC2CMediaMessage(ctx context.Context, userOpenID string, content string, imageData []byte, msgID string) error {
-	return c.sendMediaMessage(ctx, "users", userOpenID, content, imageData, msgID, content, false)
+	return c.sendMediaMessage(ctx, "users", userOpenID, content, imageData, msgID, mediaQuoteMetadata(content))
+}
+
+func mediaQuoteMetadata(content string) QuoteMetadata {
+	kind := qqQuoteImage
+	if strings.TrimSpace(content) != "" {
+		kind = qqQuoteMixed
+	}
+	return QuoteMetadata{Text: content, Kind: kind}
 }
 
 // SendGroupMediaMessageWithContext associates the full text representation with
 // the image message so a later quote can recover the card's content.
-func (c *Client) SendGroupMediaMessageWithContext(ctx context.Context, groupOpenID, content string, imageData []byte, msgID, quoteContext string) error {
-	return c.sendMediaMessage(ctx, "groups", groupOpenID, content, imageData, msgID, quoteContext, strings.TrimSpace(quoteContext) != "")
+func (c *Client) SendGroupMediaMessageWithContext(ctx context.Context, groupOpenID, content string, imageData []byte, msgID string, metadata QuoteMetadata) error {
+	metadata.Kind = qqQuoteMixed
+	return c.sendMediaMessage(ctx, "groups", groupOpenID, content, imageData, msgID, metadata)
 }
 
 // SendC2CMediaMessageWithContext associates the full text representation with
 // the image message so a later quote can recover the card's content.
-func (c *Client) SendC2CMediaMessageWithContext(ctx context.Context, userOpenID, content string, imageData []byte, msgID, quoteContext string) error {
-	return c.sendMediaMessage(ctx, "users", userOpenID, content, imageData, msgID, quoteContext, strings.TrimSpace(quoteContext) != "")
+func (c *Client) SendC2CMediaMessageWithContext(ctx context.Context, userOpenID, content string, imageData []byte, msgID string, metadata QuoteMetadata) error {
+	metadata.Kind = qqQuoteMixed
+	return c.sendMediaMessage(ctx, "users", userOpenID, content, imageData, msgID, metadata)
 }
 
-func (c *Client) sendMediaMessage(ctx context.Context, targetType, targetID, content string, imageData []byte, msgID, quoteContext string, completeText bool) error {
+func (c *Client) sendMediaMessage(ctx context.Context, targetType, targetID, content string, imageData []byte, msgID string, metadata QuoteMetadata) error {
+	if metadata.Kind == "" || metadata.Kind == qqQuoteText {
+		metadata.Kind = qqQuoteImage
+		if strings.TrimSpace(content) != "" {
+			metadata.Kind = qqQuoteMixed
+		}
+	}
 	fileInfo, err := c.UploadMedia(ctx, targetType, targetID, 1, imageData)
 	if err != nil {
 		return fmt.Errorf("%s image upload error: %w", targetType, err)
@@ -438,11 +470,15 @@ func (c *Client) sendMediaMessage(ctx context.Context, targetType, targetID, con
 
 	resp, err := c.doPostJSON(ctx, url, payload)
 	if err == nil {
-		cacheContent := strings.TrimSpace(quoteContext)
-		if cacheContent == "" {
-			cacheContent = content
+		metadata.Text = strings.TrimSpace(metadata.Text)
+		if metadata.Text == "" && strings.TrimSpace(content) != "" {
+			metadata.Text = content
 		}
-		c.notifySent(resp, cacheContent, targetType, targetID, completeText)
+		if metadata.Kind == qqQuoteImage || metadata.Kind == qqQuoteFile {
+			metadata.Text = ""
+			metadata.TextComplete = false
+		}
+		c.notifySent(resp, targetType, targetID, metadata)
 	}
 	return err
 }
