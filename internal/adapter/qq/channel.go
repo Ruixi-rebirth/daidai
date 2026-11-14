@@ -1077,6 +1077,54 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 					}
 				}
 				contentType = core.TruncateRunes(baseContentType, 128, "…")
+
+				// 语音消息优先提取官方 ASR 转录文本或兜底转录，转为文本处理且不作为文件附件
+				asrReferText, _ := attMap["asr_refer_text"].(string)
+				asrReferText = strings.TrimSpace(asrReferText)
+				voiceWavURL, _ := attMap["voice_wav_url"].(string)
+				ext := strings.ToLower(filepath.Ext(fileName))
+
+				isVoice := contentType == "voice" ||
+					strings.HasPrefix(contentType, "voice") ||
+					contentType == "audio/amr" ||
+					contentType == "audio/silk" ||
+					contentType == "audio/slk" ||
+					voiceWavURL != "" ||
+					asrReferText != "" ||
+					ext == ".slk" || ext == ".silk" || ext == ".amr"
+
+				if isVoice {
+					if asrReferText != "" {
+						slog.Info("qq: 从语音消息中获取到官方 ASR 转录文本", "msgID", msgID, "asrText", asrReferText)
+						if content == "" {
+							content = asrReferText
+						} else {
+							content = content + "\n" + asrReferText
+						}
+					} else {
+						audioURL := voiceWavURL
+						if audioURL == "" {
+							audioURL = fileURL
+						}
+						transcribed := q.transcribeVoiceAudio(context.Background(), audioURL, fileName)
+						if transcribed != "" {
+							slog.Info("qq: 语音消息转录成功", "msgID", msgID, "text", transcribed)
+							if content == "" {
+								content = transcribed
+							} else {
+								content = content + "\n" + transcribed
+							}
+						} else {
+							slog.Warn("qq: 语音消息未获取到 ASR 文本且兜底转写失败", "msgID", msgID)
+							if content == "" {
+								content = "【收到一段语音消息，但未能识别出文字内容】"
+							}
+						}
+					}
+					// 语音消息已提取为文本，绝不作为普通文件附件推入 files，避免误触发附件处理拦截
+					continue
+				}
+
 				if fileURL == "" {
 					continue
 				}
