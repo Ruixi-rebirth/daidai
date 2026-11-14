@@ -123,6 +123,8 @@ type msgCache struct {
 	persistClosed bool
 }
 
+const fullTextCacheMarker = "\u241eDAIDAI_FULL_TEXT_V1\u241e\n"
+
 type msgCacheWrite struct {
 	entry db.MsgCacheEntry
 	done  chan struct{}
@@ -276,8 +278,17 @@ func (c *msgCache) SetAsync(msgID, content, chatType, convID string) {
 	c.set(msgID, content, chatType, convID, false)
 }
 
+func (c *msgCache) SetFullTextAsync(msgID, content, chatType, convID string) {
+	content = strings.TrimSpace(content)
+	if content == "" || entity.IsSensitiveAuthCommand(content) {
+		return
+	}
+	c.set(msgID, fullTextCacheMarker+content, chatType, convID, false)
+}
+
 func (c *msgCache) set(msgID, content, chatType, convID string, waitForPersistence bool) {
-	if msgID == "" || content == "" || entity.IsSensitiveAuthCommand(content) ||
+	cacheBody := strings.TrimPrefix(content, fullTextCacheMarker)
+	if msgID == "" || cacheBody == "" || entity.IsSensitiveAuthCommand(cacheBody) ||
 		(chatType != "private" && chatType != "group") || strings.TrimSpace(convID) == "" {
 		return
 	}
@@ -333,17 +344,22 @@ func (c *msgCache) set(msgID, content, chatType, convID string, waitForPersisten
 }
 
 func (c *msgCache) Get(msgID, chatType, convID string) string {
+	content, _ := c.GetWithCompleteness(msgID, chatType, convID)
+	return content
+}
+
+func (c *msgCache) GetWithCompleteness(msgID, chatType, convID string) (string, bool) {
 	if msgID == "" || (chatType != "private" && chatType != "group") || strings.TrimSpace(convID) == "" {
-		return ""
+		return "", false
 	}
 	c.mu.RLock()
 	entry, exists := c.items[msgID]
 	c.mu.RUnlock()
 	if exists && entry.ChatType == chatType && entry.ConvID == convID {
-		return entry.Content
+		return unmarkFullTextCache(entry.Content)
 	}
 	if c.db == nil {
-		return ""
+		return "", false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -352,13 +368,20 @@ func (c *msgCache) Get(msgID, chatType, convID string) string {
 		slog.Warn("qq: 从持久化引用记录读取原消息失败", "msgID", msgID, "err", err)
 	}
 	if content != "" {
-		return content
+		return unmarkFullTextCache(content)
 	}
 	content, err = c.db.MessageContentByPlatformID(ctx, "qq", chatType, convID, msgID)
 	if err != nil {
 		slog.Warn("qq: 从历史消息读取引用正文失败", "msgID", msgID, "err", err)
 	}
-	return content
+	return content, false
+}
+
+func unmarkFullTextCache(content string) (string, bool) {
+	if strings.HasPrefix(content, fullTextCacheMarker) {
+		return strings.TrimPrefix(content, fullTextCacheMarker), true
+	}
+	return content, false
 }
 
 // QQChannel 官方 QQ 开放平台全双工通道 (直接实现 entity.Channel，零前缀、单层架构)
@@ -949,7 +972,7 @@ func NewQQChannel(cfg Config, immune *entity.ImmuneSystem) *QQChannel {
 		msgCache: cache,
 		dedup:    newDedupCache(2000),
 	}
-	cli.SetOnMessageSent(func(msgID, refIndex, content, targetType, targetID string) {
+	cli.SetOnMessageSent(func(msgID, refIndex, content, targetType, targetID string, completeText bool) {
 		// If QQ reflects an outbound group message through GROUP_MESSAGE_CREATE,
 		// its accepted send ID lets the inbound path drop that exact echo.
 		if channel.dedup != nil {
@@ -959,9 +982,13 @@ func NewQQChannel(cfg Config, immune *entity.ImmuneSystem) *QQChannel {
 		if targetType == "groups" {
 			chatType = "group"
 		}
-		cache.SetAsync(msgID, content, chatType, targetID)
+		cacheMessage := cache.SetAsync
+		if completeText {
+			cacheMessage = cache.SetFullTextAsync
+		}
+		cacheMessage(msgID, content, chatType, targetID)
 		if refIndex != "" && refIndex != msgID {
-			cache.SetAsync(refIndex, content, chatType, targetID)
+			cacheMessage(refIndex, content, chatType, targetID)
 		}
 	})
 	return channel
@@ -1561,9 +1588,10 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 			if isGroup {
 				chatType = "group"
 			}
-			if cached := q.msgCache.Get(cacheKey, chatType, convID); cached != "" {
+			if cached, completeText := q.msgCache.GetWithCompleteness(cacheKey, chatType, convID); cached != "" {
 				replyCtx.Content = entity.SanitizeQuotedMessageContent(cached)
-				slog.Info("qq: 引用命中本地消息正文缓存", "msgID", msgID, "hasRefIndex", strings.HasPrefix(cacheKey, "REFIDX_"), "refContentBytes", len(replyCtx.Content))
+				replyCtx.ContentComplete = completeText
+				slog.Info("qq: 引用命中本地消息正文缓存", "msgID", msgID, "hasRefIndex", strings.HasPrefix(cacheKey, "REFIDX_"), "completeText", completeText, "refContentBytes", len(replyCtx.Content))
 			}
 		}
 	}
@@ -1897,18 +1925,21 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) error {
 
 	sendPart := func(part qqOutgoingPart) error {
 		quoteContext := strings.TrimSpace(u.FallbackText)
-		if quoteContext == "" {
-			quoteContext = part.text
-		}
 		quoteContext = core.TruncateRunes(quoteContext, core.MaxUserMessageRunes, "\n[引用正文过长，后续内容已截断]")
 		if u.IsGroup {
 			if len(part.image) > 0 {
-				return q.client.SendGroupMediaMessageWithContext(ctx, u.ChannelID, part.text, part.image, u.QuoteMsgID, quoteContext)
+				if quoteContext != "" {
+					return q.client.SendGroupMediaMessageWithContext(ctx, u.ChannelID, part.text, part.image, u.QuoteMsgID, quoteContext)
+				}
+				return q.client.SendGroupMediaMessage(ctx, u.ChannelID, part.text, part.image, u.QuoteMsgID)
 			}
 			return q.client.SendGroupMessage(ctx, u.ChannelID, part.text, u.QuoteMsgID)
 		}
 		if len(part.image) > 0 {
-			return q.client.SendC2CMediaMessageWithContext(ctx, u.ChannelID, part.text, part.image, u.QuoteMsgID, quoteContext)
+			if quoteContext != "" {
+				return q.client.SendC2CMediaMessageWithContext(ctx, u.ChannelID, part.text, part.image, u.QuoteMsgID, quoteContext)
+			}
+			return q.client.SendC2CMediaMessage(ctx, u.ChannelID, part.text, part.image, u.QuoteMsgID)
 		}
 		return q.client.SendC2CMessage(ctx, u.ChannelID, part.text, u.QuoteMsgID)
 	}
@@ -2110,10 +2141,15 @@ func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utteranc
 		q.commitPassiveReplyAttempt(budget)
 		reservedCount--
 	}
+	quoteContext := strings.TrimSpace(u.FallbackText)
+	completeText := quoteContext != ""
+	if !completeText {
+		quoteContext = markdown.String()
+	}
 	if u.IsGroup {
-		err = q.client.SendGroupMessage(ctx, u.ChannelID, markdown.String(), u.QuoteMsgID)
+		err = q.client.SendGroupMessageWithContext(ctx, u.ChannelID, markdown.String(), u.QuoteMsgID, quoteContext, completeText)
 	} else {
-		err = q.client.SendC2CMessage(ctx, u.ChannelID, markdown.String(), u.QuoteMsgID)
+		err = q.client.SendC2CMessageWithContext(ctx, u.ChannelID, markdown.String(), u.QuoteMsgID, quoteContext, completeText)
 	}
 	if err != nil {
 		return fmt.Errorf("send QQ Markdown message with inline images: %w", err)
