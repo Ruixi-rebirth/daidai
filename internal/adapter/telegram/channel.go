@@ -315,11 +315,20 @@ func (c *Channel) remember(ctx context.Context, chat string, id int64, body stri
 	}
 }
 func (c *Channel) sendText(ctx context.Context, chat, text string, reply int64, source string) error {
+	if source == "" {
+		source = text
+	}
+	return c.sendFormattedText(ctx, chat, formatMarkdown(text), reply, source)
+}
+func (c *Channel) sendFormattedText(ctx context.Context, chat string, text formattedText, reply int64, source string) error {
 	payload, err := destination(chat)
 	if err != nil {
 		return err
 	}
-	payload["text"] = text
+	payload["text"] = text.Text
+	if len(text.Entities) > 0 {
+		payload["entities"] = text.Entities
+	}
 	if reply > 0 {
 		payload["reply_parameters"] = map[string]any{"message_id": reply, "allow_sending_without_reply": true}
 	}
@@ -328,7 +337,7 @@ func (c *Channel) sendText(ctx context.Context, chat, text string, reply int64, 
 		return err
 	}
 	if source == "" {
-		source = text
+		source = text.Text
 	}
 	c.remember(ctx, chat, sent.ID, source)
 	return nil

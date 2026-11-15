@@ -88,12 +88,16 @@ func (c *Channel) Transmit(ctx context.Context, u *entity.Utterance) error {
 			}
 		}
 	}
-	chunks := core.SplitMarkdownChunks(text, 1800)
+	formattedChunks := splitFormatted(formatMarkdown(text), 1800)
+	chunks := make([]string, len(formattedChunks))
+	for i, chunk := range formattedChunks {
+		chunks[i] = chunk.Text
+	}
 	for i, chunk := range chunks {
 		if strings.TrimSpace(chunk) == "" {
 			continue
 		}
-		if err := c.sendText(ctx, u.ChannelID, chunk, reply, chunk); err != nil {
+		if err := c.sendFormattedText(ctx, u.ChannelID, formattedChunks[i], reply, chunk); err != nil {
 			if sent {
 				return &entity.PartialDeliveryError{Err: err, DeliveredText: strings.TrimSpace(delivered + "\n" + strings.Join(chunks[:i], "\n")), UndeliveredText: strings.Join(chunks[i:], "\n")}
 			}
@@ -134,6 +138,7 @@ func (c *Channel) sendImages(ctx context.Context, chat string, reply int64, imag
 		}
 	}
 	var media []map[string]any
+	formattedCaption := formatMarkdown(caption)
 	for i, data := range images {
 		name := fmt.Sprintf("photo%d", i)
 		if len(images) == 1 {
@@ -148,7 +153,10 @@ func (c *Channel) sendImages(ctx context.Context, chat string, reply int64, imag
 		}
 		item := map[string]any{"type": kind, "media": "attach://" + name}
 		if i == 0 && caption != "" {
-			item["caption"] = caption
+			item["caption"] = formattedCaption.Text
+			if len(formattedCaption.Entities) > 0 {
+				item["caption_entities"] = formattedCaption.Entities
+			}
 		}
 		media = append(media, item)
 	}
@@ -163,8 +171,14 @@ func (c *Channel) sendImages(ctx context.Context, chat string, reply int64, imag
 			return nil, err
 		}
 	} else if caption != "" {
-		if err := w.WriteField("caption", caption); err != nil {
+		if err := w.WriteField("caption", formattedCaption.Text); err != nil {
 			return nil, err
+		}
+		if len(formattedCaption.Entities) > 0 {
+			encoded, _ := json.Marshal(formattedCaption.Entities)
+			if err := w.WriteField("caption_entities", string(encoded)); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if err := w.Close(); err != nil {

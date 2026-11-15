@@ -197,9 +197,12 @@ func TestAlbumReceiptsRestoreRenderedTextAndRealImages(t *testing.T) {
 		if len(items) != 2 || items[0]["caption"] != "这是图片" {
 			t.Fatal("album caption or count incorrect")
 		}
+		if _, ok := items[0]["caption_entities"]; !ok {
+			t.Fatal("album caption formatting lost")
+		}
 		return response(`{"ok":true,"result":[{"message_id":10,"photo":[{"file_id":"card"}]},{"message_id":11,"photo":[{"file_id":"real"}]}]}`), nil
 	})
-	u := &entity.Utterance{ChannelID: "42/7", QuoteMsgID: "2", Text: "这是图片", Images: [][]byte{encoded.Bytes(), encoded.Bytes()}, ImageSources: []string{"卡片原文", ""}}
+	u := &entity.Utterance{ChannelID: "42/7", QuoteMsgID: "2", Text: "**这是图片**", Images: [][]byte{encoded.Bytes(), encoded.Bytes()}, ImageSources: []string{"卡片原文", ""}}
 	if err := c.Transmit(context.Background(), u); err != nil {
 		t.Fatal(err)
 	}
