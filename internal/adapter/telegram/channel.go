@@ -73,7 +73,6 @@ type Channel struct {
 	cancel   context.CancelFunc
 	done     chan struct{}
 	ready    atomic.Bool
-	owner    string
 	bot      user
 	mu       sync.Mutex
 	recorder func(context.Context, *entity.SensoryEvent) error
@@ -147,15 +146,7 @@ func (c *Channel) Start(ctx context.Context, handler func(*entity.SensoryEvent))
 	if err := c.initQuotes(ctx); err != nil {
 		return err
 	}
-	var err error
-	c.owner, err = c.database.GetRuntimeState(ctx, "telegram", "owner_id")
-	if err != nil {
-		return err
-	}
 	pollCtx, cancel := context.WithCancel(ctx)
-	if c.owner != "" && c.immune != nil {
-		c.immune.AddPartner("tg:" + c.owner)
-	}
 	c.queue = kernel.NewDebounceManager(kernel.DebounceConfig{MergeWindow: 2 * time.Second}, handler)
 	c.cancel = cancel
 	c.stopping = false
@@ -217,22 +208,17 @@ func (c *Channel) handle(ctx context.Context, m *message, handler func(*entity.S
 	if m.ThreadID > 0 {
 		chat += "/" + strconv.FormatInt(m.ThreadID, 10)
 	}
-	if c.owner == "" && m.Chat.Type == "private" && strings.EqualFold(m.From.Username, strings.TrimPrefix(strings.TrimSpace(c.cfg.OwnerUsername), "@")) {
-		if err := c.database.SetRuntimeState(ctx, "telegram", "owner_id", id); err != nil {
-			return err
-		}
-		c.owner = id
-		if c.immune != nil {
-			c.immune.AddPartner("tg:" + id)
-		}
-		slog.Info("telegram: owner bound to numeric user ID", "userID", id)
+	ownerUsername := strings.TrimPrefix(strings.TrimSpace(c.cfg.OwnerUsername), "@")
+	isOwner := ownerUsername != "" && m.From.Username != "" && strings.EqualFold(m.From.Username, ownerUsername)
+	if c.immune != nil {
+		c.immune.SetPartner("tg:"+id, isOwner)
 	}
-	if id != c.owner && m.Chat.Type == "private" {
+	if !isOwner && m.Chat.Type == "private" {
 		username := "未设置"
 		if m.From.Username != "" {
 			username = "@" + m.From.Username
 		}
-		slog.Info("telegram: private access denied", "userID", id, "username", m.From.Username, "ownerBound", c.owner != "")
+		slog.Info("telegram: private access denied", "userID", id, "username", m.From.Username)
 		return c.sendText(ctx, chat, fmt.Sprintf("暂未开通私聊权限。\n你的 Telegram 用户名：%s\n用户 ID：%s\n请将这些账号信息提供给管理员核对授权。", username, id), m.ID, "")
 	}
 	body := strings.TrimSpace(m.Text)
@@ -259,7 +245,7 @@ func (c *Channel) handle(ctx context.Context, m *message, handler func(*entity.S
 		return c.sendText(ctx, chat, "呆呆已连接。直接和我聊天，或发送 /help 查看命令。", m.ID, "")
 	}
 	role := entity.RoleGuest
-	if id == c.owner {
+	if isOwner {
 		role = entity.RolePartner
 	}
 	event := &entity.SensoryEvent{Platform: "telegram", ChannelID: chat, IsGroup: group, SenderID: "tg:" + id, SenderName: m.From.FirstName, Role: role, Content: body, RawMessageID: strconv.FormatInt(m.ID, 10), OccurredAt: time.Now(), GroupMessageObserved: !addressed}

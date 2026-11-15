@@ -24,7 +24,6 @@ func testChannel(t *testing.T) *Channel {
 	database := db.NewManager(t.TempDir())
 	t.Cleanup(func() { database.Close() })
 	c := New(Config{OwnerUsername: "owner", Token: "private-token"}, database, nil, entity.NewImmuneSystem(""))
-	c.owner = "42"
 	c.bot = user{ID: 100, Username: "TestBot", FirstName: "呆呆"}
 	if err := c.initQuotes(context.Background()); err != nil {
 		t.Fatal(err)
@@ -108,6 +107,7 @@ func TestGroupAccessAndCommandTargets(t *testing.T) {
 	m.Chat.Type = "supergroup"
 	m.Chat.ID = -100
 	m.From.ID = 9
+	m.From.Username = "group_member"
 	m.ThreadID = 7
 	if err := c.handle(context.Background(), m, handle); err != nil {
 		t.Fatal(err)
@@ -218,9 +218,6 @@ func TestAlbumReceiptsRestoreRenderedTextAndRealImages(t *testing.T) {
 
 func TestPollingPersistsOffsetAndStops(t *testing.T) {
 	c := testChannel(t)
-	if err := c.database.SetRuntimeState(context.Background(), "telegram", "owner_id", "42"); err != nil {
-		t.Fatal(err)
-	}
 	polled := make(chan int64, 2)
 	c.http.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
 		switch {
@@ -239,7 +236,7 @@ func TestPollingPersistsOffsetAndStops(t *testing.T) {
 			}
 			polled <- payload.Offset
 			if payload.Offset == 0 {
-				return response(`{"ok":true,"result":[{"update_id":50,"message":{"message_id":1,"from":{"id":42},"chat":{"id":42,"type":"private"},"text":"/help"}}]}`), nil
+				return response(`{"ok":true,"result":[{"update_id":50,"message":{"message_id":1,"from":{"id":42,"username":"owner"},"chat":{"id":42,"type":"private"},"text":"/help"}}]}`), nil
 			}
 			<-r.Context().Done()
 			return nil, r.Context().Err()

@@ -15,7 +15,7 @@ type transportFunc func(*http.Request) (*http.Response, error)
 
 func (f transportFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func TestOwnerBindingPinsNumericIdentity(t *testing.T) {
+func TestOwnerAuthorizationFollowsConfiguredUsername(t *testing.T) {
 	database := db.NewManager(t.TempDir())
 	defer database.Close()
 	immune := entity.NewImmuneSystem("qq-owner")
@@ -35,8 +35,8 @@ func TestOwnerBindingPinsNumericIdentity(t *testing.T) {
 		t.Fatalf("owner event not authorized: %#v", events)
 	}
 	bound, err := database.GetRuntimeState(context.Background(), "telegram", "owner_id")
-	if err != nil || bound != "42" {
-		t.Fatalf("binding not persisted: %q %v", bound, err)
+	if err != nil || bound != "" {
+		t.Fatalf("unexpected persistent binding: %q %v", bound, err)
 	}
 	if immune.ResolveRole("tg:42") != entity.RolePartner || immune.ResolveRole("42") == entity.RolePartner {
 		t.Fatal("owner identity was not platform scoped")
@@ -48,17 +48,20 @@ func TestOwnerBindingPinsNumericIdentity(t *testing.T) {
 	if err := c.handle(context.Background(), m, handle); err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 2 || events[1].Role != entity.RoleGuest {
-		t.Fatal("renamed foreign user acquired pinned owner's rights")
+	if len(events) != 2 || events[1].Role != entity.RolePartner {
+		t.Fatal("configured username did not receive owner rights")
 	}
 	m.From = &user{ID: 42, Username: "renamed_owner"}
-	m.Chat.Type = "private"
-	m.Chat.ID = 42
+	m.Chat.Type = "group"
+	m.Chat.ID = -100
 	if err := c.handle(context.Background(), m, handle); err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 3 || events[2].Role != entity.RolePartner {
-		t.Fatal("owner lost access after username change")
+	if len(events) != 3 || events[2].Role != entity.RoleGuest {
+		t.Fatal("renamed account retained owner access")
+	}
+	if immune.ResolveRole("tg:42") != entity.RoleGuest {
+		t.Fatal("renamed account retained privileged tool access")
 	}
 }
 

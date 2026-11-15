@@ -13,7 +13,7 @@ qq:
 telegram:
   enabled: false
   token: "YOUR_TELEGRAM_BOT_TOKEN"
-  owner_username: "YOUR_TELEGRAM_USERNAME" # 首次私聊核对后固定绑定数字用户 ID
+  owner_username: "YOUR_TELEGRAM_USERNAME" # 每条消息按 Telegram 用户名核对，不区分大小写，可带 @ 前缀
 
 llm:
   base_url: "https://api.deepseek.com/v1"

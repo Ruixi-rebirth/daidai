@@ -32,15 +32,19 @@ func NewImmuneSystem(partnerID string, collaborators ...string) *ImmuneSystem {
 	return im
 }
 
-// AddPartner binds a verified, platform-namespaced identity to the owner role.
-func (im *ImmuneSystem) AddPartner(id string) {
+// SetPartner updates the tool authorization for a platform-verified identity.
+func (im *ImmuneSystem) SetPartner(id string, allowed bool) {
 	im.mu.Lock()
 	defer im.mu.Unlock()
 	if im.partners == nil {
 		im.partners = make(map[string]struct{})
 	}
 	if strings.TrimSpace(id) != "" {
-		im.partners[id] = struct{}{}
+		if allowed {
+			im.partners[id] = struct{}{}
+		} else {
+			delete(im.partners, id)
+		}
 	}
 }
 
