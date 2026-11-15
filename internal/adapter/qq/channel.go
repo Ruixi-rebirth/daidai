@@ -442,16 +442,18 @@ func (c *msgCache) hydrateInboundRecord(ctx context.Context, record db.QQQuoteRe
 
 // QQChannel 官方 QQ 开放平台全双工通道 (直接实现 entity.Channel，零前缀、单层架构)
 type QQChannel struct {
-	cfg            Config
-	client         *Client
-	debounce       *kernel.DebounceManager
-	immune         *entity.ImmuneSystem
-	msgCache       *msgCache
-	dedup          *dedupCache
-	inbox          *media.Inbox
-	accessRequests *db.Manager
-	stopCancel     context.CancelFunc
-	wsWG           sync.WaitGroup
+	proactivePrivate atomic.Pointer[sendObservation]
+	proactiveGroup   atomic.Pointer[sendObservation]
+	cfg              Config
+	client           *Client
+	debounce         *kernel.DebounceManager
+	immune           *entity.ImmuneSystem
+	msgCache         *msgCache
+	dedup            *dedupCache
+	inbox            *media.Inbox
+	accessRequests   *db.Manager
+	stopCancel       context.CancelFunc
+	wsWG             sync.WaitGroup
 
 	wsMu        sync.Mutex
 	wsSessionID string
@@ -1923,9 +1925,19 @@ func attachmentHistoryNote(images, omittedImages int, files, omittedFiles int) s
 }
 
 // Transmit 物理发声：投递全息表达体到 QQ 客户端 (支持大文本自动分片与图文混合发送)
-func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) error {
+func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr error) {
 	if u == nil {
 		return nil
+	}
+	if u.Proactive {
+		defer func() {
+			observation := &sendObservation{at: time.Now(), success: sendErr == nil}
+			if u.IsGroup {
+				q.proactiveGroup.Store(observation)
+			} else {
+				q.proactivePrivate.Store(observation)
+			}
+		}()
 	}
 	if q.client == nil {
 		return fmt.Errorf("QQ client is unavailable")

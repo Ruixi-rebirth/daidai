@@ -73,6 +73,10 @@ func (r *ChannelRegistry) FormatStatus() string {
 	}
 	var lines []string
 	for _, name := range names {
+		if formatter, ok := channels[name].(interface{ FormatChannelStatus() string }); ok {
+			lines = append(lines, formatter.FormatChannelStatus())
+			continue
+		}
 		state := "连接状态未知"
 		if probe, ok := channels[name].(interface{ Ready() bool }); ok {
 			if probe.Ready() {
@@ -80,10 +84,6 @@ func (r *ChannelRegistry) FormatStatus() string {
 			} else {
 				state = "未连接"
 			}
-		}
-		if name == "qq" {
-			lines = append(lines, fmt.Sprintf("- QQ 收消息网关（WebSocket）：%s；主动发送接口状态未探测", state))
-			continue
 		}
 		lines = append(lines, fmt.Sprintf("- %s：%s", name, state))
 	}
