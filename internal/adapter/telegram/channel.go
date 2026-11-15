@@ -217,7 +217,7 @@ func (c *Channel) handle(ctx context.Context, m *message, handler func(*entity.S
 	if m.ThreadID > 0 {
 		chat += "/" + strconv.FormatInt(m.ThreadID, 10)
 	}
-	if c.owner == "" && m.Chat.Type == "private" && strings.EqualFold(m.From.Username, strings.TrimPrefix(c.cfg.OwnerUsername, "@")) {
+	if c.owner == "" && m.Chat.Type == "private" && strings.EqualFold(m.From.Username, strings.TrimPrefix(strings.TrimSpace(c.cfg.OwnerUsername), "@")) {
 		if err := c.database.SetRuntimeState(ctx, "telegram", "owner_id", id); err != nil {
 			return err
 		}
@@ -228,7 +228,12 @@ func (c *Channel) handle(ctx context.Context, m *message, handler func(*entity.S
 		slog.Info("telegram: owner bound to numeric user ID", "userID", id)
 	}
 	if id != c.owner && m.Chat.Type == "private" {
-		return c.sendText(ctx, chat, "暂未开通私聊权限", m.ID, "")
+		username := "未设置"
+		if m.From.Username != "" {
+			username = "@" + m.From.Username
+		}
+		slog.Info("telegram: private access denied", "userID", id, "username", m.From.Username, "ownerBound", c.owner != "")
+		return c.sendText(ctx, chat, fmt.Sprintf("暂未开通私聊权限。\n你的 Telegram 用户名：%s\n用户 ID：%s\n请将这些账号信息提供给管理员核对授权。", username, id), m.ID, "")
 	}
 	body := strings.TrimSpace(m.Text)
 	if body == "" {
