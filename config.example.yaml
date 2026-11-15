@@ -10,6 +10,11 @@ qq:
   owner_openid: "YOUR_QQ_OPENID"
   collaborators: [] # 首次启动时导入数据库；之后通过 QQ 私聊自然语言管理协作者
 
+telegram:
+  enabled: false
+  token: "YOUR_TELEGRAM_BOT_TOKEN"
+  owner_username: "YOUR_TELEGRAM_USERNAME" # 首次私聊核对后固定绑定数字用户 ID
+
 llm:
   base_url: "https://api.deepseek.com/v1"
   api_key: "YOUR_DEEPSEEK_API_KEY"

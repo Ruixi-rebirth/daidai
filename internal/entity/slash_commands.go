@@ -45,7 +45,7 @@ func slashCommandRegistry(a *SuperAgent) []slashCommand {
 	return []slashCommand{
 		{section: "对话与会话", usage: "/help", help: "显示指令帮助卡", match: exact("/help"), handle: a.handleHelpCommand},
 		{section: "对话与会话", usage: "/continue", help: "续发未发送完的长回复", match: exact("/continue", "继续"), handle: a.handleContinueCommand},
-		{section: "对话与会话", usage: "/stop [工单编号]", help: "中断当前思考、全部后台工单或指定工单", access: "仅核心搭档/协作者", match: exact("/stop"), handle: a.handleStopCommand},
+		{section: "对话与会话", usage: "/stop [工单编号]", help: "中断当前思考、全部后台工单或指定工单", access: "仅核心搭档/协作者", match: prefix("/stop"), handle: a.handleStopCommand},
 		{section: "对话与会话", usage: "/reset · /new · /clear", help: "重开当前会话并清除近期历史", access: "仅核心搭档/协作者", match: exact("/reset", "/new", "/clear", "/ws clear", "/ws reset"), handle: a.handleResetCommand},
 		{section: "状态与模型", usage: "/status · /sysinfo", help: "查看运行状态、系统指标与活跃工单", match: exact("/status", "/sysinfo"), handle: a.handleStatusCommand},
 		{section: "状态与模型", usage: "/model", help: "查看当前对话使用的模型；此命令不会切换模型", access: "仅核心搭档/协作者", match: exact("/model"), handle: a.handleModelCommand},
@@ -82,6 +82,9 @@ func (a *SuperAgent) handleHelpCommand(ctx context.Context, event *SensoryEvent,
 	sectionNames := make([]string, 0)
 	sectionLines := make(map[string][]string)
 	for _, command := range slashCommandRegistry(a) {
+		if event.Platform == "telegram" && strings.HasPrefix(command.usage, "/voice") {
+			continue
+		}
 		if _, exists := sectionLines[command.section]; !exists {
 			sectionNames = append(sectionNames, command.section)
 		}
@@ -102,7 +105,9 @@ func (a *SuperAgent) handleHelpCommand(ctx context.Context, event *SensoryEvent,
 - 删除 / 拒绝：“删除第 1 个用户” · “撤销 [昵称] 的权限” · “拒绝第 1 个申请”
 - 邀请码管理：“生成一个好友 / 协作者邀请码” · “查看邀请码”
 - 权限说明：好友（friend，仅私聊对话）与协作者（collaborator，完整工程沙箱权限）`
-	sections = append(sections, accessSection)
+	if event.Platform == "qq" {
+		sections = append(sections, accessSection)
+	}
 
 	helpText := fmt.Sprintf("# %s · 使用帮助\n\n%s\n\n想切换模型时，直接说“切换到 <模型名称>”，例如“切换到 Gemini 3.8 Flash”。未标注权限的指令可直接使用；标注“仅核心搭档/协作者”的指令需要系统配置授权。群聊中的 slash 指令请先 @ 呆呆；普通对话中 @ 呆呆或直接称呼“呆呆”都可以。AGY 认证指令只能在私聊中使用。", a.Persona.Name, strings.Join(sections, "\n\n"))
 	if err := a.transmitInfoCard(ctx, event, "📖 指令速查", helpText); err != nil {

@@ -13,6 +13,11 @@ import (
 )
 
 type Config struct {
+	Telegram struct {
+		Enabled       bool   `yaml:"enabled"`
+		Token         string `yaml:"token"`
+		OwnerUsername string `yaml:"owner_username"`
+	} `yaml:"telegram"`
 	Server struct {
 		Port int `yaml:"port"`
 	} `yaml:"server"`
@@ -166,6 +171,9 @@ func LoadConfig(path string) (*Config, error) {
 		if len(missing) > 0 {
 			return nil, fmt.Errorf("qq.enabled requires %s", strings.Join(missing, ", "))
 		}
+	}
+	if cfg.Telegram.Enabled && (strings.TrimSpace(cfg.Telegram.Token) == "" || strings.TrimSpace(cfg.Telegram.OwnerUsername) == "") {
+		return nil, fmt.Errorf("telegram.enabled requires telegram.token and telegram.owner_username")
 	}
 	if cfg.OCI.Enabled {
 		var missing []string

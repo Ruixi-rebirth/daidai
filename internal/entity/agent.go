@@ -178,6 +178,9 @@ func (r *ChannelRegistry) Transmit(ctx context.Context, u *Utterance) error {
 	if u.IsGroup {
 		u.Text = core.RedactSensitiveIPs(u.Text)
 		u.FallbackText = core.RedactSensitiveIPs(u.FallbackText)
+		for i := range u.ImageSources {
+			u.ImageSources[i] = core.RedactSensitiveIPs(u.ImageSources[i])
+		}
 	}
 
 	ch, ok := r.Get(u.Platform)
@@ -1231,7 +1234,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 	}
 	// QQ attachments are never inspected just because they were uploaded. Ask
 	// for an explicit task before invoking vision, cognition, or any tool.
-	if event.Platform == "qq" && content == "" && (len(event.Images) > 0 || event.OmittedImages > 0 || len(event.Files) > 0 || event.OmittedFiles > 0) {
+	if (event.Platform == "qq" || event.Platform == "telegram") && content == "" && (len(event.Images) > 0 || event.OmittedImages > 0 || len(event.Files) > 0 || event.OmittedFiles > 0) {
 		attachmentCtx, attachmentCancel := context.WithCancel(ctx)
 		cancellation := &thinkCancellation{key: thinkKey(event)}
 		a.sessionCancels.Store(cancellation, attachmentCancel)
@@ -1380,7 +1383,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			if event.Platform == "qq" && event.IsGroup && !event.GroupInterjection && len(utterance.MentionUserIDs) == 0 && event.SenderID != "" {
 				utterance.MentionUserIDs = []string{event.SenderID}
 			}
-			if event.Platform == "qq" && !event.GroupInterjection && !utterance.InlineImages && !requestsTextOnly(event.Content) && strings.TrimSpace(utterance.Text) != "" {
+			if (event.Platform == "qq" || event.Platform == "telegram") && !event.GroupInterjection && !utterance.InlineImages && !requestsTextOnly(event.Content) && strings.TrimSpace(utterance.Text) != "" {
 				type automaticCardRenderer interface {
 					ShouldAutoRenderReply(string) bool
 					RenderCardPages(context.Context, *SensoryEvent, string, int) ([][]byte, error)
@@ -1391,7 +1394,10 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 						replyContent = core.RedactSensitiveIPs(replyContent)
 					}
 					if renderer.ShouldAutoRenderReply(replyContent) {
-						const maxInlineImages = 4
+						maxInlineImages := 4
+						if event.Platform == "telegram" {
+							maxInlineImages = 10
+						}
 						images := make([][]byte, 0, maxInlineImages)
 						for _, image := range utterance.Images {
 							if len(image) > 0 {
@@ -1410,6 +1416,12 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 								slog.Warn("superagent: 长回复卡片渲染失败，回退为文字", "platform", event.Platform, "channel", event.ChannelID, "err", renderErr)
 							} else {
 								utterance.InlineNonTextImageCount = len(images)
+								for len(utterance.ImageSources) < len(images) {
+									utterance.ImageSources = append(utterance.ImageSources, "")
+								}
+								for range pages {
+									utterance.ImageSources = append(utterance.ImageSources, replyContent)
+								}
 								images = append(images, pages...)
 								fallbackParts := []string{strings.TrimSpace(utterance.FallbackText), replyContent}
 								utterance.FallbackText = strings.TrimSpace(strings.Join(nonEmptyStrings(fallbackParts), "\n\n"))

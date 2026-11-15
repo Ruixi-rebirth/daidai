@@ -52,6 +52,7 @@ func (e *visionAPIError) authenticationRejected() bool {
 
 // Config 视觉引擎配置
 type Config struct {
+	Sources        *media.Sources
 	BaseURL        string
 	APIKey         string
 	Model          string
@@ -414,6 +415,9 @@ func visionUserContext(userText string, omittedImages, maxCaptionRunes int) stri
 }
 
 func (e *Engine) fetchImage(ctx context.Context, imgURL string) ([]byte, error) {
+	if data, handled, err := e.cfg.Sources.Fetch(ctx, imgURL, core.MaxImageBytes); handled {
+		return data, err
+	}
 	if err := core.ValidateTrustedMediaURL(imgURL); err != nil {
 		return nil, err
 	}

@@ -3,6 +3,7 @@ package render
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"fmt"
 	"image/png"
 	"os"
@@ -21,6 +22,9 @@ const (
 	maxRenderPNGBytes   = core.MaxImageBytes
 )
 
+//go:embed code-theme.tmTheme
+var codeTheme []byte
+
 // RenderCard 将 Markdown 文本通过 Typst 编译为排版优雅的高清 PNG 卡片图
 func RenderCard(ctx context.Context, md string) ([]byte, error) {
 	trimmed := strings.TrimSpace(md)
@@ -34,7 +38,7 @@ func RenderCard(ctx context.Context, md string) ([]byte, error) {
 	typstBody := MarkdownToTypst([]byte(trimmed))
 
 	doc := fmt.Sprintf(`#set page(
-  width: 780pt,
+  width: 680pt,
   height: auto,
   margin: (x: 28pt, top: 24pt, bottom: 28pt),
   fill: rgb("#f6f8fa")
@@ -42,24 +46,26 @@ func RenderCard(ctx context.Context, md string) ([]byte, error) {
 
 #set text(
   font: ("Twitter Color Emoji", "Maple Mono", "Source Han Sans SC"),
-  size: 13.5pt,
+  size: 18pt,
   fill: rgb("#1f2328"),
   lang: "zh"
 )
 
 #set par(justify: false, leading: 0.85em)
+#set raw(theme: "code-theme.tmTheme")
+#show raw: set text(font: ("Maple Mono", "Source Han Sans SC"), size: 1em / 0.8)
 
 #show heading: it => block(below: 10pt, above: 14pt)[
   #text(weight: "bold", fill: rgb("#0969da"))[#it.body]
 ]
 
 #show raw.where(block: true): it => block(
-  fill: rgb("#24292e"),
+  fill: rgb("#17212b"),
   inset: 12pt,
   radius: 8pt,
   width: 100%%
 )[
-  #set text(fill: rgb("#f0f6fc"), size: 11.5pt)
+  #set text(fill: rgb("#eef2f6"), size: 16pt)
   #it
 ]
 
@@ -68,7 +74,8 @@ func RenderCard(ctx context.Context, md string) ([]byte, error) {
   inset: (x: 4pt, y: 2pt),
   radius: 4pt
 )[
-  #set text(fill: rgb("#bf3989"), size: 12pt)
+  #set raw(theme: none)
+  #set text(fill: rgb("#93316a"), size: 17pt)
   #it
 ]
 
@@ -97,7 +104,7 @@ func RenderMemoryProfileCard(ctx context.Context, md string) ([]byte, error) {
 	}
 	typstBody := MarkdownToTypst([]byte(trimmed))
 	doc := fmt.Sprintf(`#set page(
-  width: 780pt,
+  width: 680pt,
   height: auto,
   margin: (x: 26pt, top: 22pt, bottom: 26pt),
   fill: rgb("#f4e9e5")
@@ -105,24 +112,26 @@ func RenderMemoryProfileCard(ctx context.Context, md string) ([]byte, error) {
 
 #set text(
   font: ("Twitter Color Emoji", "Maple Mono", "Source Han Sans SC"),
-  size: 14pt,
+  size: 18pt,
   fill: rgb("#493a3e"),
   lang: "zh"
 )
 
 #set par(justify: false, leading: 0.95em)
+#set raw(theme: "code-theme.tmTheme")
+#show raw: set text(font: ("Maple Mono", "Source Han Sans SC"), size: 1em / 0.8)
 
 #show heading: it => block(below: 9pt, above: 15pt)[
   #text(weight: "bold", fill: rgb("#ad527b"))[#it.body]
 ]
 
 #show raw.where(block: true): it => block(
-  fill: rgb("#4a3a43"),
+  fill: rgb("#17212b"),
   inset: 12pt,
   radius: 9pt,
   width: 100%%
 )[
-  #set text(fill: rgb("#fff8fb"), size: 11.5pt)
+  #set text(fill: rgb("#eef2f6"), size: 16pt)
   #it
 ]
 
@@ -131,7 +140,8 @@ func RenderMemoryProfileCard(ctx context.Context, md string) ([]byte, error) {
   inset: (x: 4pt, y: 2pt),
   radius: 4pt
 )[
-  #set text(fill: rgb("#9c426e"), size: 12pt)
+  #set raw(theme: none)
+  #set text(fill: rgb("#93316a"), size: 17pt)
   #it
 ]
 
@@ -191,6 +201,9 @@ func renderTypst(ctx context.Context, doc string) ([]byte, error) {
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 	typPath := filepath.Join(tmpDir, "card.typ")
 	pngPath := filepath.Join(tmpDir, "card.png")
+	if err := os.WriteFile(filepath.Join(tmpDir, "code-theme.tmTheme"), codeTheme, 0600); err != nil {
+		return nil, fmt.Errorf("write code theme: %w", err)
+	}
 
 	if err := os.WriteFile(typPath, []byte(doc), 0600); err != nil {
 		return nil, fmt.Errorf("write typst file failed: %w", err)

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"daidai/internal/adapter/qq"
+	"daidai/internal/adapter/telegram"
 	"daidai/internal/config"
 	"daidai/internal/core"
 	"daidai/internal/db"
@@ -204,7 +205,9 @@ func run() int {
 		Model:   embModel,
 	}))
 
+	mediaSources := &media.Sources{}
 	visEngine := vision.NewEngine(vision.Config{
+		Sources:        mediaSources,
 		BaseURL:        cfg.LLM.Vision.BaseURL,
 		APIKey:         cfg.LLM.Vision.APIKey,
 		Model:          cfg.LLM.Vision.Model,
@@ -280,6 +283,7 @@ func run() int {
 	if inboxErr != nil {
 		slog.Warn("初始化 QQ 文件附件暂存目录失败，文件处理能力不可用", "err", inboxErr)
 	} else {
+		attachmentInbox.Sources = mediaSources
 		attachmentInbox.RunCleanup(rootCtx)
 	}
 
@@ -310,6 +314,13 @@ func run() int {
 
 	// 全双工通信管道 (实现 entity.Channel)
 	channelRegistry := entity.NewChannelRegistry()
+	var telegramChannel *telegram.Channel
+	if cfg.Telegram.Enabled {
+		telegramChannel = telegram.New(telegram.Config{Token: cfg.Telegram.Token, OwnerUsername: cfg.Telegram.OwnerUsername}, database, cortex.RecordInbound, immune)
+		telegramChannel.Inbox = attachmentInbox
+		mediaSources.Register("telegram-file", telegramChannel.FetchFile)
+		channelRegistry.Register(telegramChannel)
+	}
 	var qqChannel *qq.QQChannel
 	if cfg.QQ.Enabled && cfg.QQ.AppID != "" && cfg.QQ.Secret != "" {
 		qqChannel = qq.NewQQChannel(qq.Config{
@@ -387,6 +398,14 @@ func run() int {
 			"oci_scheduler": "disabled",
 		}
 		ready := true
+		if cfg.Telegram.Enabled {
+			checks["telegram"] = "not_ready"
+			if telegramChannel != nil && telegramChannel.Ready() {
+				checks["telegram"] = "ready"
+			} else {
+				ready = false
+			}
+		}
 		if cfg.QQ.Enabled {
 			checks["qq_gateway"] = "not_ready"
 			if qqChannel != nil && qqChannel.Ready() {

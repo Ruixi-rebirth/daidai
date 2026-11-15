@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>name</key><string>Daidai Readable Dark</string>
+<key>settings</key><array>
+<dict><key>settings</key><dict><key>foreground</key><string>#EEF2F6</string><key>background</key><string>#17212B</string></dict></dict>
+<dict><key>scope</key><string>comment</string><key>settings</key><dict><key>foreground</key><string>#B6C2D1</string></dict></dict>
+<dict><key>scope</key><string>keyword, storage</string><key>settings</key><dict><key>foreground</key><string>#FFB3D1</string></dict></dict>
+<dict><key>scope</key><string>string</string><key>settings</key><dict><key>foreground</key><string>#B8E994</string></dict></dict>
+<dict><key>scope</key><string>constant</string><key>settings</key><dict><key>foreground</key><string>#FFD580</string></dict></dict>
+<dict><key>scope</key><string>entity.name, support.function, support.type</string><key>settings</key><dict><key>foreground</key><string>#8ED8FF</string></dict></dict>
+<dict><key>scope</key><string>variable</string><key>settings</key><dict><key>foreground</key><string>#EEF2F6</string></dict></dict>
+<dict><key>scope</key><string>invalid</string><key>settings</key><dict><key>foreground</key><string>#FFB4AB</string></dict></dict>
+</array></dict></plist>

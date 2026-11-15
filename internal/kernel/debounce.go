@@ -357,7 +357,8 @@ func (w *sessionWorker) processLoop() {
 				continue
 			}
 			queuedEvent := event
-			queuedEvent.event.StillValid = func() bool { return w.isCurrent(queuedEvent) }
+			upstreamValid := queuedEvent.event.StillValid
+			queuedEvent.event.StillValid = func() bool { return w.isCurrent(queuedEvent) && (upstreamValid == nil || upstreamValid()) }
 			w.handle(queuedEvent.event)
 		}
 	}

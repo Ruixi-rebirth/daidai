@@ -10,6 +10,7 @@ import (
 type ImmuneSystem struct {
 	mu            sync.RWMutex
 	partnerID     string
+	partners      map[string]struct{}
 	collaborators map[string]struct{}
 	privateUsers  map[string]struct{}
 }
@@ -18,6 +19,7 @@ type ImmuneSystem struct {
 func NewImmuneSystem(partnerID string, collaborators ...string) *ImmuneSystem {
 	im := &ImmuneSystem{
 		partnerID:     strings.TrimSpace(partnerID),
+		partners:      make(map[string]struct{}),
 		collaborators: make(map[string]struct{}),
 		privateUsers:  make(map[string]struct{}),
 	}
@@ -28,6 +30,18 @@ func NewImmuneSystem(partnerID string, collaborators ...string) *ImmuneSystem {
 		}
 	}
 	return im
+}
+
+// AddPartner binds a verified, platform-namespaced identity to the owner role.
+func (im *ImmuneSystem) AddPartner(id string) {
+	im.mu.Lock()
+	defer im.mu.Unlock()
+	if im.partners == nil {
+		im.partners = make(map[string]struct{})
+	}
+	if strings.TrimSpace(id) != "" {
+		im.partners[id] = struct{}{}
+	}
 }
 
 func (im *ImmuneSystem) AddPrivateUser(userID string) {
@@ -83,6 +97,9 @@ func (im *ImmuneSystem) ResolveRole(senderID string) UserRole {
 	defer im.mu.RUnlock()
 
 	if im.partnerID != "" && senderID == im.partnerID {
+		return RolePartner
+	}
+	if _, ok := im.partners[senderID]; ok {
 		return RolePartner
 	}
 

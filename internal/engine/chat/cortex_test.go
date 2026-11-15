@@ -92,7 +92,7 @@ func TestCortex_ThinkWithQuoteMarkdown(t *testing.T) {
 	if lastUserMsg == nil {
 		t.Fatalf("expected user message in calledWithMessages")
 	}
-	expectedQuote := "> package main\n> func main() {}"
+	expectedQuote := `"quoted_message":{"content":"package main\nfunc main() {}"}`
 	if !strings.Contains(lastUserMsg.Content, expectedQuote) {
 		t.Fatalf("expected user message to contain quote block %q, got: %s", expectedQuote, lastUserMsg.Content)
 	}

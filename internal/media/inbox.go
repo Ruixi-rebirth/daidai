@@ -32,6 +32,7 @@ const (
 
 // Inbox stores user supplied files privately for short lived AGY work.
 type Inbox struct {
+	Sources       *Sources
 	root          string
 	mu            sync.Mutex
 	pendingMu     sync.Mutex
@@ -462,7 +463,10 @@ func (i *Inbox) Store(ctx context.Context, scope string, attachments []*core.Att
 		if attachment == nil || strings.TrimSpace(attachment.URL) == "" {
 			continue
 		}
-		data, err := fetchQQAttachment(ctx, attachment.URL)
+		data, handled, err := i.Sources.Fetch(ctx, attachment.URL, core.MaxIncomingFileBytes)
+		if !handled {
+			data, err = fetchQQAttachment(ctx, attachment.URL)
+		}
 		if err != nil {
 			return nil, "", fmt.Errorf("download attachment %q: %w", safeAttachmentName(attachment.Name), err)
 		}
