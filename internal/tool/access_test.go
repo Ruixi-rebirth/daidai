@@ -181,3 +181,84 @@ func TestAccessTool_FullLifecycle(t *testing.T) {
 		t.Fatalf("expected denial for non-partner, got: %s", res.Text)
 	}
 }
+
+func TestAccessTargetResolutionRequiresUniqueIdentity(t *testing.T) {
+	pending := []resolvedTarget{{UserID: "pending-id", DisplayName: "同名", Index: 1, IsPending: true}}
+	authorized := []resolvedTarget{{UserID: "authorized-id", DisplayName: "同名", Role: "collaborator", Index: 1}}
+	if target, err := resolveAccessTarget("同名", false, pending, authorized); err == nil || target != nil {
+		t.Fatal("ambiguous nickname silently selected a user")
+	}
+	for _, prefer := range []bool{false, true} {
+		target, err := resolveAccessTarget("authorized-id", prefer, pending, authorized)
+		if err != nil || target.UserID != "authorized-id" {
+			t.Fatal("explicit OpenID did not resolve")
+		}
+	}
+	// Display names cannot capture another user's exact identity.
+	pending[0].DisplayName = "authorized-id"
+	target, err := resolveAccessTarget("authorized-id", false, pending, authorized)
+	if err != nil || target.UserID != "authorized-id" {
+		t.Fatal("nickname overrode explicit OpenID")
+	}
+	if _, err := resolveAccessTarget("第2个申请者", false, pending, append(authorized, resolvedTarget{UserID: "second-authorized", Index: 2})); err == nil {
+		t.Fatal("missing applicant fell through to authorized list")
+	}
+	if _, err := resolveAccessTarget("#2", true, append(pending, resolvedTarget{UserID: "second-pending", Index: 2, IsPending: true}), authorized); err == nil {
+		t.Fatal("out-of-range authorized index fell through to pending list")
+	}
+	target, err = resolveAccessTarget("该申请", true, pending, authorized)
+	if err != nil || target.UserID != "pending-id" {
+		t.Fatal("explicit applicant pronoun ignored")
+	}
+	target, err = resolveAccessTarget("该用户", false, pending, authorized)
+	if err != nil || target.UserID != "authorized-id" {
+		t.Fatal("explicit authorized-user pronoun ignored")
+	}
+}
+
+func TestAccessTargetDoesNotTreatStorageFailureAsEmptyList(t *testing.T) {
+	database := db.NewManager(t.TempDir())
+	defer database.Close()
+	ctx := context.Background()
+	if err := database.SetUserRole(ctx, "qq", "authorized-id", "friend", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := database.GetConn("qq")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = conn.ExecContext(ctx, "DROP TABLE private_access_requests"); err != nil {
+		t.Fatal(err)
+	}
+	access := NewAccessTool(database, entity.NewImmuneSystem("owner"))
+	target, err := access.resolveTarget(ctx, "#1", false)
+	if err == nil || target != nil || !strings.Contains(err.Error(), "读取权限申请失败") {
+		t.Fatalf("storage failure selected another list: %+v %v", target, err)
+	}
+}
+
+func TestGrantReportsEffectiveRoleWithoutImplicitDemotion(t *testing.T) {
+	database := db.NewManager(t.TempDir())
+	defer database.Close()
+	ctx := context.Background()
+	if err := database.GrantCollaborator(ctx, "qq", "existing-collaborator", "owner"); err != nil {
+		t.Fatal(err)
+	}
+	immune := entity.NewImmuneSystem("owner")
+	access := NewAccessTool(database, immune)
+	event := &entity.SensoryEvent{Platform: "qq", SenderID: "owner", ChannelID: "owner", Role: entity.RolePartner}
+	result, err := access.grant(ctx, event, "existing-collaborator", "friend")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Text, "保留现有协作者权限") {
+		t.Fatalf("misleading role confirmation: %s", result.Text)
+	}
+	if immune.ResolveRole("existing-collaborator") != entity.RoleCollaborator {
+		t.Fatal("in-memory role differs from committed effective role")
+	}
+	stored, err := database.GetUserRole(ctx, "qq", "existing-collaborator")
+	if err != nil || stored.Role != "collaborator" {
+		t.Fatal("grant silently demoted collaborator")
+	}
+}

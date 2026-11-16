@@ -279,13 +279,17 @@ func (t *AccessTool) grant(ctx context.Context, event *entity.SensoryEvent, rawU
 		return &core.ToolResult{Text: "核心搭档权限不能通过权限管理操作。"}, nil
 	}
 
-	if err := t.db.GrantUserRole(ctx, "qq", target.UserID, role, event.SenderID); err != nil {
+	effectiveRole, err := t.db.GrantUserRole(ctx, "qq", target.UserID, role, event.SenderID)
+	if err != nil {
 		return nil, fmt.Errorf("保存权限失败: %w", err)
 	}
 
-	if role == "collaborator" {
+	if effectiveRole == "collaborator" {
 		t.immune.AddCollaborator(target.UserID)
 		t.immune.AddPrivateUser(target.UserID)
+		if role != effectiveRole {
+			return &core.ToolResult{Text: fmt.Sprintf("%s 已拥有协作者权限，本次添加好友保留现有协作者权限。若要降级，请明确要求修改权限为好友。", target.displayDesc())}, nil
+		}
 		return &core.ToolResult{Text: fmt.Sprintf("已将 %s 加为 QQ 协作者，已开放完整工程沙箱与协作者权限，即时生效。", target.displayDesc())}, nil
 	}
 	t.immune.AddPrivateUser(target.UserID)
@@ -421,183 +425,89 @@ func parseApplicantIndex(s string) int {
 }
 
 func (t *AccessTool) resolveTarget(ctx context.Context, input string, preferAuthorized bool) (*resolvedTarget, error) {
+	if t.db == nil {
+		return nil, fmt.Errorf("权限管理存储未配置")
+	}
+	requests, err := t.db.ListPendingPrivateAccessRequests(ctx, "qq", 50)
+	if err != nil {
+		return nil, fmt.Errorf("读取权限申请失败，未选择用户: %w", err)
+	}
+	roles, err := t.db.ListUserRoles(ctx, "qq")
+	if err != nil {
+		return nil, fmt.Errorf("读取已授权用户失败，未选择用户: %w", err)
+	}
+	pending := make([]resolvedTarget, 0, len(requests))
+	authorized := make([]resolvedTarget, 0, len(roles))
+	for i, r := range roles {
+		authorized = append(authorized, resolvedTarget{UserID: r.UserID, DisplayName: r.DisplayName, Role: r.Role, Index: i + 1})
+	}
+	for i, r := range requests {
+		pending = append(pending, resolvedTarget{UserID: r.UserID, DisplayName: r.DisplayName, Index: i + 1, IsPending: true})
+	}
+	return resolveAccessTarget(input, preferAuthorized, pending, authorized)
+}
+
+// Identity wins over display text; names must identify exactly one person.
+// Indexes never fall through to another list when they are out of range.
+func resolveAccessTarget(input string, preferAuthorized bool, pending, authorized []resolvedTarget) (*resolvedTarget, error) {
 	input = strings.TrimSpace(input)
 	if input == "" {
 		return nil, fmt.Errorf("请提供目标用户标识（序号、昵称或 OpenID）")
 	}
-
-	var requests []db.PrivateAccessRequest
-	if t.db != nil {
-		requests, _ = t.db.ListPendingPrivateAccessRequests(ctx, "qq", 50)
-	}
-	var roles []db.UserRole
-	if t.db != nil {
-		roles, _ = t.db.ListUserRoles(ctx, "qq")
-	}
-
-	// 1. 代词模糊代指
-	cleanInput := strings.ToLower(input)
-	if cleanInput == "他" || cleanInput == "她" || cleanInput == "ta" || input == "申请者" || input == "该用户" || input == "该申请" {
-		if preferAuthorized {
-			if len(roles) == 1 {
-				return &resolvedTarget{
-					UserID:      roles[0].UserID,
-					DisplayName: roles[0].DisplayName,
-					Role:        roles[0].Role,
-					Index:       1,
-					IsPending:   false,
-				}, nil
-			}
-			if len(roles) > 1 {
-				return nil, fmt.Errorf("当前有 %d 位已授权用户，请指明序号（如 #1）或昵称", len(roles))
-			}
-		} else {
-			if len(requests) == 1 {
-				return &resolvedTarget{
-					UserID:      requests[0].UserID,
-					DisplayName: requests[0].DisplayName,
-					Index:       1,
-					IsPending:   true,
-				}, nil
-			}
-			if len(requests) > 1 {
-				return nil, fmt.Errorf("当前有 %d 位待处理申请，请指明申请序号（如 #1）或昵称", len(requests))
-			}
+	all := append(append([]resolvedTarget(nil), authorized...), pending...)
+	for _, target := range all {
+		if target.UserID == input {
+			return &target, nil
 		}
 	}
 
-	// 2. 序号解析
-	if idx := parseApplicantIndex(input); idx > 0 {
-		isUserExplicit := strings.Contains(input, "用户")
-		isReqExplicit := strings.Contains(input, "申请")
-
-		if isReqExplicit {
-			if idx <= len(requests) {
-				return &resolvedTarget{
-					UserID:      requests[idx-1].UserID,
-					DisplayName: requests[idx-1].DisplayName,
-					Index:       idx,
-					IsPending:   true,
-				}, nil
-			}
-			return nil, fmt.Errorf("未找到第 %d 个申请者（当前共有 %d 位待处理申请）", idx, len(requests))
-		}
-
-		if isUserExplicit || preferAuthorized {
-			if idx <= len(roles) {
-				return &resolvedTarget{
-					UserID:      roles[idx-1].UserID,
-					DisplayName: roles[idx-1].DisplayName,
-					Role:        roles[idx-1].Role,
-					Index:       idx,
-					IsPending:   false,
-				}, nil
-			}
-			if isUserExplicit {
-				return nil, fmt.Errorf("未找到第 %d 位已授权用户（当前共有 %d 位已授权用户）", idx, len(roles))
-			}
-		}
-
-		if !preferAuthorized && idx <= len(requests) {
-			return &resolvedTarget{
-				UserID:      requests[idx-1].UserID,
-				DisplayName: requests[idx-1].DisplayName,
-				Index:       idx,
-				IsPending:   true,
-			}, nil
-		}
-		if idx <= len(roles) {
-			return &resolvedTarget{
-				UserID:      roles[idx-1].UserID,
-				DisplayName: roles[idx-1].DisplayName,
-				Role:        roles[idx-1].Role,
-				Index:       idx,
-				IsPending:   false,
-			}, nil
-		}
-		if idx <= len(requests) {
-			return &resolvedTarget{
-				UserID:      requests[idx-1].UserID,
-				DisplayName: requests[idx-1].DisplayName,
-				Index:       idx,
-				IsPending:   true,
-			}, nil
-		}
-		return nil, fmt.Errorf("未找到序号为 #%d 的用户或申请记录", idx)
-	}
-
-	// 3. 匹配昵称
-	cleanName := strings.TrimPrefix(input, "@")
-	cleanName = strings.TrimSpace(cleanName)
-
+	list, label := pending, "待处理申请"
 	if preferAuthorized {
-		for i, r := range roles {
-			if strings.EqualFold(strings.TrimSpace(r.DisplayName), cleanName) {
-				return &resolvedTarget{
-					UserID:      r.UserID,
-					DisplayName: r.DisplayName,
-					Role:        r.Role,
-					Index:       i + 1,
-					IsPending:   false,
-				}, nil
-			}
-		}
+		list, label = authorized, "已授权用户"
 	}
-	for i, req := range requests {
-		if strings.EqualFold(strings.TrimSpace(req.DisplayName), cleanName) {
-			return &resolvedTarget{
-				UserID:      req.UserID,
-				DisplayName: req.DisplayName,
-				Index:       i + 1,
-				IsPending:   true,
-			}, nil
-		}
+	if strings.Contains(input, "申请") {
+		list, label = pending, "待处理申请"
+	} else if strings.Contains(input, "用户") {
+		list, label = authorized, "已授权用户"
 	}
-	if !preferAuthorized {
-		for i, r := range roles {
-			if strings.EqualFold(strings.TrimSpace(r.DisplayName), cleanName) {
-				return &resolvedTarget{
-					UserID:      r.UserID,
-					DisplayName: r.DisplayName,
-					Role:        r.Role,
-					Index:       i + 1,
-					IsPending:   false,
-				}, nil
-			}
+	lower := strings.ToLower(input)
+	pronoun := lower == "他" || lower == "她" || lower == "ta" || input == "申请者" || input == "该用户" || input == "该申请"
+	if pronoun {
+		if len(list) != 1 {
+			return nil, fmt.Errorf("当前有 %d 位%s，请指定完整 OpenID 或明确的名单序号", len(list), label)
 		}
+		target := list[0]
+		return &target, nil
+	}
+	if index := parseApplicantIndex(input); index > 0 {
+		if index > len(list) {
+			return nil, fmt.Errorf("未找到第 %d 位%s（当前共有 %d 位）", index, label, len(list))
+		}
+		target := list[index-1]
+		return &target, nil
 	}
 
-	// 4. 匹配完整 OpenID
-	for i, r := range roles {
-		if r.UserID == input {
-			return &resolvedTarget{
-				UserID:      r.UserID,
-				DisplayName: r.DisplayName,
-				Role:        r.Role,
-				Index:       i + 1,
-				IsPending:   false,
-			}, nil
+	name := strings.TrimSpace(strings.TrimPrefix(input, "@"))
+	var matched *resolvedTarget
+	for _, target := range all {
+		if strings.TrimSpace(target.DisplayName) == "" || !strings.EqualFold(strings.TrimSpace(target.DisplayName), name) {
+			continue
+		}
+		if matched != nil && matched.UserID != target.UserID {
+			return nil, fmt.Errorf("昵称 %q 对应多位用户，请提供完整 OpenID 或明确的名单序号", name)
+		}
+		if matched == nil {
+			copy := target
+			matched = &copy
 		}
 	}
-	for i, req := range requests {
-		if req.UserID == input {
-			return &resolvedTarget{
-				UserID:      req.UserID,
-				DisplayName: req.DisplayName,
-				Index:       i + 1,
-				IsPending:   true,
-			}, nil
-		}
+	if matched != nil {
+		return matched, nil
 	}
-
-	// 5. 回退为有效 OpenID
 	if validAccessUserID(input) {
-		return &resolvedTarget{
-			UserID: input,
-		}, nil
+		return &resolvedTarget{UserID: input}, nil
 	}
-
-	return nil, fmt.Errorf("未能匹配到用户，请核对序号（如 #1）、昵称或完整 OpenID")
+	return nil, fmt.Errorf("未能匹配到用户，请核对序号、昵称或完整 OpenID")
 }
 
 func validAccessUserID(userID string) bool {

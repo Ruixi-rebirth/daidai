@@ -427,39 +427,44 @@ func (m *Manager) GetUserRole(ctx context.Context, platform, userID string) (*Us
 }
 
 func (m *Manager) GrantCollaborator(ctx context.Context, platform, userID, grantedBy string) error {
-	return m.GrantUserRole(ctx, platform, userID, "collaborator", grantedBy)
+	_, err := m.GrantUserRole(ctx, platform, userID, "collaborator", grantedBy)
+	return err
 }
 
-func (m *Manager) GrantUserRole(ctx context.Context, platform, userID, role, grantedBy string) error {
+func (m *Manager) GrantUserRole(ctx context.Context, platform, userID, role, grantedBy string) (string, error) {
 	platform = NormPlatform(platform)
 	userID = strings.TrimSpace(userID)
 	role = strings.TrimSpace(role)
 	if platform == "" || userID == "" || (role != "friend" && role != "collaborator") {
-		return fmt.Errorf("platform, user ID, and valid role are required")
+		return "", fmt.Errorf("platform, user ID, and valid role are required")
 	}
 	conn, err := m.GetConn(platform)
 	if err != nil {
-		return err
+		return "", err
 	}
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UnixMilli()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO user_roles (platform, user_id, role, granted_by, created_at, updated_at)
+	var effectiveRole string
+	if err := tx.QueryRowContext(ctx, `INSERT INTO user_roles (platform, user_id, role, granted_by, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(platform, user_id) DO UPDATE SET
 		role = CASE WHEN user_roles.role = 'collaborator' OR excluded.role = 'collaborator' THEN 'collaborator' ELSE 'friend' END,
-		granted_by = excluded.granted_by, updated_at = excluded.updated_at`,
-		platform, userID, role, strings.TrimSpace(grantedBy), now, now); err != nil {
-		return err
+		granted_by = excluded.granted_by, updated_at = excluded.updated_at RETURNING role`,
+		platform, userID, role, strings.TrimSpace(grantedBy), now, now).Scan(&effectiveRole); err != nil {
+		return "", err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE private_access_requests SET status = 'approved', reviewed_by = ?, reviewed_at = ?
 		WHERE platform = ? AND user_id = ?`, strings.TrimSpace(grantedBy), now, platform, userID); err != nil {
-		return err
+		return "", err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return effectiveRole, nil
 }
 
 func (m *Manager) RevokeCollaborator(ctx context.Context, platform, userID, reviewer string) error {
