@@ -98,6 +98,38 @@ func TestEditorialEvidenceAndInvalidSelection(t *testing.T) {
 		t.Fatal("valid empty edition must stay empty")
 	}
 }
+func TestEditorKeepsFivePerSectionAndStableNumbering(t *testing.T) {
+	var items []Item
+	var selected []map[string]string
+	for _, source := range sources {
+		for n := 0; n < 6; n++ {
+			id := fmt.Sprintf("%s:%d", source, n)
+			items = append(items, Item{ID: id, Source: source, Title: "原始标题", URL: fmt.Sprintf("https://example.com/%s/%d", source, n), EvidenceKind: "source_body", Evidence: "可核对正文"})
+			selected = append(selected, map[string]string{"id": id, "title_zh": "中文标题", "summary_zh": "依据正文的摘要。"})
+		}
+	}
+	body, err := json.Marshal(map[string]any{"items": selected, "lead_ids": []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := &fixtureModel{reply: string(body)}
+	chosen, leads, basic := edit(context.Background(), model, items)
+	e := &Edition{}
+	finalize(e, chosen, leads)
+	if basic || len(e.Items) != 20 || model.calls.Load() != 1 {
+		t.Fatalf("unexpected editorial result: items=%d basic=%v", len(e.Items), basic)
+	}
+	for n, item := range e.Items {
+		if item.Source != sources[n/5] || item.Number != fmt.Sprintf("%02d", n+1) || item.Page != n/3+1 {
+			t.Fatalf("lost section or numbering: %+v", item)
+		}
+	}
+	index := e.Index()
+	if strings.Contains(index, "中文标题") || !strings.Contains(index, "[20 原文](https://example.com/v2ex/4)") {
+		t.Fatal("clickable index must match the cards without repeating their titles")
+	}
+}
+
 func TestCanonicalAndCrossSourceDedup(t *testing.T) {
 	a := Item{ID: "hn:1", Source: "hn", URL: "https://github.com/owner/repo?utm_source=hn#readme", DiscussionURL: "https://news.ycombinator.com/item?id=1"}
 	b := Item{ID: "github:1", RepoID: 1, Source: "github", URL: "https://github.com/owner/repo", EvidenceKind: "project_description"}
@@ -125,7 +157,7 @@ func TestStoreRecoveryAndImmutability(t *testing.T) {
 	if err = s.Touch(ctx, sub, &on); err != nil {
 		t.Fatal(err)
 	}
-	d := &Delivery{Edition: e.ID, Platform: sub.Platform, Recipient: sub.Recipient, Status: "sending"}
+	d := &Delivery{Edition: e.ID, Platform: sub.Platform, Recipient: sub.Recipient, IsGroup: sub.IsGroup, Status: "sending"}
 	if err = s.SaveDelivery(ctx, d); err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +176,7 @@ func TestStoreRecoveryAndImmutability(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	got, err := s.Delivery(ctx, e.ID, sub.Platform, sub.Recipient)
+	got, err := s.Delivery(ctx, e.ID, sub.Platform, sub.Recipient, sub.IsGroup)
 	if err != nil || got.Status != "uncertain" {
 		t.Fatalf("ambiguous send retried after restart: %+v %v", got, err)
 	}
@@ -152,11 +184,46 @@ func TestStoreRecoveryAndImmutability(t *testing.T) {
 	if err = s.Touch(ctx, sub, &off); err != nil {
 		t.Fatal(err)
 	}
-	subState, err := s.Subscription(ctx, sub.Platform, sub.Recipient)
+	subState, err := s.Subscription(ctx, sub.Platform, sub.Recipient, sub.IsGroup)
 	if err != nil || subState.Enabled {
 		t.Fatal("unsubscribe not persisted")
 	}
 }
+func TestPrivateAndGroupDeliveryStateAreIndependent(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	e := testEdition(t, s)
+	for _, group := range []bool{false, true} {
+		sub := Subscription{Platform: "qq", Recipient: "same-id", IsGroup: group, Owner: "owner"}
+		on := true
+		if err := s.Touch(ctx, sub, &on); err != nil {
+			t.Fatal(err)
+		}
+		status := "sent"
+		if group {
+			status = "partial"
+		}
+		if err := s.SaveDelivery(ctx, &Delivery{Edition: e.ID, Platform: sub.Platform, Recipient: sub.Recipient, IsGroup: group, Status: status}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Pause(ctx, "qq", "same-id", true, e.ID); err != nil {
+		t.Fatal(err)
+	}
+	private, err := s.Delivery(ctx, e.ID, "qq", "same-id", false)
+	if err != nil || private.Status != "sent" {
+		t.Fatal("group state overwrote private state")
+	}
+	group, err := s.Delivery(ctx, e.ID, "qq", "same-id", true)
+	if err != nil || group.Status != "partial" {
+		t.Fatal("group delivery lost")
+	}
+	privateSub, err := s.Subscription(ctx, "qq", "same-id", false)
+	if err != nil || privateSub.PausedDay != "" {
+		t.Fatal("group cancellation paused private delivery")
+	}
+}
+
 func fixtureCollector(t *testing.T) *Collector {
 	t.Helper()
 	now := time.Now().UTC()
@@ -275,7 +342,7 @@ func TestConcurrentRequestsGenerateOneEditionAndDeliverIndependently(t *testing.
 	case <-time.After(3 * time.Second):
 		t.Fatal("editor not reached")
 	}
-	svc.Request(Subscription{Platform: "telegram", Recipient: "2", Owner: "owner"}, false)
+	svc.Request(Subscription{Platform: "telegram", Recipient: "2", IsGroup: true, Owner: "owner"}, false)
 	svc.mu.Lock()
 	job := svc.job
 	svc.mu.Unlock()
@@ -293,8 +360,9 @@ func TestConcurrentRequestsGenerateOneEditionAndDeliverIndependently(t *testing.
 	a.mu.Unlock()
 	b.mu.Lock()
 	m := len(b.sent)
+	group := m == 1 && b.sent[0].IsGroup
 	b.mu.Unlock()
-	if n != 1 || m != 1 {
+	if n != 1 || m != 1 || !group {
 		t.Fatalf("delivery counts %d %d", n, m)
 	}
 }
@@ -332,7 +400,7 @@ func TestRequestDuringDeliveryJoinsExistingJob(t *testing.T) {
 		t.Fatal("job disappeared before delivery completed")
 	}
 	svc.Request(Subscription{Platform: "telegram", Recipient: "2", Owner: "owner"}, false)
-	if !svc.Cancel("qq", "1") {
+	if !svc.Cancel("qq", "1", false) {
 		t.Fatal("active delivery could not be canceled")
 	}
 	select {
@@ -401,7 +469,7 @@ func TestLongSummaryPreservesSentencesAndGithubPoolBalance(t *testing.T) {
 			fresh++
 		}
 	}
-	if len(pool) != 7 || fresh != 4 {
+	if len(pool) != 8 || fresh != 4 {
 		t.Fatalf("new projects crowded out: %d/%d", fresh, len(pool))
 	}
 }
@@ -457,7 +525,7 @@ func TestPassiveViewFailureUsesDurableLedger(t *testing.T) {
 	}
 	svc := testService(t, store, nil, entity.NewChannelRegistry())
 	svc.FailedView(ctx, e, sub, &entity.PartialDeliveryError{Err: errors.New("index failed"), DeliveredText: "图卡正文", UndeliveredText: "原文索引"})
-	d, err := store.Delivery(ctx, e.ID, sub.Platform, sub.Recipient)
+	d, err := store.Delivery(ctx, e.ID, sub.Platform, sub.Recipient, sub.IsGroup)
 	if err != nil || d == nil || d.Status != "partial" || d.Delivered != "图卡正文" || d.Remaining != "原文索引" {
 		t.Fatalf("passive failure not durable: %+v %v", d, err)
 	}

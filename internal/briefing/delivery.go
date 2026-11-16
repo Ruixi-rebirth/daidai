@@ -23,7 +23,7 @@ func (s *Service) deliver(parent context.Context, e *Edition, sub Subscription, 
 	s.deliveries[k] = cancel
 	s.mu.Unlock()
 	defer func() { s.mu.Lock(); delete(s.deliveries, k); s.mu.Unlock() }()
-	current, err := s.Store.Subscription(ctx, sub.Platform, sub.Recipient)
+	current, err := s.Store.Subscription(ctx, sub.Platform, sub.Recipient, sub.IsGroup)
 	if err != nil {
 		return err
 	}
@@ -31,7 +31,7 @@ func (s *Service) deliver(parent context.Context, e *Edition, sub Subscription, 
 		return fmt.Errorf("subscription disabled")
 	}
 	if mode == automaticDelivery && !s.due(s.Now()) {
-		return s.Store.SaveDelivery(ctx, &Delivery{Edition: e.ID, Platform: sub.Platform, Recipient: sub.Recipient, Status: "expired"})
+		return s.Store.SaveDelivery(ctx, &Delivery{Edition: e.ID, Platform: sub.Platform, Recipient: sub.Recipient, IsGroup: sub.IsGroup, Status: "expired"})
 	}
 	verifyCtx, verifyCancel := context.WithTimeout(ctx, 8*time.Second)
 	valid := s.Verify != nil && s.Verify(verifyCtx, *current)
@@ -39,12 +39,12 @@ func (s *Service) deliver(parent context.Context, e *Edition, sub Subscription, 
 	if !valid {
 		return s.reject(ctx, e, sub, "recipient_not_verified")
 	}
-	d, err := s.Store.Delivery(ctx, e.ID, sub.Platform, sub.Recipient)
+	d, err := s.Store.Delivery(ctx, e.ID, sub.Platform, sub.Recipient, sub.IsGroup)
 	if err != nil {
 		return err
 	}
 	if d == nil {
-		d = &Delivery{Edition: e.ID, Platform: sub.Platform, Recipient: sub.Recipient}
+		d = &Delivery{Edition: e.ID, Platform: sub.Platform, Recipient: sub.Recipient, IsGroup: sub.IsGroup}
 	}
 	if !force && !resume && (d.Status == "sent" || d.Status == "uncertain" || d.Status == "partial" || d.Status == "rejected") {
 		return nil
@@ -56,7 +56,7 @@ func (s *Service) deliver(parent context.Context, e *Edition, sub Subscription, 
 		}
 		remaining = d.Remaining
 	}
-	u := &entity.Utterance{Platform: sub.Platform, ChannelID: sub.Recipient, Proactive: true}
+	u := &entity.Utterance{Platform: sub.Platform, ChannelID: sub.Recipient, IsGroup: sub.IsGroup, Proactive: true}
 	content := e.PageText(0)
 	if resume {
 		u.Text = remaining
@@ -112,7 +112,7 @@ func (s *Service) deliver(parent context.Context, e *Edition, sub Subscription, 
 		if saveErr := s.Store.SaveDelivery(saveCtx, d); saveErr != nil {
 			return saveErr
 		}
-		if viewErr := s.Store.Viewed(saveCtx, sub.Platform, sub.Recipient, e.ID); viewErr != nil {
+		if viewErr := s.Store.Viewed(saveCtx, sub.Platform, sub.Recipient, sub.IsGroup, e.ID); viewErr != nil {
 			slog.Error("briefing: 保存展示上下文失败")
 		}
 		if s.Record != nil {
@@ -167,13 +167,13 @@ func (s *Service) failureState(d *Delivery, err error) string {
 // FailedView shares the delivery ledger with scheduled reports. The normal
 // chat path owns recording its actually delivered history.
 func (s *Service) FailedView(ctx context.Context, e *Edition, sub Subscription, sendErr error) {
-	d, err := s.Store.Delivery(ctx, e.ID, sub.Platform, sub.Recipient)
+	d, err := s.Store.Delivery(ctx, e.ID, sub.Platform, sub.Recipient, sub.IsGroup)
 	if err != nil {
 		slog.Warn("briefing: 无法读取查询投递状态")
 		return
 	}
 	if d == nil {
-		d = &Delivery{Edition: e.ID, Platform: sub.Platform, Recipient: sub.Recipient}
+		d = &Delivery{Edition: e.ID, Platform: sub.Platform, Recipient: sub.Recipient, IsGroup: sub.IsGroup}
 	}
 	d.Attempts++
 	d.Remaining = e.PageText(0)
@@ -183,12 +183,12 @@ func (s *Service) FailedView(ctx context.Context, e *Edition, sub Subscription, 
 	}
 }
 func (s *Service) reject(ctx context.Context, e *Edition, sub Subscription, kind string) error {
-	d, err := s.Store.Delivery(ctx, e.ID, sub.Platform, sub.Recipient)
+	d, err := s.Store.Delivery(ctx, e.ID, sub.Platform, sub.Recipient, sub.IsGroup)
 	if err != nil {
 		return err
 	}
 	if d == nil {
-		d = &Delivery{Edition: e.ID, Platform: sub.Platform, Recipient: sub.Recipient}
+		d = &Delivery{Edition: e.ID, Platform: sub.Platform, Recipient: sub.Recipient, IsGroup: sub.IsGroup}
 	}
 	d.Status = "rejected"
 	d.ErrorKind = kind
@@ -203,7 +203,7 @@ func (s *Service) Resend(sub Subscription, date string, full bool) string {
 		return "没有找到这期已生成的早报。"
 	}
 	if !full {
-		d, err := s.Store.Delivery(s.root, date, sub.Platform, sub.Recipient)
+		d, err := s.Store.Delivery(s.root, date, sub.Platform, sub.Recipient, sub.IsGroup)
 		if err != nil || d == nil || d.Status == "sent" || d.Remaining == "" {
 			return "这期没有可补发的剩余正文。明确说“完整再发一次”可以重新发送已有刊物。"
 		}

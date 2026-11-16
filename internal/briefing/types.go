@@ -7,11 +7,11 @@ import (
 	"time"
 )
 
-const maxItems = 12
+const maxItems = 20
 
 var sources = []string{"nixos", "hn", "github", "v2ex"}
-var limits = map[string]int{"nixos": 3, "hn": 4, "github": 3, "v2ex": 2}
-var candidateLimits = map[string]int{"nixos": 5, "hn": 8, "github": 7, "v2ex": 4}
+var limits = map[string]int{"nixos": 5, "hn": 5, "github": 5, "v2ex": 5}
+var candidateLimits = map[string]int{"nixos": 8, "hn": 8, "github": 8, "v2ex": 8}
 var labels = map[string]string{"nixos": "❄️ NixOS 生态", "hn": "🔥 Hacker News 精选", "github": "💻 GitHub 开源发现", "v2ex": "💬 V2EX 技术话题"}
 
 type Item struct {
@@ -57,6 +57,7 @@ type Edition struct {
 type Subscription struct {
 	Platform   string
 	Recipient  string
+	IsGroup    bool
 	Owner      string
 	Enabled    bool
 	LastViewed string
@@ -66,6 +67,7 @@ type Delivery struct {
 	Edition   string
 	Platform  string
 	Recipient string
+	IsGroup   bool
 	Status    string
 	Attempts  int
 	Next      time.Time
@@ -136,7 +138,7 @@ func (e *Edition) Index() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "极客早报 · %s\n", e.ID)
 	for _, i := range e.Items {
-		fmt.Fprintf(&b, "\n[%s · %s](%s)", i.Number, escape(i.Title), i.URL)
+		fmt.Fprintf(&b, "\n[%s 原文](%s)", i.Number, i.URL)
 		if i.DiscussionURL != "" {
 			fmt.Fprintf(&b, " · [讨论](%s)", i.DiscussionURL)
 		}

@@ -320,14 +320,21 @@ func run() int {
 			}
 			switch sub.Platform {
 			case "qq":
-				return cfg.QQ.Enabled && sub.Recipient == ownerOpenID
+				return cfg.QQ.Enabled && (sub.IsGroup || sub.Recipient == ownerOpenID)
 			case "telegram":
+				if sub.IsGroup {
+					return telegramChannel != nil && telegramChannel.VerifyGroup(ctx, sub.Recipient)
+				}
 				return telegramChannel != nil && telegramChannel.VerifyOwnerPrivate(ctx, sub.Recipient)
 			}
 			return false
 		}
 		briefingService.Record = func(ctx context.Context, sub briefing.Subscription, text string) {
-			if _, err := database.LogBotReply(ctx, sub.Platform, "private", sub.Recipient, text, "", 0); err != nil {
+			kind := "private"
+			if sub.IsGroup {
+				kind = "group"
+			}
+			if _, err := database.LogBotReply(ctx, sub.Platform, kind, sub.Recipient, text, "", 0); err != nil {
 				slog.Error("briefing: 保存已送达历史失败")
 			}
 		}
@@ -396,32 +403,32 @@ func run() int {
 	})
 	if briefingService != nil {
 		superAgent.OnStop = func(ctx context.Context, event *entity.SensoryEvent) bool {
-			if !event.IsPartnerPrivate() {
+			if event.Role != entity.RolePartner {
 				return false
 			}
-			if !briefingService.Cancel(event.Platform, event.ChannelID) {
+			if !briefingService.Cancel(event.Platform, event.ChannelID, event.IsGroup) {
 				return false
 			}
-			if err := briefingService.Store.Pause(ctx, event.Platform, event.ChannelID, briefingService.Now().Format("2006-01-02")); err != nil {
+			if err := briefingService.Store.Pause(ctx, event.Platform, event.ChannelID, event.IsGroup, briefingService.Now().Format("2006-01-02")); err != nil {
 				slog.Warn("briefing: 保存取消状态失败")
 			}
 			return true
 		}
 		superAgent.OnSessionReset = func(ctx context.Context, event *entity.SensoryEvent) error {
-			if !event.IsPartnerPrivate() {
+			if event.Role != entity.RolePartner {
 				return nil
 			}
-			briefingService.Cancel(event.Platform, event.ChannelID)
-			return briefingService.Store.Viewed(ctx, event.Platform, event.ChannelID, "")
+			briefingService.Cancel(event.Platform, event.ChannelID, event.IsGroup)
+			return briefingService.Store.Viewed(ctx, event.Platform, event.ChannelID, event.IsGroup, "")
 		}
 		superAgent.OnPrivateInteraction = func(ctx context.Context, event *entity.SensoryEvent) {
 			noticeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
-			id, err := briefingService.Store.LastFailure(noticeCtx, event.Platform, event.ChannelID)
+			id, err := briefingService.Store.LastFailure(noticeCtx, event.Platform, event.ChannelID, false)
 			if err != nil || id == "" {
 				return
 			}
-			d, err := briefingService.Store.Delivery(noticeCtx, id, event.Platform, event.ChannelID)
+			d, err := briefingService.Store.Delivery(noticeCtx, id, event.Platform, event.ChannelID, false)
 			if err != nil || d == nil {
 				return
 			}
@@ -441,7 +448,7 @@ func run() int {
 			if err = channelRegistry.Transmit(noticeCtx, u); err != nil {
 				return
 			}
-			if err = briefingService.Store.Notice(noticeCtx, event.Platform, event.ChannelID); err != nil {
+			if err = briefingService.Store.Notice(noticeCtx, event.Platform, event.ChannelID, false); err != nil {
 				slog.Warn("briefing: 保存异常提醒状态失败")
 			}
 			briefingService.Record(noticeCtx, briefing.Subscription{Platform: event.Platform, Recipient: event.ChannelID}, text)

@@ -33,8 +33,8 @@ type BriefingDocument struct {
 }
 
 func RenderBriefing(ctx context.Context, doc BriefingDocument) ([][]byte, error) {
-	if len(doc.Items) == 0 || len(doc.Items) > 12 {
-		return nil, fmt.Errorf("briefing requires 1–12 items")
+	if len(doc.Items) == 0 || len(doc.Items) > 20 {
+		return nil, fmt.Errorf("briefing requires 1–20 items")
 	}
 	for n, i := range doc.Items {
 		if i.Page != n/3+1 {

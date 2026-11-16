@@ -80,6 +80,25 @@ func TestTransportFailureDoesNotExposeBotToken(t *testing.T) {
 	}
 }
 
+func TestGroupVerificationUsesGroupAndPreservesTopicRouting(t *testing.T) {
+	c := New(Config{Token: "secret"}, nil, nil, nil)
+	response := `{"ok":true,"result":{"id":-100,"type":"supergroup"}}`
+	c.http.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(response))}, nil
+	})
+	if !c.VerifyGroup(context.Background(), "-100/42") {
+		t.Fatal("subscribed forum topic rejected")
+	}
+	response = `{"ok":true,"result":{"id":-101,"type":"supergroup"}}`
+	if c.VerifyGroup(context.Background(), "-100/42") {
+		t.Fatal("different group admitted")
+	}
+	response = `{"ok":true,"result":{"id":123,"type":"private"}}`
+	if c.VerifyGroup(context.Background(), "123") || c.VerifyGroup(context.Background(), "invalid/42") {
+		t.Fatal("non-group destination admitted")
+	}
+}
+
 func TestProactiveOwnerVerificationRechecksUsername(t *testing.T) {
 	c := New(Config{Token: "secret", OwnerUsername: "Ruixi_rebirth"}, nil, nil, nil)
 	response := `{"ok":true,"result":{"id":123,"type":"private","username":"ruixi_rebirth"}}`

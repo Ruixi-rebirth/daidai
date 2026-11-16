@@ -69,7 +69,9 @@ func New(ctx context.Context, store *Store, cfg config.BriefingConfig, model cor
 	root, cancel := context.WithCancel(ctx)
 	return &Service{Store: store, Collector: NewCollector(cfg.GitHubToken), Model: model, Channels: channels, loc: loc, hour: clock.Hour(), minute: clock.Minute(), root: root, cancel: cancel, deliveries: map[string]context.CancelFunc{}, renderSlot: make(chan struct{}, 1)}, nil
 }
-func key(sub Subscription) string { return sub.Platform + ":" + sub.Recipient }
+func key(sub Subscription) string {
+	return fmt.Sprintf("%s:%t:%s", sub.Platform, sub.IsGroup, sub.Recipient)
+}
 func (s *Service) Now() time.Time { return time.Now().In(s.loc) }
 func (s *Service) Schedule() string {
 	return fmt.Sprintf("每天 %02d:%02d（%s）", s.hour, s.minute, s.loc.String())
@@ -147,7 +149,7 @@ func (s *Service) tick() {
 		if !sub.Enabled || sub.PausedDay == now.Format("2006-01-02") {
 			continue
 		}
-		d, err := s.Store.Delivery(s.root, now.Format("2006-01-02"), sub.Platform, sub.Recipient)
+		d, err := s.Store.Delivery(s.root, now.Format("2006-01-02"), sub.Platform, sub.Recipient, sub.IsGroup)
 		if err != nil {
 			continue
 		}
@@ -175,10 +177,10 @@ func (s *Service) Request(sub Subscription, fullResend bool) string {
 	if err := s.Store.Touch(s.root, sub, nil); err != nil {
 		return "早报存储暂时不可用，请稍后重试。"
 	}
-	if err := s.Store.Pause(s.root, sub.Platform, sub.Recipient, ""); err != nil {
+	if err := s.Store.Pause(s.root, sub.Platform, sub.Recipient, sub.IsGroup, ""); err != nil {
 		return "无法恢复早报任务，请稍后重试。"
 	}
-	if d, err := s.Store.Delivery(s.root, s.Now().Format("2006-01-02"), sub.Platform, sub.Recipient); err != nil {
+	if d, err := s.Store.Delivery(s.root, s.Now().Format("2006-01-02"), sub.Platform, sub.Recipient, sub.IsGroup); err != nil {
 		return "无法确认已有早报的投递状态，请稍后重试。"
 	} else if d != nil && !fullResend {
 		switch d.Status {
@@ -381,10 +383,10 @@ func (s *Service) Present(ctx context.Context, e *Edition) ([][]byte, []string, 
 	}
 	return images, pageSources, nil
 }
-func (s *Service) Cancel(platform, recipient string) bool {
+func (s *Service) Cancel(platform, recipient string, group bool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	k := platform + ":" + recipient
+	k := key(Subscription{Platform: platform, Recipient: recipient, IsGroup: group})
 	found := false
 	if cancel := s.deliveries[k]; cancel != nil {
 		found = true
@@ -424,12 +426,12 @@ func (s *Service) notifyGenerationFailure(ctx context.Context, id string, target
 	}
 	for _, target := range targets {
 		sub := target.sub
-		d, err := s.Store.Delivery(save, id, sub.Platform, sub.Recipient)
+		d, err := s.Store.Delivery(save, id, sub.Platform, sub.Recipient, sub.IsGroup)
 		if err != nil {
 			continue
 		}
 		if d == nil {
-			d = &Delivery{Edition: id, Platform: sub.Platform, Recipient: sub.Recipient}
+			d = &Delivery{Edition: id, Platform: sub.Platform, Recipient: sub.Recipient, IsGroup: sub.IsGroup}
 		}
 		d.Status = "retryable"
 		if !can {

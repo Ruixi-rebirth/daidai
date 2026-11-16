@@ -1485,7 +1485,11 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 				utterance.FallbackText = core.RedactSensitiveIPs(utterance.FallbackText)
 			}
 			slog.Info("superagent: 认知合成完毕准备发声", "channel", utterance.ChannelID, "textBytes", len(utterance.Text), "hasMedia", utterance.HasMedia())
-			sendCtx, cancel := context.WithTimeout(thinkCtx, 30*time.Second)
+			sendTimeout := 30 * time.Second
+			if utterance.FixedPresentation {
+				sendTimeout = 90 * time.Second
+			}
+			sendCtx, cancel := context.WithTimeout(thinkCtx, sendTimeout)
 			deliveredText, sendErr := a.transmitUtterance(sendCtx, utterance, event.SenderID)
 			cancel()
 

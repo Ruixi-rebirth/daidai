@@ -1,8 +1,13 @@
 package qq
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"net/http"
 	"strings"
@@ -295,6 +300,85 @@ func TestQQChannel_V2MsgElementsQuoteResolution(t *testing.T) {
 	expectedQuoted := "建议采用事件驱动架构与 Actor 模型结合"
 	if capturedEvent.ReplyContext.Content != expectedQuoted {
 		t.Fatalf("expected ReplyContext %q, got %q", expectedQuoted, capturedEvent.ReplyContext.Content)
+	}
+}
+
+func TestQQSevenPageBriefingKeepsClickableIndexAndPartialState(t *testing.T) {
+	var pngData bytes.Buffer
+	if err := png.Encode(&pngData, image.NewRGBA(image.Rect(0, 0, 2, 2))); err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range []struct{ failIndex, longURL bool }{{}, {true, false}, {false, true}, {true, true}} {
+		failIndex := scenario.failIndex
+		client := NewClient("test", "test")
+		var sent []string
+		client.httpClient.Transport = qqTestTransport(func(req *http.Request) (*http.Response, error) {
+			body, status := `{}`, 200
+			header := make(http.Header)
+			switch {
+			case strings.HasSuffix(req.URL.Path, "/prepare"):
+				body = `{"upload_id":"upload","presigned_url":"https://upload.example.com/image"}`
+			case req.Method == http.MethodPut:
+				header.Set("ETag", "etag")
+			case strings.HasSuffix(req.URL.Path, "/complete"):
+				body = `{"image_id":"material","url":"qqbot-media://image/v1/material"}`
+				if scenario.longURL {
+					body = `{"image_id":"material","url":"qqbot-media://image/v1/` + strings.Repeat("x", 2100) + `"}`
+				}
+			case strings.HasSuffix(req.URL.Path, "/messages"):
+				if !strings.Contains(req.URL.Path, "/groups/") {
+					t.Error("group briefing routed to private chat")
+				}
+				var payload struct{ Markdown struct{ Content string } }
+				if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+					t.Error(err)
+				}
+				sent = append(sent, payload.Markdown.Content)
+				body = `{"id":"sent"}`
+				if failIndex && len(sent) == 2 {
+					body, status = `{"code":403}`, 403
+				}
+			}
+			return &http.Response{StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader(body))}, nil
+		})
+		images := make([][]byte, 7)
+		sources := make([]string, 7)
+		for n := range images {
+			images[n] = pngData.Bytes()
+			sources[n] = fmt.Sprintf("第%d页正文", n+1)
+		}
+		links := 100
+		if scenario.longURL {
+			links = 70
+		}
+		index := strings.Repeat("[01 原文](https://example.com/original)\n", links)
+		channel := &QQChannel{client: client}
+		err := channel.Transmit(context.Background(), &entity.Utterance{ChannelID: "group", IsGroup: true, Proactive: true, Images: images, ImageSources: sources, InlineImages: true, FallbackText: "完整早报正文", Text: index})
+		if len(sent) == 0 || (!failIndex && strings.Count(strings.Join(sent, "\n"), "qqbot-media://") != 7) {
+			t.Fatalf("images were truncated: %v", err)
+		}
+		if !scenario.longURL && strings.Count(sent[0], "qqbot-media://") != 7 {
+			t.Fatal("short references should share one message")
+		}
+		for _, payload := range sent {
+			if len(payload) > 4000 {
+				t.Fatal("message exceeds platform length limit")
+			}
+		}
+		if failIndex {
+			var partial *entity.PartialDeliveryError
+			if !errors.As(err, &partial) || !strings.Contains(partial.DeliveredText, "第1页正文") || partial.UndeliveredText == "" || strings.Contains(partial.UndeliveredText, "第1页正文") {
+				t.Fatalf("wrong partial state: %v", err)
+			}
+			if scenario.longURL && (!strings.Contains(partial.UndeliveredText, "第7页正文") || strings.Contains(partial.DeliveredText, "第7页正文")) {
+				t.Fatal("rejected image batch was marked delivered")
+			}
+		} else if err != nil || strings.Count(strings.Join(sent, "\n"), "[01 原文](https://example.com/original)") != links {
+			t.Fatalf("index was lost: %v", err)
+		}
+		if scenario.longURL && !failIndex && len(sent) <= 5 {
+			t.Fatal("proactive batches were artificially capped")
+		}
 	}
 }
 

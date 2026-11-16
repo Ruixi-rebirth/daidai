@@ -17,15 +17,16 @@ CREATE TABLE IF NOT EXISTS brief_editions(
  updated_at INTEGER NOT NULL, error_kind TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS brief_subscriptions(
  platform TEXT NOT NULL CHECK(platform IN ('qq','telegram')), recipient_id TEXT NOT NULL CHECK(length(recipient_id)>0),
+ is_group INTEGER NOT NULL CHECK(is_group IN (0,1)),
  owner_key TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),last_viewed TEXT NOT NULL DEFAULT '',paused_day TEXT NOT NULL DEFAULT '',
- updated_at INTEGER NOT NULL,PRIMARY KEY(platform,recipient_id));
+ updated_at INTEGER NOT NULL,PRIMARY KEY(platform,recipient_id,is_group));
 CREATE TABLE IF NOT EXISTS brief_deliveries(
- edition_id TEXT NOT NULL REFERENCES brief_editions(id),platform TEXT NOT NULL,recipient_id TEXT NOT NULL,
+ edition_id TEXT NOT NULL REFERENCES brief_editions(id),platform TEXT NOT NULL,recipient_id TEXT NOT NULL,is_group INTEGER NOT NULL CHECK(is_group IN (0,1)),
  status TEXT NOT NULL CHECK(status IN ('pending','sending','sent','retryable','partial','uncertain','expired','rejected')),
  attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),next_attempt INTEGER NOT NULL DEFAULT 0,
  delivered_text TEXT NOT NULL DEFAULT '',remaining_text TEXT NOT NULL DEFAULT '',error_kind TEXT NOT NULL DEFAULT '',
  notified INTEGER NOT NULL DEFAULT 0 CHECK(notified IN (0,1)),updated_at INTEGER NOT NULL,
- PRIMARY KEY(edition_id,platform,recipient_id),FOREIGN KEY(platform,recipient_id) REFERENCES brief_subscriptions(platform,recipient_id));
+ PRIMARY KEY(edition_id,platform,recipient_id,is_group),FOREIGN KEY(platform,recipient_id,is_group) REFERENCES brief_subscriptions(platform,recipient_id,is_group));
 CREATE INDEX IF NOT EXISTS brief_due ON brief_deliveries(status,next_attempt);
 `
 
@@ -136,19 +137,19 @@ func (s *Store) Touch(ctx context.Context, sub Subscription, enable *bool) error
 	if enable != nil {
 		v = *enable
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO brief_subscriptions(platform,recipient_id,owner_key,enabled,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(platform,recipient_id) DO UPDATE SET owner_key=excluded.owner_key,enabled=CASE WHEN ? THEN excluded.enabled ELSE enabled END,paused_day=CASE WHEN ? THEN '' ELSE paused_day END,updated_at=excluded.updated_at`, sub.Platform, sub.Recipient, sub.Owner, v, time.Now().UnixMilli(), enable != nil, enable != nil && v)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO brief_subscriptions(platform,recipient_id,is_group,owner_key,enabled,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(platform,recipient_id,is_group) DO UPDATE SET owner_key=excluded.owner_key,enabled=CASE WHEN ? THEN excluded.enabled ELSE enabled END,paused_day=CASE WHEN ? THEN '' ELSE paused_day END,updated_at=excluded.updated_at`, sub.Platform, sub.Recipient, sub.IsGroup, sub.Owner, v, time.Now().UnixMilli(), enable != nil, enable != nil && v)
 	return err
 }
-func (s *Store) Subscription(ctx context.Context, p, r string) (*Subscription, error) {
-	sub := &Subscription{Platform: p, Recipient: r}
-	err := s.db.QueryRowContext(ctx, `SELECT owner_key,enabled,last_viewed,paused_day FROM brief_subscriptions WHERE platform=? AND recipient_id=?`, p, r).Scan(&sub.Owner, &sub.Enabled, &sub.LastViewed, &sub.PausedDay)
+func (s *Store) Subscription(ctx context.Context, p, r string, group bool) (*Subscription, error) {
+	sub := &Subscription{Platform: p, Recipient: r, IsGroup: group}
+	err := s.db.QueryRowContext(ctx, `SELECT owner_key,enabled,last_viewed,paused_day FROM brief_subscriptions WHERE platform=? AND recipient_id=? AND is_group=?`, p, r, group).Scan(&sub.Owner, &sub.Enabled, &sub.LastViewed, &sub.PausedDay)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	return sub, err
 }
 func (s *Store) Subscriptions(ctx context.Context) ([]Subscription, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT platform,recipient_id,owner_key,enabled,last_viewed,paused_day FROM brief_subscriptions ORDER BY platform,recipient_id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT platform,recipient_id,is_group,owner_key,enabled,last_viewed,paused_day FROM brief_subscriptions ORDER BY platform,is_group,recipient_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -156,21 +157,21 @@ func (s *Store) Subscriptions(ctx context.Context) ([]Subscription, error) {
 	var out []Subscription
 	for rows.Next() {
 		var sub Subscription
-		if err = rows.Scan(&sub.Platform, &sub.Recipient, &sub.Owner, &sub.Enabled, &sub.LastViewed, &sub.PausedDay); err != nil {
+		if err = rows.Scan(&sub.Platform, &sub.Recipient, &sub.IsGroup, &sub.Owner, &sub.Enabled, &sub.LastViewed, &sub.PausedDay); err != nil {
 			return nil, err
 		}
 		out = append(out, sub)
 	}
 	return out, rows.Err()
 }
-func (s *Store) Viewed(ctx context.Context, p, r, id string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE brief_subscriptions SET last_viewed=?,updated_at=? WHERE platform=? AND recipient_id=?`, id, time.Now().UnixMilli(), p, r)
+func (s *Store) Viewed(ctx context.Context, p, r string, group bool, id string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE brief_subscriptions SET last_viewed=?,updated_at=? WHERE platform=? AND recipient_id=? AND is_group=?`, id, time.Now().UnixMilli(), p, r, group)
 	return err
 }
-func (s *Store) Delivery(ctx context.Context, id, p, r string) (*Delivery, error) {
-	d := &Delivery{Edition: id, Platform: p, Recipient: r}
+func (s *Store) Delivery(ctx context.Context, id, p, r string, group bool) (*Delivery, error) {
+	d := &Delivery{Edition: id, Platform: p, Recipient: r, IsGroup: group}
 	var next int64
-	err := s.db.QueryRowContext(ctx, `SELECT status,attempts,next_attempt,delivered_text,remaining_text,error_kind,notified FROM brief_deliveries WHERE edition_id=? AND platform=? AND recipient_id=?`, id, p, r).Scan(&d.Status, &d.Attempts, &next, &d.Delivered, &d.Remaining, &d.ErrorKind, &d.Notified)
+	err := s.db.QueryRowContext(ctx, `SELECT status,attempts,next_attempt,delivered_text,remaining_text,error_kind,notified FROM brief_deliveries WHERE edition_id=? AND platform=? AND recipient_id=? AND is_group=?`, id, p, r, group).Scan(&d.Status, &d.Attempts, &next, &d.Delivered, &d.Remaining, &d.ErrorKind, &d.Notified)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -178,19 +179,19 @@ func (s *Store) Delivery(ctx context.Context, id, p, r string) (*Delivery, error
 	return d, err
 }
 func (s *Store) SaveDelivery(ctx context.Context, d *Delivery) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO brief_deliveries(edition_id,platform,recipient_id,status,attempts,next_attempt,delivered_text,remaining_text,error_kind,notified,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(edition_id,platform,recipient_id) DO UPDATE SET status=excluded.status,attempts=excluded.attempts,next_attempt=excluded.next_attempt,delivered_text=excluded.delivered_text,remaining_text=excluded.remaining_text,error_kind=excluded.error_kind,notified=excluded.notified,updated_at=excluded.updated_at`, d.Edition, d.Platform, d.Recipient, d.Status, d.Attempts, d.Next.UnixMilli(), d.Delivered, d.Remaining, d.ErrorKind, d.Notified, time.Now().UnixMilli())
+	_, err := s.db.ExecContext(ctx, `INSERT INTO brief_deliveries(edition_id,platform,recipient_id,is_group,status,attempts,next_attempt,delivered_text,remaining_text,error_kind,notified,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(edition_id,platform,recipient_id,is_group) DO UPDATE SET status=excluded.status,attempts=excluded.attempts,next_attempt=excluded.next_attempt,delivered_text=excluded.delivered_text,remaining_text=excluded.remaining_text,error_kind=excluded.error_kind,notified=excluded.notified,updated_at=excluded.updated_at`, d.Edition, d.Platform, d.Recipient, d.IsGroup, d.Status, d.Attempts, d.Next.UnixMilli(), d.Delivered, d.Remaining, d.ErrorKind, d.Notified, time.Now().UnixMilli())
 	return err
 }
-func (s *Store) LastFailure(ctx context.Context, p, r string) (string, error) {
+func (s *Store) LastFailure(ctx context.Context, p, r string, group bool) (string, error) {
 	var id string
-	err := s.db.QueryRowContext(ctx, `SELECT edition_id FROM brief_deliveries WHERE platform=? AND recipient_id=? AND status IN ('partial','uncertain','expired','rejected') AND notified=0 ORDER BY edition_id DESC LIMIT 1`, p, r).Scan(&id)
+	err := s.db.QueryRowContext(ctx, `SELECT edition_id FROM brief_deliveries WHERE platform=? AND recipient_id=? AND is_group=? AND status IN ('partial','uncertain','expired','rejected') AND notified=0 ORDER BY edition_id DESC LIMIT 1`, p, r, group).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return id, err
 }
-func (s *Store) Notice(ctx context.Context, p, r string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE brief_deliveries SET notified=1 WHERE platform=? AND recipient_id=? AND status IN ('partial','uncertain','expired','rejected')`, p, r)
+func (s *Store) Notice(ctx context.Context, p, r string, group bool) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE brief_deliveries SET notified=1 WHERE platform=? AND recipient_id=? AND is_group=? AND status IN ('partial','uncertain','expired','rejected')`, p, r, group)
 	return err
 }
 
@@ -199,7 +200,7 @@ func (s *Store) Expire(ctx context.Context, day string, windowClosed bool) error
 	return err
 }
 
-func (s *Store) Pause(ctx context.Context, p, r, day string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE brief_subscriptions SET paused_day=? WHERE platform=? AND recipient_id=?`, day, p, r)
+func (s *Store) Pause(ctx context.Context, p, r string, group bool, day string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE brief_subscriptions SET paused_day=? WHERE platform=? AND recipient_id=? AND is_group=?`, day, p, r, group)
 	return err
 }
