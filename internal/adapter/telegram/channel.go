@@ -270,15 +270,33 @@ func (c *Channel) handle(ctx context.Context, m *message, handler func(*entity.S
 			event.ReplyContext.Content = "[用户选中的引用片段]\n" + entity.SanitizeQuotedMessageContent(m.Quote.Text)
 			event.ReplyContext.ContentComplete = false
 		}
-		for quoted := event.ReplyContext; quoted != nil; quoted = quoted.ReplyContext {
-			event.Files = append(event.Files, quoted.Files...)
+	}
+	// Persist the message's own attachments and its reference separately. A
+	// flattened processing list must never become the next stored quote node.
+	inboundRecord := recordFromEvent(event, 0)
+	currentAttachments := append(append([]*core.Attachment(nil), event.Images...), event.Files...)
+	for quoted := event.ReplyContext; quoted != nil; quoted = quoted.ReplyContext {
+		for _, attachment := range quoted.Files {
+			if attachment == nil {
+				continue
+			}
+			exists := false
+			for _, current := range event.Files {
+				if current != nil && current.URL == attachment.URL && current.SourceMessageID == attachment.SourceMessageID {
+					exists = true
+					break
+				}
+			}
+			if !exists {
+				event.Files = append(event.Files, attachment)
+			}
 		}
 	}
 	if c.Inbox != nil && addressed {
 		scope := media.AttachmentScope(event.Platform, group, chat, event.SenderID)
 		event.PendingImages, event.OmittedPendingImages = c.Inbox.PendingKind(scope, core.AttachmentImage)
 		event.PendingFiles, event.OmittedPendingFiles = c.Inbox.PendingKind(scope, core.AttachmentFile)
-		c.Inbox.RememberPending(scope, append(append([]*core.Attachment(nil), event.Images...), event.Files...))
+		c.Inbox.RememberPending(scope, currentAttachments)
 	}
 	if body == "" && len(event.Images) == 0 && len(event.Files) == 0 {
 		return nil
@@ -289,7 +307,7 @@ func (c *Channel) handle(ctx context.Context, m *message, handler func(*entity.S
 		}
 	}
 	if !entity.IsSensitiveAuthCommand(body) {
-		if err := c.storeQuote(ctx, chat, m.ID, recordFromEvent(event, 0)); err != nil {
+		if err := c.storeQuote(ctx, chat, m.ID, inboundRecord); err != nil {
 			return err
 		}
 	}

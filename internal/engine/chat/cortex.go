@@ -42,6 +42,7 @@ func quotedMessageContextFromEvent(event *entity.SensoryEvent, depth int, remain
 		return nil
 	}
 	content := entity.SanitizeQuotedMessageContent(event.Content)
+	complete := event.ContentComplete && content == strings.TrimSpace(event.Content)
 	if content == "" {
 		return nil
 	}
@@ -51,6 +52,7 @@ func quotedMessageContextFromEvent(event *entity.SensoryEvent, depth int, remain
 	}
 	contentRunes := []rune(content)
 	if len(contentRunes) > nodeBudget {
+		complete = false
 		content = string(contentRunes[:nodeBudget]) + "…"
 		*remaining -= nodeBudget
 	} else {
@@ -60,7 +62,7 @@ func quotedMessageContextFromEvent(event *entity.SensoryEvent, depth int, remain
 		Author:           strings.TrimSpace(event.SenderName),
 		Content:          content,
 		ContentKind:      event.ContentKind,
-		ContentComplete:  event.ContentComplete,
+		ContentComplete:  complete,
 		ImageObservation: core.TruncateRunes(strings.TrimSpace(event.VisionSummary), core.MaxVisionSummaryRunes, "\n[引用图片观察已截断]"),
 		OmittedImages:    event.OmittedImages,
 		OmittedFiles:     event.OmittedFiles,

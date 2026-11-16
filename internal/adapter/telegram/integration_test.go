@@ -302,3 +302,43 @@ func TestStopWaitsForActiveHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestReferencedFilesDoNotAccumulateOrBecomePendingUploads(t *testing.T) {
+	c := testChannel(t)
+	original := incoming(1, "")
+	original.Chat.ID = -100
+	original.Chat.Type = "group"
+	original.From = &user{ID: 9, Username: "member"}
+	original.Document = &file{ID: "shared-file", Name: "report.txt"}
+	var event *entity.SensoryEvent
+	handle := func(e *entity.SensoryEvent) { event = e }
+	if err := c.handle(context.Background(), original, handle); err != nil {
+		t.Fatal(err)
+	}
+	previous := original
+	for id := int64(2); id <= 4; id++ {
+		next := incoming(id, "呆呆总结引用文件")
+		next.Chat.ID = -100
+		next.Chat.Type = "group"
+		next.Reply = previous
+		if err := c.handle(context.Background(), next, handle); err != nil {
+			t.Fatal(err)
+		}
+		if len(event.Files) != 1 || !event.Files[0].Quoted {
+			t.Fatalf("reference files accumulated: %+v", event.Files)
+		}
+		record, err := c.resolveQuote(context.Background(), &message{ID: id}, "-100", true, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(record.Files) != 0 {
+			t.Fatal("quoted file persisted as a current upload")
+		}
+		scope := media.AttachmentScope("telegram", true, "-100", "tg:42")
+		pending, _ := c.Inbox.PendingKind(scope, core.AttachmentFile)
+		if len(pending) != 0 {
+			t.Fatal("someone else's quoted file entered requester's pending uploads")
+		}
+		previous = &message{ID: id, Text: next.Text, From: next.From}
+	}
+}

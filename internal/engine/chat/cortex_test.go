@@ -241,3 +241,18 @@ func TestLongReplyRetainsTail(t *testing.T) {
 		t.Fatal("full model response was not preserved")
 	}
 }
+
+func TestQuoteCompletenessReflectsPromptTruncation(t *testing.T) {
+	for _, budget := range []int{5, core.MaxQuotedMessageRunes * 2} {
+		remaining := budget
+		quote := quotedMessageContextFromEvent(&entity.SensoryEvent{Content: strings.Repeat("字", core.MaxQuotedMessageRunes+100), ContentComplete: true}, 0, &remaining)
+		if quote == nil || quote.ContentComplete {
+			t.Fatal("truncated quote was advertised as complete")
+		}
+	}
+	remaining := 100
+	quote := quotedMessageContextFromEvent(&entity.SensoryEvent{Content: "完整正文", ContentComplete: true}, 0, &remaining)
+	if !quote.ContentComplete {
+		t.Fatal("complete quote incorrectly marked partial")
+	}
+}
