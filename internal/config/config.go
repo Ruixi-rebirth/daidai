@@ -85,6 +85,15 @@ type OCIConfig struct {
 	Timezone          string  `yaml:"timezone"` // Local timezone used to format on-demand OCI bill reports.
 }
 
+// DefaultConfig 返回未启用外部通道的默认配置。
+func DefaultConfig() *Config {
+	cfg := &Config{}
+	cfg.Server.Port = 8080
+	cfg.Agent.MaxConcurrent = 1
+	cfg.Agent.ExecutionTimeout = "30m"
+	return cfg
+}
+
 // LoadConfig 从指定路径加载 yaml 配置
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -106,23 +115,24 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("config file must contain only one YAML document")
 	}
 
+	defaults := DefaultConfig()
 	if cfg.Server.Port < 0 || cfg.Server.Port > 65535 {
 		return nil, fmt.Errorf("server.port must be 0 (default) or between 1 and 65535")
 	}
 	if cfg.Server.Port == 0 {
-		cfg.Server.Port = 8080
+		cfg.Server.Port = defaults.Server.Port
 	}
 	if cfg.Agent.MaxConcurrent < 0 {
 		return nil, fmt.Errorf("agent.max_concurrent cannot be negative")
 	}
 	if cfg.Agent.MaxConcurrent == 0 {
-		cfg.Agent.MaxConcurrent = 1
+		cfg.Agent.MaxConcurrent = defaults.Agent.MaxConcurrent
 	}
 	if cfg.Memory.WorkingLimit < 0 {
 		return nil, fmt.Errorf("memory.working_limit cannot be negative")
 	}
 	if strings.TrimSpace(cfg.Agent.ExecutionTimeout) == "" {
-		cfg.Agent.ExecutionTimeout = "30m"
+		cfg.Agent.ExecutionTimeout = defaults.Agent.ExecutionTimeout
 	}
 	executionTimeout, err := time.ParseDuration(strings.TrimSpace(cfg.Agent.ExecutionTimeout))
 	if err != nil || executionTimeout < 0 {

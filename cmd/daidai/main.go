@@ -76,8 +76,7 @@ func run() int {
 	if err != nil {
 		if !explicitConfig && errors.Is(err, os.ErrNotExist) {
 			slog.Warn("默认配置文件不存在，将使用不启用 QQ 的默认配置运行", "path", cfgPath)
-			cfg = &config.Config{}
-			cfg.Server.Port = 8080
+			cfg = config.DefaultConfig()
 		} else {
 			slog.Error("配置文件无效，停止启动", "path", cfgPath, "err", err)
 			return 1
@@ -627,7 +626,10 @@ func runOCIScheduler(ctx context.Context, ociCfg config.OCIConfig, recipient str
 							message = "【OCI 每日账单】报告较长且图片渲染不可用，完整日报已保存，将在你下次私聊时送达。"
 						}
 					}
-					sendErr := channels.Transmit(ctx, &entity.Utterance{Platform: "qq", ChannelID: recipient, Proactive: true, Text: message, CardData: card})
+					sendErr := channels.Transmit(ctx, &entity.Utterance{
+						Platform: "qq", ChannelID: recipient, Proactive: true,
+						Text: message, CardData: card, FallbackText: report.Markdown,
+					})
 					if sendErr != nil {
 						pendingBody := report.Markdown
 						var partialErr *entity.PartialDeliveryError
