@@ -28,10 +28,11 @@ func TestWorkspaceTool_CurrentListAndSwitch(t *testing.T) {
 
 	immune := entity.NewImmuneSystem("partner_101")
 	wm := entity.NewWorkspaceManager(sandbox, dbMgr)
-	_, _ = wm.Switch("chan_qq_1", projA)
+	_, _ = wm.Switch("qq", "chan_qq_1", projA)
 	wsTool := NewWorkspaceTool(wm, immune)
 
 	partnerEv := &entity.SensoryEvent{
+		Platform:  "qq",
 		ChannelID: "chan_qq_1",
 		SenderID:  "partner_101",
 		Role:      entity.RolePartner,
@@ -39,6 +40,7 @@ func TestWorkspaceTool_CurrentListAndSwitch(t *testing.T) {
 	partnerCtx := entity.WithSensoryEvent(context.Background(), partnerEv)
 
 	guestEv := &entity.SensoryEvent{
+		Platform:  "qq",
 		ChannelID: "chan_qq_1",
 		SenderID:  "guest_999",
 		Role:      entity.RoleGuest,

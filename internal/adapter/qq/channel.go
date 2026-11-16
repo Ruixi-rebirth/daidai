@@ -33,9 +33,9 @@ type Config struct {
 }
 
 const (
-	// VoiceModeMulti 多语精准模式：优先大模型原生多模态倾听原声，杜绝空耳，支持中英日等多语种
+	// VoiceModeMulti 优先用多模态模型转录原音，失败时回退 QQ 提供的转录文本。
 	VoiceModeMulti = "multi"
-	// VoiceModeFast 极速模式：优先腾讯官方 ASR 毫秒级直出，适合普通中文对话
+	// VoiceModeFast 优先使用 QQ 已提供的转录文本，缺失时调用多模态转录。
 	VoiceModeFast = "fast"
 )
 
@@ -1534,7 +1534,7 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 					var recognizedText string
 					currentMode := q.GetVoiceMode()
 					if currentMode == VoiceModeFast {
-						// 极速模式：优先使用腾讯官方 ASR（0ms 延时），若无识别结果则尝试多模态转录兜底
+						// 已有官方转录时直接使用，避免重复下载和转录。
 						if asrReferText != "" {
 							slog.Info("qq: 语音消息使用极速模式 ASR 转录", "msgID", msgID, "text", asrReferText)
 							recognizedText = asrReferText
@@ -1545,7 +1545,7 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 							}
 						}
 					} else {
-						// 多语精准模式：优先调用多模态大模型原生倾听音频原声，支持全球全语种（中、英、日、韩等）且彻底杜绝平台空耳
+						// 优先转录原音；失败时仍可使用 QQ 给出的文本。
 						if audioURL != "" {
 							recognizedText = q.transcribeVoiceAudio(ctx, audioURL, fileName)
 							if recognizedText != "" {

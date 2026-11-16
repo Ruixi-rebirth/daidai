@@ -217,18 +217,18 @@ func (t *DelegateTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*c
 	}
 	if ws == "" && t.workspaces != nil && channelID != "" {
 		var err error
-		ws, _, err = t.workspaces.GetCurrentChecked(channelID)
+		ws, _, err = t.workspaces.GetCurrent(event.Platform, channelID)
 		if err != nil {
 			return &core.ToolResult{Text: fmt.Sprintf("无法确认当前工作区，已拒绝签发工单：%v", err)}, nil
 		}
 	} else if ws != "" && t.workspaces != nil {
-		currWs, _, err := t.workspaces.GetCurrentChecked(channelID)
+		currWs, _, err := t.workspaces.GetCurrent(event.Platform, channelID)
 		if err != nil {
 			return &core.ToolResult{Text: fmt.Sprintf("无法确认当前工作区，已拒绝校验目标：%v", err)}, nil
 		}
 		bookmarks := []entity.WorkspaceBookmark(nil)
 		if channelID != "" {
-			_, listedBookmarks, listErr := t.workspaces.ListBookmarkedChecked(channelID)
+			_, listedBookmarks, listErr := t.workspaces.ListBookmarked(event.Platform, channelID)
 			if listErr != nil {
 				return &core.ToolResult{Text: fmt.Sprintf("无法校验目标工作空间权限：%v", listErr)}, nil
 			}

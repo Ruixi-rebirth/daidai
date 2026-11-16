@@ -696,7 +696,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 	}
 
 	if c.workspaces != nil && event != nil && event.Role != entity.RoleGuest {
-		wsPath, wsName, wsErr := c.workspaces.GetCurrentChecked(event.ChannelID)
+		wsPath, wsName, wsErr := c.workspaces.GetCurrent(event.Platform, event.ChannelID)
 		if wsErr != nil {
 			runtimeContext.WriteString("【当前工作空间】：读取失败；无法确认工作目录。\n")
 		} else if c.workspaces.IsSandbox(wsPath) {

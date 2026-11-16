@@ -25,19 +25,25 @@ func TestWorkspaceManager_ActivationAndBookmarks(t *testing.T) {
 	wm := NewWorkspaceManager(projA, dbMgr)
 
 	// 1. 验证默认获取与自动激活
-	curr, name := wm.GetCurrent("chan_qq_1")
+	curr, name, err := wm.GetCurrent("qq", "chan_qq_1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if curr != projA || name != "project-alpha" {
 		t.Fatalf("expected default to be projA, got curr: %s, name: %s", curr, name)
 	}
 
 	// 此时书签列表仅包含 project-alpha，绝对不会包含 unactivated-project
-	_, bms := wm.ListBookmarked("chan_qq_1")
+	_, bms, err := wm.ListBookmarked("qq", "chan_qq_1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(bms) != 1 || bms[0].Path != projA || !bms[0].IsCurrent {
 		t.Fatalf("expected only projA in bookmarks, got: %+v", bms)
 	}
 
 	// 2. 激活并切入 project-beta
-	switched, err := wm.Switch("chan_qq_1", projB)
+	switched, err := wm.Switch("qq", "chan_qq_1", projB)
 	if err != nil {
 		t.Fatalf("switch to projB failed: %v", err)
 	}
@@ -46,7 +52,10 @@ func TestWorkspaceManager_ActivationAndBookmarks(t *testing.T) {
 	}
 
 	// 此时书签列表包含 project-alpha 与 project-beta，依然不包含未激活的 projC
-	currAfter, bmsAfter := wm.ListBookmarked("chan_qq_1")
+	currAfter, bmsAfter, err := wm.ListBookmarked("qq", "chan_qq_1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if currAfter != projB {
 		t.Errorf("expected current to be projB, got %s", currAfter)
 	}
@@ -55,7 +64,7 @@ func TestWorkspaceManager_ActivationAndBookmarks(t *testing.T) {
 	}
 
 	// 3. 验证通过项目名切回 project-alpha
-	switchedBack, errBack := wm.Switch("chan_qq_1", "project-alpha")
+	switchedBack, errBack := wm.Switch("qq", "chan_qq_1", "project-alpha")
 	if errBack != nil {
 		t.Fatalf("switch back by name failed: %v", errBack)
 	}
@@ -65,26 +74,63 @@ func TestWorkspaceManager_ActivationAndBookmarks(t *testing.T) {
 
 	// 4. 验证注销/移除书签
 	// 尝试注销当前激活的 projA 应被拒绝
-	errRmCurr := wm.Remove("chan_qq_1", "project-alpha")
+	errRmCurr := wm.Remove("qq", "chan_qq_1", "project-alpha")
 	if errRmCurr == nil {
 		t.Fatalf("expected error when removing currently active workspace, got nil")
 	}
 
 	// 注销非激活的 project-beta 成功
-	errRmB := wm.Remove("chan_qq_1", "project-beta")
+	errRmB := wm.Remove("qq", "chan_qq_1", "project-beta")
 	if errRmB != nil {
 		t.Fatalf("remove project-beta bookmark failed: %v", errRmB)
 	}
 
-	_, bmsFinal := wm.ListBookmarked("chan_qq_1")
+	_, bmsFinal, err := wm.ListBookmarked("qq", "chan_qq_1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(bmsFinal) != 1 || bmsFinal[0].Path != projA {
 		t.Fatalf("expected only projA after removal, got: %+v", bmsFinal)
 	}
 
 	// 5. 验证非法目录拒绝
-	_, errInvalid := wm.Switch("chan_qq_1", "nonexistent_dir_999")
+	_, errInvalid := wm.Switch("qq", "chan_qq_1", "nonexistent_dir_999")
 	if errInvalid == nil || !strings.Contains(errInvalid.Error(), "不存在") {
 		t.Errorf("expected error for nonexistent dir, got: %v", errInvalid)
+	}
+}
+
+func TestWorkspaceManagerPlatformIsolationSurvivesReload(t *testing.T) {
+	base := t.TempDir()
+	store := db.NewManager(filepath.Join(base, "db"))
+	defer store.Close()
+	defaultDir := filepath.Join(base, "sandbox")
+	projects := map[string]string{"qq": filepath.Join(base, "qq-project"), "telegram": filepath.Join(base, "tg-project")}
+	wm := NewWorkspaceManager(defaultDir, store)
+	for platform, project := range projects {
+		if err := os.MkdirAll(project, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := wm.Switch(platform, "same-channel", project); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, manager := range []*WorkspaceManager{wm, NewWorkspaceManager(defaultDir, store)} {
+		for platform, project := range projects {
+			current, _, err := manager.GetCurrent(platform, "same-channel")
+			if err != nil || current != project {
+				t.Fatalf("%s current=%q, expected=%q, error=%v", platform, current, project, err)
+			}
+			_, bookmarks, err := manager.ListBookmarked(platform, "same-channel")
+			if err != nil || len(bookmarks) != 2 {
+				t.Fatalf("%s bookmarks=%v error=%v", platform, bookmarks, err)
+			}
+			for _, bookmark := range bookmarks {
+				if bookmark.Path != defaultDir && bookmark.Path != project {
+					t.Fatalf("%s contains another platform's bookmark: %v", platform, bookmark)
+				}
+			}
+		}
 	}
 }
 
@@ -101,7 +147,7 @@ func TestWorkspaceManager_AutoPrunePhysicallyDeletedWorkspace(t *testing.T) {
 	wm := NewWorkspaceManager(sandbox, dbMgr)
 
 	// 1. 纳管 project-ghost 并切入
-	_, err := wm.Switch("chan_qq_1", projA)
+	_, err := wm.Switch("qq", "chan_qq_1", projA)
 	if err != nil {
 		t.Fatalf("switch to projA failed: %v", err)
 	}
@@ -110,13 +156,19 @@ func TestWorkspaceManager_AutoPrunePhysicallyDeletedWorkspace(t *testing.T) {
 	_ = os.RemoveAll(projA)
 
 	// 3. 验证 GetCurrent 自动降级回沙盒并清理失效的 project-ghost
-	curr, _ := wm.GetCurrent("chan_qq_1")
+	curr, _, err := wm.GetCurrent("qq", "chan_qq_1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if curr != sandbox {
 		t.Errorf("expected fallback to sandbox, got: %s", curr)
 	}
 
 	// 4. 验证 ListBookmarked 自动自愈，不再列出已物理删除的幽灵目录
-	_, bms := wm.ListBookmarked("chan_qq_1")
+	_, bms, err := wm.ListBookmarked("qq", "chan_qq_1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, b := range bms {
 		if strings.Contains(b.Path, "project-ghost") {
 			t.Errorf("expected ghost project to be pruned, but found in bookmarks: %+v", b)

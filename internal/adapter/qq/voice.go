@@ -1,6 +1,7 @@
 package qq
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -18,10 +19,11 @@ import (
 
 const (
 	maxVoiceAudioBytes = 10 << 20 // 10MB
+	maxVoiceWAVBytes   = 32 << 20
 	voiceTimeout       = 25 * time.Second
 )
 
-// transcribeVoiceAudio 在官方未提供 asr_refer_text 时，下载音频并通过 ffmpeg + agy 模型进行兜底语音转录
+// transcribeVoiceAudio 下载音频，通过 FFmpeg 规范化后交给 AGY 转录。
 func (q *QQChannel) transcribeVoiceAudio(ctx context.Context, audioURL, fileName string) string {
 	if strings.TrimSpace(audioURL) == "" {
 		return ""
@@ -59,11 +61,13 @@ func (q *QQChannel) transcribeVoiceAudio(ctx context.Context, audioURL, fileName
 	}
 
 	wavPath := filepath.Join(tmpDir, "audio.wav")
-	// 使用 ffmpeg 标准化为 16kHz 单声道 pcm_s16le WAV
-	ffmpegCmd := exec.CommandContext(callCtx, "ffmpeg", "-y", "-i", inputPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wavPath)
-	if err := ffmpegCmd.Run(); err != nil {
+	wav, err := normalizeVoiceAudio(callCtx, audioData)
+	if err != nil {
 		slog.Warn("qq: ffmpeg 转码语音音频失败，尝试直接使用原文件", "err", err)
 		wavPath = inputPath
+	} else if err := os.WriteFile(wavPath, wav, 0600); err != nil {
+		slog.Warn("qq: 保存转码语音失败", "err", err)
+		return ""
 	}
 
 	// 检查是否有 agy 多模态 CLI
@@ -97,6 +101,26 @@ func (q *QQChannel) transcribeVoiceAudio(ctx context.Context, audioURL, fileName
 	}
 
 	return strings.TrimSpace(stdout.String())
+}
+
+// normalizeVoiceAudio decodes only the supplied bytes. Formats that reference
+// other files or network resources cannot open them through FFmpeg protocols.
+func normalizeVoiceAudio(ctx context.Context, data []byte) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+		"-protocol_whitelist", "pipe,data", "-i", "pipe:0", "-vn", "-ar", "16000", "-ac", "1",
+		"-c:a", "pcm_s16le", "-f", "wav", "pipe:1")
+	cmd.Stdin = bytes.NewReader(data)
+	cmd.WaitDelay = 2 * time.Second
+	output := core.NewLimitedBuffer(maxVoiceWAVBytes)
+	stderr := core.NewLimitedBuffer(16 << 10)
+	cmd.Stdout, cmd.Stderr = output, stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("normalize voice: %s (%w)", strings.TrimSpace(stderr.String()), err)
+	}
+	if output.Truncated() {
+		return nil, fmt.Errorf("normalized voice exceeds %d byte limit", maxVoiceWAVBytes)
+	}
+	return output.Bytes(), nil
 }
 
 func fetchVoiceAudio(ctx context.Context, audioURL string) ([]byte, error) {

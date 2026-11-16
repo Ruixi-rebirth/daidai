@@ -20,12 +20,15 @@ type WorkspaceBookmark struct {
 
 // WorkspaceManager 通道级动态工作空间中枢 (SQLite 状态持久化 + 显式激活纳管 + 默认工作区与工程目录双态调度)
 type WorkspaceManager struct {
-	stateMu    sync.Mutex
-	mu         sync.RWMutex
+	mu         sync.Mutex
 	db         *db.Manager
-	platform   string
-	defaultDir string            // 默认工作区目录；目录本身不提供操作系统级隔离
-	cache      map[string]string // channelID -> currentWorkspacePath
+	defaultDir string                  // 默认工作区目录；目录本身不提供操作系统级隔离
+	cache      map[workspaceKey]string // (platform, channelID) -> currentWorkspacePath
+}
+
+type workspaceKey struct {
+	platform  string
+	channelID string
 }
 
 // ResolveSandboxDir 解析默认工作区路径；未配置或直接指向主目录根/系统根时，收敛为 ~/sandbox。
@@ -129,11 +132,6 @@ func canonicalWorkspacePath(path string) (string, error) {
 
 // NewWorkspaceManager 实例化工作空间中枢
 func NewWorkspaceManager(defaultDir string, dbMgr *db.Manager) *WorkspaceManager {
-	return NewWorkspaceManagerForPlatform("qq", defaultDir, dbMgr)
-}
-
-// NewWorkspaceManagerForPlatform 按指定平台实例化工作空间中枢
-func NewWorkspaceManagerForPlatform(platform, defaultDir string, dbMgr *db.Manager) *WorkspaceManager {
 	def := ResolveSandboxDir(defaultDir)
 	if err := os.MkdirAll(def, 0700); err != nil {
 		slog.Error("workspace: 创建默认工作区失败", "path", def, "err", err)
@@ -144,21 +142,16 @@ func NewWorkspaceManagerForPlatform(platform, defaultDir string, dbMgr *db.Manag
 	if dbMgr == nil {
 		dbMgr = db.DefaultManager()
 	}
-	plat := db.NormPlatform(platform)
-	if plat == "" {
-		plat = "qq"
-	}
 
 	return &WorkspaceManager{
 		db:         dbMgr,
-		platform:   plat,
 		defaultDir: def,
-		cache:      make(map[string]string),
+		cache:      make(map[workspaceKey]string),
 	}
 }
 
 // ExecuteAction 统一执行工作空间查询与变更指令 (供控制面 Slash 指令与 switch_workspace 工具共同复用，消除重复逻辑与鉴权遗漏)
-func (wm *WorkspaceManager) ExecuteAction(channelID string, role UserRole, immune *ImmuneSystem, action, target string, delegates ...*Delegates) string {
+func (wm *WorkspaceManager) ExecuteAction(platform, channelID string, role UserRole, immune *ImmuneSystem, action, target string, delegates ...*Delegates) string {
 	if immune == nil {
 		return "权限校验未配置，拒绝执行工作空间操作"
 	}
@@ -178,13 +171,13 @@ func (wm *WorkspaceManager) ExecuteAction(channelID string, role UserRole, immun
 
 	switch action {
 	case "current":
-		return wm.FormatCurrent(channelID)
+		return wm.FormatCurrent(platform, channelID)
 
 	case "list":
-		return wm.FormatList(channelID)
+		return wm.FormatList(platform, channelID)
 
 	case "exit":
-		newPath, err := wm.Switch(channelID, "sandbox")
+		newPath, err := wm.Switch(platform, channelID, "sandbox")
 		if err != nil {
 			return fmt.Sprintf("退出工程失败：%v", err)
 		}
@@ -206,7 +199,7 @@ func (wm *WorkspaceManager) ExecuteAction(channelID string, role UserRole, immun
 		if target == "" {
 			return "请指定要注销的目标工作空间路径或工程名"
 		}
-		if err := wm.Remove(channelID, target); err != nil {
+		if err := wm.Remove(platform, channelID, target); err != nil {
 			return fmt.Sprintf("注销工作空间失败：%v", err)
 		}
 		return fmt.Sprintf("### 工作空间书签已注销\n\n已成功注销书签：`%s`\n\n> 提示：仅从书签索引中解绑，磁盘上的物理代码文件完好保留。", target)
@@ -215,7 +208,7 @@ func (wm *WorkspaceManager) ExecuteAction(channelID string, role UserRole, immun
 		if target == "" {
 			return "请指定要切换的目标工作空间路径或工程名"
 		}
-		newPath, err := wm.Switch(channelID, target)
+		newPath, err := wm.Switch(platform, channelID, target)
 		if err != nil {
 			return fmt.Sprintf("切换工作空间失败：%v", err)
 		}
@@ -244,15 +237,6 @@ func (wm *WorkspaceManager) IsSandbox(path string) bool {
 		defaultDir = real
 	}
 	return clean == defaultDir
-}
-
-// CurrentMode 获取指定通道当前的运行模式名称 ("默认工作区" 或 "生产工程态")
-func (wm *WorkspaceManager) CurrentMode(channelID string) string {
-	curr, _ := wm.GetCurrent(channelID)
-	if wm.IsSandbox(curr) {
-		return "默认工作区"
-	}
-	return "生产工程态"
 }
 
 // SandboxDir 获取沙盒目录绝对路径
@@ -312,72 +296,54 @@ func (wm *WorkspaceManager) CleanSandbox() error {
 	return nil
 }
 
-// GetCurrent 获取指定通道当前激活的工作空间路径与项目名
-func (wm *WorkspaceManager) GetCurrent(channelID string) (string, string) {
-	path, name, err := wm.GetCurrentChecked(channelID)
-	if err != nil {
-		slog.Warn("workspace: 无法确认活动工作区，回退默认目录", "channelID", channelID, "err", err)
-		return wm.defaultDir, filepath.Base(wm.defaultDir)
-	}
-	return path, name
+// GetCurrent 获取当前工作区；无法读取持久状态时返回错误，不静默改用默认目录。
+func (wm *WorkspaceManager) GetCurrent(platform, channelID string) (string, string, error) {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	return wm.getCurrent(platform, channelID)
 }
 
-// GetCurrentChecked 获取当前工作区；无法读取持久状态时返回错误，不静默改用默认目录。
-func (wm *WorkspaceManager) GetCurrentChecked(channelID string) (string, string, error) {
-	wm.stateMu.Lock()
-	defer wm.stateMu.Unlock()
-	return wm.getCurrent(channelID)
-}
-
-func (wm *WorkspaceManager) getCurrent(channelID string) (string, string, error) {
+func (wm *WorkspaceManager) getCurrent(platform, channelID string) (string, string, error) {
 	channelID = strings.TrimSpace(channelID)
 	if channelID == "" {
 		return wm.defaultDir, filepath.Base(wm.defaultDir), nil
 	}
 
-	wm.mu.RLock()
-	cached, ok := wm.cache[channelID]
-	wm.mu.RUnlock()
+	cached, ok := wm.cache[workspaceKey{db.NormPlatform(platform), channelID}]
 
 	if ok && cached != "" {
 		resolved, pathErr := canonicalWorkspacePath(cached)
 		if pathErr == nil {
 			st, statErr := os.Stat(resolved)
 			if statErr == nil && st.IsDir() {
-				wm.mu.Lock()
-				wm.cache[channelID] = resolved
-				wm.mu.Unlock()
+				wm.cache[workspaceKey{db.NormPlatform(platform), channelID}] = resolved
 				return resolved, filepath.Base(resolved), nil
 			}
 			if statErr != nil && !os.IsNotExist(statErr) {
 				return "", "", fmt.Errorf("检查缓存工作区失败: %w", statErr)
 			}
 		}
-		wm.mu.Lock()
-		delete(wm.cache, channelID)
-		wm.mu.Unlock()
+		delete(wm.cache, workspaceKey{db.NormPlatform(platform), channelID})
 	}
 
 	// 从 SQLite 状态表中拉取
 	if wm.db != nil {
-		active, err := wm.db.GetActiveWorkspace(wm.platform, channelID)
+		active, err := wm.db.GetActiveWorkspace(platform, channelID)
 		if err != nil {
 			return "", "", fmt.Errorf("读取活动工作区失败: %w", err)
 		}
 		if active != nil && active.Path != "" {
 			cleanActive, pathErr := canonicalWorkspacePath(active.Path)
 			if pathErr != nil || (strings.EqualFold(active.ProjectName, "sandbox") && cleanActive != wm.defaultDir) {
-				if removeErr := wm.db.RemoveChannelWorkspace(wm.platform, channelID, active.Path); removeErr != nil {
+				if removeErr := wm.db.RemoveChannelWorkspace(platform, channelID, active.Path); removeErr != nil {
 					return "", "", fmt.Errorf("清理无效活动工作区失败: %w", removeErr)
 				}
 			} else if st, sErr := os.Stat(cleanActive); sErr == nil && st.IsDir() {
-				wm.mu.Lock()
-				wm.cache[channelID] = cleanActive
-				wm.mu.Unlock()
+				wm.cache[workspaceKey{db.NormPlatform(platform), channelID}] = cleanActive
 				return cleanActive, filepath.Base(cleanActive), nil
 			} else if sErr == nil || os.IsNotExist(sErr) {
 				// 物理目录已不存在，自动自愈剔除失效记录
-				if removeErr := wm.db.RemoveChannelWorkspace(wm.platform, channelID, active.Path); removeErr != nil {
+				if removeErr := wm.db.RemoveChannelWorkspace(platform, channelID, active.Path); removeErr != nil {
 					return "", "", fmt.Errorf("清理失效活动工作区失败: %w", removeErr)
 				}
 			} else {
@@ -389,20 +355,18 @@ func (wm *WorkspaceManager) getCurrent(channelID string) (string, string, error)
 	// 兜底并自动激活默认目录
 	def := wm.defaultDir
 	if wm.db != nil {
-		if err := wm.db.SetActiveWorkspace(wm.platform, channelID, def, filepath.Base(def)); err != nil {
+		if err := wm.db.SetActiveWorkspace(platform, channelID, def, filepath.Base(def)); err != nil {
 			return "", "", fmt.Errorf("保存默认工作区状态失败: %w", err)
 		}
 	}
-	wm.mu.Lock()
-	wm.cache[channelID] = def
-	wm.mu.Unlock()
+	wm.cache[workspaceKey{db.NormPlatform(platform), channelID}] = def
 	return def, filepath.Base(def), nil
 }
 
 // Switch 显式切换并激活指定通道的工作空间目录 (支持绝对路径、相对路径、家目录波浪号及已纳管项目名)
-func (wm *WorkspaceManager) Switch(channelID, target string) (string, error) {
-	wm.stateMu.Lock()
-	defer wm.stateMu.Unlock()
+func (wm *WorkspaceManager) Switch(platform, channelID, target string) (string, error) {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
 
 	channelID = strings.TrimSpace(channelID)
 	target = strings.TrimSpace(target)
@@ -410,7 +374,7 @@ func (wm *WorkspaceManager) Switch(channelID, target string) (string, error) {
 		return "", fmt.Errorf("目标工作空间路径不可为空")
 	}
 
-	currPath, _, err := wm.getCurrent(channelID)
+	currPath, _, err := wm.getCurrent(platform, channelID)
 	if err != nil {
 		return "", fmt.Errorf("无法确认当前工作区: %w", err)
 	}
@@ -439,7 +403,7 @@ func (wm *WorkspaceManager) Switch(channelID, target string) (string, error) {
 		} else {
 			var matched []WorkspaceBookmark
 			if wm.db != nil {
-				list, lErr := wm.db.ListChannelWorkspaces(wm.platform, channelID)
+				list, lErr := wm.db.ListChannelWorkspaces(platform, channelID)
 				if lErr != nil {
 					return "", fmt.Errorf("读取工作空间书签失败: %w", lErr)
 				}
@@ -449,7 +413,7 @@ func (wm *WorkspaceManager) Switch(channelID, target string) (string, error) {
 					}
 					canonicalPath, pathErr := canonicalWorkspacePath(entry.Path)
 					if pathErr != nil {
-						if removeErr := wm.db.RemoveChannelWorkspace(wm.platform, channelID, entry.Path); removeErr != nil {
+						if removeErr := wm.db.RemoveChannelWorkspace(platform, channelID, entry.Path); removeErr != nil {
 							return "", fmt.Errorf("清理无效工作空间书签失败: %w", removeErr)
 						}
 						continue
@@ -458,7 +422,7 @@ func (wm *WorkspaceManager) Switch(channelID, target string) (string, error) {
 					if statErr == nil && st.IsDir() {
 						matched = append(matched, WorkspaceBookmark{Path: entry.Path, ProjectName: entry.ProjectName})
 					} else if statErr == nil || os.IsNotExist(statErr) {
-						if removeErr := wm.db.RemoveChannelWorkspace(wm.platform, channelID, entry.Path); removeErr != nil {
+						if removeErr := wm.db.RemoveChannelWorkspace(platform, channelID, entry.Path); removeErr != nil {
 							return "", fmt.Errorf("清理失效工作空间书签失败: %w", removeErr)
 						}
 					} else {
@@ -499,22 +463,20 @@ func (wm *WorkspaceManager) Switch(channelID, target string) (string, error) {
 	projectName := filepath.Base(resolved)
 
 	if wm.db != nil {
-		if err := wm.db.SetActiveWorkspace(wm.platform, channelID, resolved, projectName); err != nil {
+		if err := wm.db.SetActiveWorkspace(platform, channelID, resolved, projectName); err != nil {
 			return "", fmt.Errorf("保存工作空间状态失败: %w", err)
 		}
 	}
 
-	wm.mu.Lock()
-	wm.cache[channelID] = resolved
-	wm.mu.Unlock()
+	wm.cache[workspaceKey{db.NormPlatform(platform), channelID}] = resolved
 
 	return resolved, nil
 }
 
 // Remove 从通道书签列表中注销指定工作空间 (物理文件完好保留)
-func (wm *WorkspaceManager) Remove(channelID, target string) error {
-	wm.stateMu.Lock()
-	defer wm.stateMu.Unlock()
+func (wm *WorkspaceManager) Remove(platform, channelID, target string) error {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
 
 	channelID = strings.TrimSpace(channelID)
 	target = strings.TrimSpace(target)
@@ -522,14 +484,14 @@ func (wm *WorkspaceManager) Remove(channelID, target string) error {
 		return fmt.Errorf("目标工作空间不可为空")
 	}
 
-	currPath, _, err := wm.getCurrent(channelID)
+	currPath, _, err := wm.getCurrent(platform, channelID)
 	if err != nil {
 		return fmt.Errorf("无法确认当前工作区: %w", err)
 	}
 	if wm.db == nil {
 		return fmt.Errorf("工作空间书签存储未配置")
 	}
-	entries, err := wm.db.ListChannelWorkspaces(wm.platform, channelID)
+	entries, err := wm.db.ListChannelWorkspaces(platform, channelID)
 	if err != nil {
 		return fmt.Errorf("读取工作空间书签失败: %w", err)
 	}
@@ -595,30 +557,20 @@ func (wm *WorkspaceManager) Remove(channelID, target string) error {
 		return fmt.Errorf("无法注销当前正在激活中的工作空间 (%s)，请先切入其他项目或回退至默认工作区后再注销", targetPath)
 	}
 
-	return wm.db.RemoveChannelWorkspace(wm.platform, channelID, targetPath)
+	return wm.db.RemoveChannelWorkspace(platform, channelID, targetPath)
 }
 
-// ListBookmarked 获取当前通道已激活纳管的工作空间书签列表。
-// 数据库读取失败时保留旧接口行为，同时记录错误；需要区分错误的调用方应使用 ListBookmarkedChecked。
-func (wm *WorkspaceManager) ListBookmarked(channelID string) (currentPath string, bookmarks []WorkspaceBookmark) {
-	currentPath, bookmarks, err := wm.ListBookmarkedChecked(channelID)
-	if err != nil {
-		slog.Warn("workspace: 读取书签列表失败", "channelID", channelID, "err", err)
-	}
-	return currentPath, bookmarks
-}
-
-// ListBookmarkedChecked 获取当前通道书签列表，并将数据库读取错误返回给调用方。
-func (wm *WorkspaceManager) ListBookmarkedChecked(channelID string) (currentPath string, bookmarks []WorkspaceBookmark, err error) {
-	wm.stateMu.Lock()
-	defer wm.stateMu.Unlock()
-	currentPath, _, err = wm.getCurrent(channelID)
+// ListBookmarked 获取当前通道书签列表，并将数据库读取错误返回给调用方。
+func (wm *WorkspaceManager) ListBookmarked(platform, channelID string) (currentPath string, bookmarks []WorkspaceBookmark, err error) {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	currentPath, _, err = wm.getCurrent(platform, channelID)
 	if err != nil {
 		return "", nil, fmt.Errorf("无法确认当前工作区: %w", err)
 	}
 
 	if wm.db != nil {
-		entries, listErr := wm.db.ListChannelWorkspaces(wm.platform, channelID)
+		entries, listErr := wm.db.ListChannelWorkspaces(platform, channelID)
 		if listErr != nil {
 			return currentPath, nil, fmt.Errorf("读取工作空间书签失败: %w", listErr)
 		}
@@ -626,7 +578,7 @@ func (wm *WorkspaceManager) ListBookmarkedChecked(channelID string) (currentPath
 		for _, e := range entries {
 			canonicalPath, pathErr := canonicalWorkspacePath(e.Path)
 			if pathErr != nil {
-				if removeErr := wm.db.RemoveChannelWorkspace(wm.platform, channelID, e.Path); removeErr != nil {
+				if removeErr := wm.db.RemoveChannelWorkspace(platform, channelID, e.Path); removeErr != nil {
 					return currentPath, nil, fmt.Errorf("清理无效工作空间书签失败: %w", removeErr)
 				}
 				continue
@@ -637,7 +589,7 @@ func (wm *WorkspaceManager) ListBookmarkedChecked(channelID string) (currentPath
 					return currentPath, nil, fmt.Errorf("检查工作空间书签失败: %w", statErr)
 				}
 				if statErr != nil || !st.IsDir() {
-					if removeErr := wm.db.RemoveChannelWorkspace(wm.platform, channelID, e.Path); removeErr != nil {
+					if removeErr := wm.db.RemoveChannelWorkspace(platform, channelID, e.Path); removeErr != nil {
 						return currentPath, nil, fmt.Errorf("清理失效工作空间书签失败: %w", removeErr)
 					}
 					continue
@@ -673,8 +625,8 @@ func (wm *WorkspaceManager) ListBookmarkedChecked(channelID string) (currentPath
 }
 
 // FormatCurrent 生成当前激活工作空间的优雅 Markdown 摘要
-func (wm *WorkspaceManager) FormatCurrent(channelID string) string {
-	curr, name, err := wm.GetCurrentChecked(channelID)
+func (wm *WorkspaceManager) FormatCurrent(platform, channelID string) string {
+	curr, name, err := wm.GetCurrent(platform, channelID)
 	if err != nil {
 		return fmt.Sprintf("无法确认当前工作区：%v", err)
 	}
@@ -700,8 +652,8 @@ func (wm *WorkspaceManager) FormatCurrent(channelID string) string {
 }
 
 // FormatList 生成已纳管工作空间书签清单的结构化 Markdown
-func (wm *WorkspaceManager) FormatList(channelID string) string {
-	curr, bookmarks, err := wm.ListBookmarkedChecked(channelID)
+func (wm *WorkspaceManager) FormatList(platform, channelID string) string {
+	curr, bookmarks, err := wm.ListBookmarked(platform, channelID)
 	if err != nil {
 		return fmt.Sprintf("无法读取工作空间书签列表：%v", err)
 	}

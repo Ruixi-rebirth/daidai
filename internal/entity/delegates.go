@@ -926,7 +926,7 @@ func (d *Delegates) AbortAllContext(ctx context.Context) int {
 }
 
 // ResetSession 重置指定通道在指定工作空间下的所有 Worker 内部会话状态 (例如 AGY 的 ConversationID)
-func (d *Delegates) ResetSession(channelID, workspace string) error {
+func (d *Delegates) ResetSession(platform, channelID, workspace string) error {
 	d.mu.RLock()
 	workers := make([]Worker, 0, len(d.order))
 	for _, name := range d.order {
@@ -938,15 +938,11 @@ func (d *Delegates) ResetSession(channelID, workspace string) error {
 
 	for _, w := range workers {
 		if r, ok := w.(interface {
-			ResetSession(channelID, cwd string) error
+			ResetSession(platform, channelID, cwd string) error
 		}); ok {
-			if err := r.ResetSession(channelID, workspace); err != nil {
+			if err := r.ResetSession(platform, channelID, workspace); err != nil {
 				return fmt.Errorf("重置工作者 %s 会话失败: %w", w.Name(), err)
 			}
-			continue
-		}
-		if r, ok := w.(interface{ ResetSession(channelID, cwd string) }); ok {
-			r.ResetSession(channelID, workspace)
 		}
 	}
 	return nil

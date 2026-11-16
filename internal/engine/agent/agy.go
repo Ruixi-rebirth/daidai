@@ -32,6 +32,7 @@ type AgySessionState struct {
 }
 
 type agySessionKey struct {
+	platform    string
 	requesterID string
 	channelID   string
 	cwd         string
@@ -57,7 +58,6 @@ type AGYWorkerConfig struct {
 	Provider    *llm.AGYMindProvider
 	Router      *llm.MindRouter
 	SessionDB   *db.Manager
-	Platform    string
 }
 
 // AGYWorker 实现 entity.Worker 接口，在所选工作目录中启动 AGY CLI。
@@ -70,7 +70,6 @@ type AGYWorker struct {
 	provider    *llm.AGYMindProvider
 	router      *llm.MindRouter
 	sessionDB   *db.Manager
-	platform    string
 }
 
 // NewAGYWorker 实例化 AGY 工作区执行器
@@ -99,7 +98,6 @@ func NewAGYWorkerWithConfig(cfg AGYWorkerConfig) *AGYWorker {
 		provider:    cfg.Provider,
 		router:      cfg.Router,
 		sessionDB:   cfg.SessionDB,
-		platform:    strings.TrimSpace(cfg.Platform),
 	}
 }
 
@@ -111,18 +109,11 @@ func (w *AGYWorker) Description() string {
 	return w.description
 }
 
-// GetSession 获取指定通道在特定工作空间下的续接状态 (以 ChannelID + CWD 复合键实现多项目会话隔离与并行保留)
-func (w *AGYWorker) GetSession(channelID, cwd string) *AgySessionState {
-	session := w.getSession("", channelID, cwd)
-	w.releaseSession(session)
-	return session
-}
-
-func (w *AGYWorker) getSession(requesterID, channelID, cwd string) *AgySessionState {
+func (w *AGYWorker) getSession(platform, requesterID, channelID, cwd string) *AgySessionState {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	key := agySessionKey{requesterID: requesterID, channelID: channelID, cwd: cwd}
+	key := agySessionKey{platform: db.NormPlatform(platform), requesterID: requesterID, channelID: channelID, cwd: cwd}
 
 	// 清理长期未活跃的过期会话，防止 map 无界增长
 	if len(w.sessions) > 200 {
@@ -170,7 +161,7 @@ func (w *AGYWorker) releaseSession(session *AgySessionState) {
 }
 
 // ResetSession 重置指定通道在指定工作空间下的 AGY 会话状态 (清空 ConversationID，下次工单白板启动)
-func (w *AGYWorker) ResetSession(channelID, cwd string) error {
+func (w *AGYWorker) ResetSession(platform, channelID, cwd string) error {
 	resolvedCWD, resolveErr := w.resolveWorkDir(cwd)
 	if resolveErr != nil {
 		return fmt.Errorf("无法解析 AGY 会话工作区 %q: %w", cwd, resolveErr)
@@ -180,7 +171,7 @@ func (w *AGYWorker) ResetSession(channelID, cwd string) error {
 	defer w.mu.Unlock()
 	var sessions []*AgySessionState
 	for key, s := range w.sessions {
-		if key.channelID != channelID || key.cwd != cwd {
+		if key.platform != db.NormPlatform(platform) || key.channelID != channelID || key.cwd != cwd {
 			continue
 		}
 		sessions = append(sessions, s)
@@ -188,9 +179,9 @@ func (w *AGYWorker) ResetSession(channelID, cwd string) error {
 	for _, s := range sessions {
 		<-s.runGate
 	}
-	if w.sessionDB != nil && w.platform != "" {
+	if w.sessionDB != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err := w.sessionDB.DeleteAGYSessions(ctx, w.platform, channelID, cwd)
+		err := w.sessionDB.DeleteAGYSessions(ctx, platform, channelID, cwd)
 		cancel()
 		if err != nil {
 			for _, s := range sessions {
@@ -317,7 +308,7 @@ func (w *AGYWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (string
 		return "", err
 	}
 
-	session := w.getSession(t.RequesterID, t.ChannelID, cwd)
+	session := w.getSession(t.Platform, t.RequesterID, t.ChannelID, cwd)
 	defer w.releaseSession(session)
 
 	select {
@@ -332,8 +323,8 @@ func (w *AGYWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (string
 	defer func() { session.runGate <- struct{}{} }()
 
 	session.Lock()
-	if !session.loaded && w.sessionDB != nil && w.platform != "" {
-		conversationID, loadErr := w.sessionDB.LoadAGYSession(ctx, w.platform, t.RequesterID, t.ChannelID, cwd)
+	if !session.loaded && w.sessionDB != nil {
+		conversationID, loadErr := w.sessionDB.LoadAGYSession(ctx, t.Platform, t.RequesterID, t.ChannelID, cwd)
 		if loadErr != nil {
 			session.Unlock()
 			return "", fmt.Errorf("读取 AGY 会话续接状态失败: %w", loadErr)
@@ -501,12 +492,12 @@ func (w *AGYWorker) retainConversationID(session *AgySessionState, ticket *entit
 }
 
 func (w *AGYWorker) saveConversationID(ticket *entity.Ticket, cwd, conversationID string) error {
-	if w.sessionDB == nil || w.platform == "" || ticket == nil || conversationID == "" {
+	if w.sessionDB == nil || ticket == nil || conversationID == "" {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := w.sessionDB.SaveAGYSession(ctx, w.platform, ticket.RequesterID, ticket.ChannelID, cwd, conversationID); err != nil {
+	if err := w.sessionDB.SaveAGYSession(ctx, ticket.Platform, ticket.RequesterID, ticket.ChannelID, cwd, conversationID); err != nil {
 		slog.Error("agy: save conversation ID failed", "requesterID", ticket.RequesterID, "channelID", ticket.ChannelID, "workspace", cwd, "err", err)
 		return err
 	}

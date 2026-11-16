@@ -167,7 +167,6 @@ func run() int {
 		Provider:    agyMind,
 		Router:      mindRouter,
 		SessionDB:   db.DefaultManager(),
-		Platform:    "qq",
 	})
 
 	// 挂载 API 通道 (自动调用 OpenAI 兼容 GET /models 探测可用模型池)

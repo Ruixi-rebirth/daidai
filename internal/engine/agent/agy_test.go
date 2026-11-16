@@ -8,9 +8,51 @@ import (
 	"strings"
 	"testing"
 
+	"daidai/internal/db"
 	"daidai/internal/entity"
 	"daidai/internal/provider/llm"
 )
+
+func getAGYTestSession(t *testing.T, worker *AGYWorker, platform, channelID, cwd string) *AgySessionState {
+	t.Helper()
+	session := worker.getSession(platform, "", channelID, cwd)
+	t.Cleanup(func() { worker.releaseSession(session) })
+	return session
+}
+
+func TestAGYSessionPersistenceAndResetArePlatformScoped(t *testing.T) {
+	base := t.TempDir()
+	store := db.NewManager(filepath.Join(base, "db"))
+	defer store.Close()
+	worker := NewAGYWorkerWithConfig(AGYWorkerConfig{DefaultDir: base, SessionDB: store})
+	ctx := context.Background()
+	sessions := make(map[string]*AgySessionState)
+	for _, platform := range []string{"qq", "telegram"} {
+		session := worker.getSession(platform, "same-user", "same-channel", base)
+		defer worker.releaseSession(session)
+		session.ConversationID = platform + "-conversation"
+		sessions[platform] = session
+		if err := worker.saveConversationID(&entity.Ticket{Platform: platform, RequesterID: "same-user", ChannelID: "same-channel"}, base, session.ConversationID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if sessions["qq"] == sessions["telegram"] {
+		t.Fatal("platforms share an AGY session")
+	}
+	if err := worker.ResetSession("telegram", "same-channel", base); err != nil {
+		t.Fatal(err)
+	}
+	for platform, session := range sessions {
+		want := ""
+		if platform == "qq" {
+			want = "qq-conversation"
+		}
+		persisted, err := store.LoadAGYSession(ctx, platform, "same-user", "same-channel", base)
+		if err != nil || persisted != want || session.ConversationID != want {
+			t.Fatalf("%s after reset: persisted=%q memory=%q want=%q error=%v", platform, persisted, session.ConversationID, want, err)
+		}
+	}
+}
 
 func TestAGYWorker_MultiWorkspaceSessionIsolation(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -28,13 +70,13 @@ func TestAGYWorker_MultiWorkspaceSessionIsolation(t *testing.T) {
 	channelID := "chan_qq_group_1"
 
 	// 获取项目 A 的会话并模拟生成 ConversationID
-	sessA := worker.GetSession(channelID, dirA)
+	sessA := getAGYTestSession(t, worker, "qq", channelID, dirA)
 	sessA.Lock()
 	sessA.ConversationID = "conv_project_a_123"
 	sessA.Unlock()
 
 	// 切换到项目 B 执行
-	sessB := worker.GetSession(channelID, dirB)
+	sessB := getAGYTestSession(t, worker, "qq", channelID, dirB)
 	sessB.Lock()
 	if sessB.ConversationID != "" {
 		t.Fatalf("expected project B to have empty initial ConversationID, got: %q", sessB.ConversationID)
@@ -43,7 +85,7 @@ func TestAGYWorker_MultiWorkspaceSessionIsolation(t *testing.T) {
 	sessB.Unlock()
 
 	// 切回项目 A，验证项目 A 的会话仍完好无损地被保留
-	sessAReload := worker.GetSession(channelID, dirA)
+	sessAReload := getAGYTestSession(t, worker, "qq", channelID, dirA)
 	sessAReload.Lock()
 
 	if sessAReload.ConversationID != "conv_project_a_123" {
@@ -52,17 +94,17 @@ func TestAGYWorker_MultiWorkspaceSessionIsolation(t *testing.T) {
 	sessAReload.Unlock()
 
 	// 验证重置会话：重置 project A 的会话，project B 保持不受影响
-	if err := worker.ResetSession(channelID, dirA); err != nil {
+	if err := worker.ResetSession("qq", channelID, dirA); err != nil {
 		t.Fatalf("ResetSession failed: %v", err)
 	}
-	sessAReset := worker.GetSession(channelID, dirA)
+	sessAReset := getAGYTestSession(t, worker, "qq", channelID, dirA)
 	sessAReset.Lock()
 	if sessAReset.ConversationID != "" {
 		t.Errorf("expected project A ConversationID to be reset to empty, got: %q", sessAReset.ConversationID)
 	}
 	sessAReset.Unlock()
 
-	sessBCheck := worker.GetSession(channelID, dirB)
+	sessBCheck := getAGYTestSession(t, worker, "qq", channelID, dirB)
 	sessBCheck.Lock()
 	if sessBCheck.ConversationID != "conv_project_b_456" {
 		t.Errorf("expected project B ConversationID to remain untouched, got: %q", sessBCheck.ConversationID)

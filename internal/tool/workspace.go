@@ -70,16 +70,17 @@ func (t *WorkspaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*
 		return nil, fmt.Errorf("invalid switch_workspace args: %w", err)
 	}
 
-	var channelID string
+	var platform, channelID string
 	role := entity.RoleGuest
 	event := entity.SensoryEventFromContext(ctx)
 	if event != nil {
+		platform = event.Platform
 		channelID = event.ChannelID
 		role = event.Role
 	}
 
 	result := &core.ToolResult{
-		Text: t.workspaces.ExecuteAction(channelID, role, t.immune, args.Action, args.Target, t.delegates),
+		Text: t.workspaces.ExecuteAction(platform, channelID, role, t.immune, args.Action, args.Target, t.delegates),
 	}
 	if event == nil || !event.IsPartnerPrivate() {
 		result.Text = core.RedactSensitiveIPs(result.Text)

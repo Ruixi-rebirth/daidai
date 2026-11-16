@@ -341,7 +341,7 @@ func (a *SuperAgent) handleStatusCommand(ctx context.Context, event *SensoryEven
 	sections = append(sections, core.FormatSystemStatusWithPerm(event.IsPartnerPrivate()))
 	if event.Role != RoleGuest {
 		if a.Workspaces != nil {
-			sections = append(sections, a.Workspaces.FormatCurrent(event.ChannelID))
+			sections = append(sections, a.Workspaces.FormatCurrent(event.Platform, event.ChannelID))
 		}
 		if a.Delegates != nil {
 			active := a.Delegates.ActiveTicketsFor(event.Platform, event.SenderID, event.ChannelID)
@@ -538,7 +538,7 @@ func (a *SuperAgent) handleResetCommand(ctx context.Context, event *SensoryEvent
 	currWs, wsName := "", ""
 	if a.Workspaces != nil {
 		var err error
-		currWs, wsName, err = a.Workspaces.GetCurrentChecked(event.ChannelID)
+		currWs, wsName, err = a.Workspaces.GetCurrent(event.Platform, event.ChannelID)
 		if err != nil {
 			a.replyText(ctx, event, fmt.Sprintf("【会话重开失败】\n无法确认当前工作区，近期历史和 AGY 会话均未重置：%v", err))
 			return
@@ -560,7 +560,7 @@ func (a *SuperAgent) handleResetCommand(ctx context.Context, event *SensoryEvent
 		attachmentCleaner.ClearPendingAttachments(event)
 	}
 	if a.Delegates != nil {
-		if err := a.Delegates.ResetSession(event.ChannelID, currWs); err != nil {
+		if err := a.Delegates.ResetSession(event.Platform, event.ChannelID, currWs); err != nil {
 			slog.Error("superagent: 重开会话时清理 AGY 会话失败", "platform", event.Platform, "channelID", event.ChannelID, "workspace", currWs, "err", err)
 			a.replyText(ctx, event, fmt.Sprintf("【会话重开未完成】\n近期历史游标已重置，但 AGY 会话未能确认清除：%v。请先检查服务日志，再重试 `/reset`。", err))
 			return
@@ -575,7 +575,7 @@ func (a *SuperAgent) handlePwdCommand(ctx context.Context, event *SensoryEvent, 
 		return
 	}
 	unlock := a.lockSession(event)
-	status := a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "current", "", a.Delegates)
+	status := a.Workspaces.ExecuteAction(event.Platform, event.ChannelID, event.Role, a.Immune, "current", "", a.Delegates)
 	unlock()
 	a.replyInfo(ctx, event, "📁 当前工作空间", status)
 }
@@ -586,7 +586,7 @@ func (a *SuperAgent) handleWorkspaceListCommand(ctx context.Context, event *Sens
 		return
 	}
 	unlock := a.lockSession(event)
-	list := a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "list", "", a.Delegates)
+	list := a.Workspaces.ExecuteAction(event.Platform, event.ChannelID, event.Role, a.Immune, "list", "", a.Delegates)
 	unlock()
 	a.replyInfo(ctx, event, "📚 工作空间书签", list)
 }
@@ -598,7 +598,7 @@ func (a *SuperAgent) handleWorkspaceExitCommand(ctx context.Context, event *Sens
 		a.replyText(ctx, event, "工作空间管理器未配置。")
 		return
 	}
-	a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "exit", "", a.Delegates))
+	a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.Platform, event.ChannelID, event.Role, a.Immune, "exit", "", a.Delegates))
 }
 
 func (a *SuperAgent) handleWorkspaceCleanCommand(ctx context.Context, event *SensoryEvent, _ string) {
@@ -608,7 +608,7 @@ func (a *SuperAgent) handleWorkspaceCleanCommand(ctx context.Context, event *Sen
 		a.replyText(ctx, event, "工作空间管理器未配置。")
 		return
 	}
-	a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "clean", "", a.Delegates))
+	a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.Platform, event.ChannelID, event.Role, a.Immune, "clean", "", a.Delegates))
 }
 
 func (a *SuperAgent) handleAGYLoginCommand(ctx context.Context, event *SensoryEvent, content string) {
@@ -743,7 +743,7 @@ func (a *SuperAgent) handleWorkspaceRemoveCommand(ctx context.Context, event *Se
 	if strings.HasPrefix(content, "/ws rm ") {
 		target = strings.TrimSpace(strings.TrimPrefix(content, "/ws rm "))
 	}
-	a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "remove", target, a.Delegates))
+	a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.Platform, event.ChannelID, event.Role, a.Immune, "remove", target, a.Delegates))
 }
 
 func (a *SuperAgent) handleCDCommand(ctx context.Context, event *SensoryEvent, content string) {
@@ -757,7 +757,7 @@ func (a *SuperAgent) handleCDCommand(ctx context.Context, event *SensoryEvent, c
 	if target == "" {
 		target = "~"
 	}
-	a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.ChannelID, event.Role, a.Immune, "switch", target, a.Delegates))
+	a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.Platform, event.ChannelID, event.Role, a.Immune, "switch", target, a.Delegates))
 }
 
 func ticketStatusLabel(status TicketStatus) string {
