@@ -159,7 +159,7 @@ type userLockKey struct {
 }
 
 type userLockEntry struct {
-	mu   sync.Mutex
+	gate chan struct{}
 	refs int
 }
 
@@ -201,7 +201,10 @@ func (m *MemoryEngine) getEmbedder() core.EmbeddingProvider {
 	return GetDefaultEmbedder()
 }
 
-func (m *MemoryEngine) lockUser(platform, userID string) func() {
+func (m *MemoryEngine) lockUser(ctx context.Context, platform, userID string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	key := userLockKey{platform: db.NormPlatform(platform), userID: userID}
 	m.userLocksMu.Lock()
 	if m.userLocks == nil {
@@ -209,21 +212,29 @@ func (m *MemoryEngine) lockUser(platform, userID string) func() {
 	}
 	entry := m.userLocks[key]
 	if entry == nil {
-		entry = &userLockEntry{}
+		entry = &userLockEntry{gate: make(chan struct{}, 1)}
 		m.userLocks[key] = entry
 	}
 	entry.refs++
 	m.userLocksMu.Unlock()
 
-	entry.mu.Lock()
-	return func() {
-		entry.mu.Unlock()
+	releaseRef := func() {
 		m.userLocksMu.Lock()
 		entry.refs--
 		if entry.refs == 0 && m.userLocks[key] == entry {
 			delete(m.userLocks, key)
 		}
 		m.userLocksMu.Unlock()
+	}
+	select {
+	case <-ctx.Done():
+		releaseRef()
+		return nil, ctx.Err()
+	case entry.gate <- struct{}{}:
+		return func() {
+			<-entry.gate
+			releaseRef()
+		}, nil
 	}
 }
 
@@ -556,28 +567,30 @@ func (m *MemoryEngine) Commit(ctx context.Context, event *entity.SensoryEvent, r
 		}
 		go func(ev entity.SensoryEvent, uText, rText string, uID, bID int64) {
 			defer m.asyncWG.Done()
+			if needExtract {
+				m.consolidateUserFacts(asyncCtx, &ev, rText)
+			}
+			if emb == nil || asyncCtx.Err() != nil {
+				return
+			}
 			bgCtx, cancel := context.WithTimeout(asyncCtx, 25*time.Second)
 			defer cancel()
 
-			if emb != nil {
-				if uID > 0 && len([]rune(uText)) >= 4 {
-					if vec, identity, err := embedWithIdentity(bgCtx, emb, uText); err == nil && len(vec) > 0 && identity != "" && bgCtx.Err() == nil {
-						_ = dbMgr.UpdateMessageEmbedding(bgCtx, ev.Platform, uID, vec, identity)
-					}
+			if uID > 0 && len([]rune(uText)) >= 4 {
+				if vec, identity, err := embedWithIdentity(bgCtx, emb, uText); err == nil && len(vec) > 0 && identity != "" && bgCtx.Err() == nil {
+					_ = dbMgr.UpdateMessageEmbedding(bgCtx, ev.Platform, uID, vec, identity)
 				}
-				if bID > 0 && len([]rune(rText)) >= 6 {
-					if vec, identity, err := embedWithIdentity(bgCtx, emb, rText); err == nil && len(vec) > 0 && identity != "" && bgCtx.Err() == nil {
-						_ = dbMgr.UpdateMessageEmbedding(bgCtx, ev.Platform, bID, vec, identity)
-					}
+			}
+			if bID > 0 && len([]rune(rText)) >= 6 {
+				if vec, identity, err := embedWithIdentity(bgCtx, emb, rText); err == nil && len(vec) > 0 && identity != "" && bgCtx.Err() == nil {
+					_ = dbMgr.UpdateMessageEmbedding(bgCtx, ev.Platform, bID, vec, identity)
 				}
 			}
 			if bgCtx.Err() != nil {
 				return
 			}
 
-			if needExtract {
-				m.consolidateUserFacts(bgCtx, &ev, rText)
-			} else if emb != nil && ev.SenderID != "" {
+			if ev.SenderID != "" {
 				m.backfillUserFactEmbeddings(bgCtx, &ev)
 			}
 		}(evCopy, userText, replyText, userMsgID, botMsgID)
@@ -612,9 +625,6 @@ func (m *MemoryEngine) backfillUserFactEmbeddings(ctx context.Context, event *en
 	if dbMgr == nil || emb == nil || event == nil || event.Platform == "" || event.SenderID == "" {
 		return
 	}
-	unlock := m.lockUser(event.Platform, event.SenderID)
-	defer unlock()
-
 	visibleFacts, err := dbMgr.ListVisibleFacts(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup)
 	if err != nil {
 		return
@@ -667,35 +677,23 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 		return
 	}
 
-	unlock := m.lockUser(event.Platform, event.SenderID)
+	unlock, err := m.lockUser(ctx, event.Platform, event.SenderID)
+	if err != nil {
+		return
+	}
 	defer unlock()
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
 
 	activeFacts, err := dbMgr.ListVisibleFacts(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup)
 	if err != nil {
 		return
 	}
-	emb := m.getEmbedder()
-	// 顺带为尚未生成向量的存量事实异步补齐向量
-	if emb != nil {
-		for _, f := range activeFacts {
-			if ctx.Err() != nil {
-				return
-			}
-			if f.EmbeddingModel != embeddingIdentity(emb) && f.Content != "" {
-				if vec, identity, err := embedWithIdentity(ctx, emb, f.Content); err == nil && len(vec) > 0 && identity != "" {
-					if ctx.Err() != nil {
-						return
-					}
-					f.Embedding = vec
-					f.EmbeddingModel = identity
-					_ = dbMgr.UpdateFactEmbedding(ctx, event.Platform, f.ID, f.Content, vec, identity)
-				}
-			}
-		}
-	}
 
 	turnQuery := event.Content + " " + replyText
-	relevantFacts := RankFactsByBM25(ctx, turnQuery, activeFacts, 0)
+	rankCtx, rankCancel := context.WithTimeout(ctx, 3*time.Second)
+	relevantFacts := RankFactsByBM25(rankCtx, turnQuery, activeFacts, 0)
+	rankCancel()
 	if len(relevantFacts) > 25 {
 		relevantFacts = relevantFacts[:25]
 	}
@@ -761,135 +759,7 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 		return
 	}
 
-	// 二阶段确定性冲突消解：若模型输出 ADD，但与既有事实词法重合 (>= 0.78) 或向量余弦相似 (>= 0.88)，自动转为原地 UPDATE
-	var normalized []db.FactMutation
-	scheduledFactIDs := make(map[int64]struct{})
-	scheduledNewFacts := make(map[string]struct{})
-	for _, mut := range mutations {
-		action := strings.ToUpper(strings.TrimSpace(mut.Action))
-		factText := strings.TrimSpace(mut.Fact)
-		switch action {
-		case "ADD":
-			if factText == "" {
-				continue
-			}
-			if _, exists := scheduledNewFacts[factText]; exists {
-				continue
-			}
-			var factVec []float32
-			var factModel string
-			if emb != nil {
-				factVec, factModel, _ = embedWithIdentity(ctx, emb, factText)
-				if ctx.Err() != nil {
-					return
-				}
-			}
-			merged := false
-			for _, old := range activeFacts {
-				if !sameFactScope(old, event) {
-					continue
-				}
-				if old.Content == factText {
-					merged = true
-					break
-				}
-			}
-			for _, old := range activeFacts {
-				if merged {
-					break
-				}
-				if !sameFactScope(old, event) {
-					continue
-				}
-				if LexicalOverlap(factText, old.Content) >= 0.78 ||
-					(len(factVec) > 0 && len(old.Embedding) > 0 && factModel != "" && factModel == old.EmbeddingModel && CosineSimilarity(factVec, old.Embedding) >= 0.88) {
-					if _, exists := scheduledFactIDs[old.ID]; exists {
-						merged = true
-						break
-					}
-					normalized = append(normalized, db.FactMutation{
-						Action:          "UPDATE",
-						FactID:          old.ID,
-						SourceMessageID: event.HistoryRecordID,
-						EmbeddingModel:  factModel,
-						Fact:            factText,
-						ExpectedFact:    old.Content,
-						ScopeType:       old.ScopeType,
-						ScopeID:         old.ScopeID,
-						Quote:           event.Content,
-						Embedding:       factVec,
-					})
-					scheduledFactIDs[old.ID] = struct{}{}
-					merged = true
-					break
-				}
-			}
-			if !merged {
-				scopeType, scopeID := factScope(event)
-				normalized = append(normalized, db.FactMutation{
-					Action:          "ADD",
-					SourceMessageID: event.HistoryRecordID,
-					EmbeddingModel:  factModel,
-					Fact:            factText,
-					ScopeType:       scopeType,
-					ScopeID:         scopeID,
-					Quote:           event.Content,
-					Embedding:       factVec,
-				})
-				scheduledNewFacts[factText] = struct{}{}
-			}
-		case "UPDATE":
-			if mut.FactID > 0 && factText != "" {
-				if _, exists := scheduledFactIDs[mut.FactID]; exists {
-					continue
-				}
-				old := findFact(activeFacts, mut.FactID)
-				if old == nil || !sameFactScope(old, event) {
-					continue
-				}
-				var factVec []float32
-				var factModel string
-				if emb != nil {
-					factVec, factModel, _ = embedWithIdentity(ctx, emb, factText)
-					if ctx.Err() != nil {
-						return
-					}
-				}
-				normalized = append(normalized, db.FactMutation{
-					Action:          "UPDATE",
-					FactID:          mut.FactID,
-					SourceMessageID: event.HistoryRecordID,
-					EmbeddingModel:  factModel,
-					Fact:            factText,
-					ExpectedFact:    old.Content,
-					ScopeType:       old.ScopeType,
-					ScopeID:         old.ScopeID,
-					Quote:           event.Content,
-					Embedding:       factVec,
-				})
-				scheduledFactIDs[mut.FactID] = struct{}{}
-			}
-		case "DELETE":
-			if mut.FactID > 0 {
-				if _, exists := scheduledFactIDs[mut.FactID]; exists {
-					continue
-				}
-				old := findFact(activeFacts, mut.FactID)
-				if old == nil || !sameFactScope(old, event) {
-					continue
-				}
-				normalized = append(normalized, db.FactMutation{
-					Action:       "DELETE",
-					FactID:       mut.FactID,
-					ExpectedFact: old.Content,
-					ScopeType:    old.ScopeType,
-					ScopeID:      old.ScopeID,
-					Quote:        event.Content,
-				})
-				scheduledFactIDs[mut.FactID] = struct{}{}
-			}
-		}
-	}
+	normalized := normalizeFactMutations(event, relevantFacts, mutations)
 
 	if len(normalized) > 0 {
 		if ctx.Err() != nil {
@@ -901,6 +771,44 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 			slog.Info("memory: 后台自动沉淀用户记忆完成", "userID", event.SenderID, "count", len(normalized))
 		}
 	}
+}
+
+// normalizeFactMutations binds model decisions to the facts actually supplied
+// to it. Similarity is useful for recall, but cannot authorize an overwrite.
+// Exact ADD deduplication and evidence linking belong to the DB transaction.
+func normalizeFactMutations(event *entity.SensoryEvent, known []*core.Fact, mutations []db.FactMutation) []db.FactMutation {
+	scopeType, scopeID := factScope(event)
+	seenIDs := make(map[int64]bool)
+	seenAdds := make(map[string]bool)
+	normalized := make([]db.FactMutation, 0, len(mutations))
+	for _, mutation := range mutations {
+		bound := db.FactMutation{
+			Action: mutation.Action, Fact: mutation.Fact,
+			SourceMessageID: event.HistoryRecordID,
+			ScopeType:       scopeType, ScopeID: scopeID, Quote: event.Content,
+		}
+		switch mutation.Action {
+		case "ADD":
+			if mutation.Fact == "" || seenAdds[mutation.Fact] {
+				continue
+			}
+			seenAdds[mutation.Fact] = true
+		case "UPDATE", "DELETE":
+			old := findFact(known, mutation.FactID)
+			if old == nil || !sameFactScope(old, event) || seenIDs[old.ID] {
+				continue
+			}
+			if mutation.Action == "UPDATE" && mutation.Fact == "" {
+				continue
+			}
+			bound.FactID, bound.ExpectedFact = old.ID, old.Content
+			seenIDs[old.ID] = true
+		default:
+			continue
+		}
+		normalized = append(normalized, bound)
+	}
+	return normalized
 }
 
 func parseFactMutations(raw string) []db.FactMutation {

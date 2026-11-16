@@ -91,31 +91,6 @@ func extractTokenFreqs(s string) (map[string]int, int) {
 	return freqs, len(clean)
 }
 
-// LexicalOverlap 计算两个文本的词法重合系数（基于标准 Unicode 分类过滤标点空白，融合单字与二元词组）[0, 1]
-func LexicalOverlap(a, b string) float32 {
-	setA, _ := extractTokenFreqs(a)
-	setB, _ := extractTokenFreqs(b)
-	if len(setA) == 0 || len(setB) == 0 {
-		return 0
-	}
-
-	intersect := 0
-	for tok := range setB {
-		if _, ok := setA[tok]; ok {
-			intersect++
-		}
-	}
-
-	minSet := len(setA)
-	if len(setB) < minSet {
-		minSet = len(setB)
-	}
-	if minSet == 0 {
-		return 0
-	}
-	return float32(intersect) / float32(minSet)
-}
-
 // ScoreBM25 计算查询词对候选文档集合的 Okapi BM25 稀疏相关性得分
 func ScoreBM25(query string, docs []string) []float32 {
 	n := len(docs)

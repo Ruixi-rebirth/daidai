@@ -152,35 +152,8 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 		if utf8.RuneCountInString(factText) > core.MaxFactContentRunes {
 			return &core.ToolResult{Text: fmt.Sprintf("参数错误：fact 内容不能超过 %d 个字符。", core.MaxFactContentRunes)}, nil
 		}
-		factVec, factModel := memory.EmbedTextWithIdentity(ctx, factText)
-		existing, err := t.db.ListVisibleFacts(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup)
-		if err != nil {
-			return nil, fmt.Errorf("读取长期记忆失败: %w", err)
-		}
-		for _, f := range existing {
-			if !factMatchesScope(f, scopeType, scopeID) {
-				continue
-			}
-			if f.Content == factText {
-				return &core.ToolResult{Text: fmt.Sprintf("该记忆已存在 [ID: %d]：%s", f.ID, f.Content)}, nil
-			}
-		}
-		for _, f := range existing {
-			if !factMatchesScope(f, scopeType, scopeID) {
-				continue
-			}
-			if memory.LexicalOverlap(factText, f.Content) >= 0.78 ||
-				(len(factVec) > 0 && len(f.Embedding) > 0 && factModel != "" && factModel == f.EmbeddingModel && memory.CosineSimilarity(factVec, f.Embedding) >= 0.88) {
-				if err := t.db.ApplyFactMutations(ctx, event.Platform, event.SenderID, []db.FactMutation{
-					{Action: "UPDATE", FactID: f.ID, SourceMessageID: event.HistoryRecordID, EmbeddingModel: factModel, Fact: factText, ExpectedFact: f.Content, ScopeType: scopeType, ScopeID: scopeID, Quote: event.Content, Embedding: factVec},
-				}); err != nil {
-					return nil, fmt.Errorf("更新近似记忆失败: %w", err)
-				}
-				return &core.ToolResult{Text: fmt.Sprintf("已合并更新近似记忆 [ID: %d] 为：%s", f.ID, factText)}, nil
-			}
-		}
-		err = t.db.ApplyFactMutations(ctx, event.Platform, event.SenderID, []db.FactMutation{
-			{Action: "ADD", SourceMessageID: event.HistoryRecordID, EmbeddingModel: factModel, Fact: factText, ScopeType: scopeType, ScopeID: scopeID, Quote: event.Content, Embedding: factVec},
+		err := t.db.ApplyFactMutations(ctx, event.Platform, event.SenderID, []db.FactMutation{
+			{Action: "ADD", SourceMessageID: event.HistoryRecordID, Fact: factText, ScopeType: scopeType, ScopeID: scopeID, Quote: event.Content},
 		})
 		if err != nil {
 			return nil, fmt.Errorf("写入长期记忆失败: %w", err)
@@ -201,9 +174,8 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 		if !factMatchesScope(target, scopeType, scopeID) {
 			return &core.ToolResult{Text: "群聊中只能更新当前用户在本群记录的个人记忆；全局记忆请在私聊中操作。"}, nil
 		}
-		factVec, factModel := memory.EmbedTextWithIdentity(ctx, factText)
 		err = t.db.ApplyFactMutations(ctx, event.Platform, event.SenderID, []db.FactMutation{
-			{Action: "UPDATE", FactID: args.FactID, SourceMessageID: event.HistoryRecordID, EmbeddingModel: factModel, Fact: factText, ExpectedFact: target.Content, ScopeType: target.ScopeType, ScopeID: target.ScopeID, Quote: event.Content, Embedding: factVec},
+			{Action: "UPDATE", FactID: args.FactID, SourceMessageID: event.HistoryRecordID, Fact: factText, ExpectedFact: target.Content, ScopeType: target.ScopeType, ScopeID: target.ScopeID, Quote: event.Content},
 		})
 		if err != nil {
 			return &core.ToolResult{Text: fmt.Sprintf("更新记忆失败：%v", err)}, nil
