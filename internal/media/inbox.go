@@ -693,11 +693,17 @@ func removeInboxRootContents(root *os.Root) error {
 }
 
 func isScopedInboxDirectory(name string) bool {
-	if len(name) != sha256.Size*2+1 || name[len(name)-1] != '-' {
+	hash, suffix, ok := strings.Cut(name, "-")
+	if !ok || len(hash) != sha256.Size*2 || suffix == "" {
 		return false
 	}
-	for _, char := range name[:len(name)-1] {
+	for _, char := range hash {
 		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	for _, char := range suffix {
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z')) {
 			return false
 		}
 	}
