@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,7 +28,7 @@ var ErrAGYNotLoggedIn = errors.New("尚未登录 Google Antigravity 或认证凭
 const maxAGYAuthPTYOutputBytes = 256 << 10
 const maxAGYTokenFileBytes = 1 << 20
 
-const agyOAuthURLPrefix = "https://accounts.google.com/o/oauth2/auth?"
+const agyOAuthURLPrefix = "https://accounts.google.com/o/oauth2/"
 
 func findAGYOAuthURL(text string) string {
 	for offset := 0; offset < len(text); {
@@ -40,8 +41,11 @@ func findAGYOAuthURL(text string) string {
 		for end < len(text) && !isOAuthURLTerminator(text[end]) {
 			end++
 		}
-		if end > start+len(agyOAuthURLPrefix) {
-			return text[start:end]
+		candidate := text[start:end]
+		parsed, err := url.Parse(candidate)
+		if err == nil && parsed.Scheme == "https" && parsed.Host == "accounts.google.com" && parsed.User == nil && parsed.RawQuery != "" &&
+			(parsed.Path == "/o/oauth2/auth" || parsed.Path == "/o/oauth2/v2/auth") {
+			return candidate
 		}
 		offset = end
 	}

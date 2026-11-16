@@ -84,3 +84,32 @@ func TestNetGuard_RedactSensitiveIPsAndValidateMediaURL(t *testing.T) {
 		t.Errorf("expected CheckRedirect to reject internal target")
 	}
 }
+
+func TestWarpMonitorClearsReadinessOnOwnedProcessExit(t *testing.T) {
+	warpReady.Store(true)
+	defer warpReady.Store(false)
+	exited := make(chan struct{})
+	close(exited)
+	done := make(chan struct{})
+	go func() { monitorWarpProxy(context.Background(), exited); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("monitor survived process exit")
+	}
+	if warpReady.Load() {
+		t.Fatal("exited process left proxy marked ready")
+	}
+}
+
+func TestWarpMonitorClearsReadinessOnCancellation(t *testing.T) {
+	warpReady.Store(true)
+	defer warpReady.Store(false)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	exited := make(chan struct{})
+	monitorWarpProxy(ctx, exited)
+	if warpReady.Load() {
+		t.Fatal("cancelled monitor left proxy marked ready")
+	}
+}

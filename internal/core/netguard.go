@@ -455,6 +455,7 @@ func InitPublicIPGuard(ctx context.Context) {
 				Proxy: nil, // 强制直连以准确获取本机真实公网出口 IP
 			},
 		}
+		defer directClient.CloseIdleConnections()
 		for _, ep := range probeEndpoints {
 			reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, ep, nil)
@@ -591,6 +592,7 @@ func securePrivateFile(path string) error {
 }
 
 func startWarpProxySupervisor(ctx context.Context) {
+	defer warpReady.Store(false)
 	if _, err := exec.LookPath("wireproxy"); err != nil {
 		slog.Info("netguard: 未检测到 wireproxy，跳过本地 WARP 代理隧道启动")
 		return
@@ -620,6 +622,7 @@ func startWarpProxySupervisor(ctx context.Context) {
 			}
 		}
 
+		warpReady.Store(false)
 		cmd := exec.CommandContext(ctx, "wireproxy", "-s", "-c", confPath)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Cancel = func() error {
@@ -639,28 +642,43 @@ func startWarpProxySupervisor(ctx context.Context) {
 			}
 		}
 
-		go func() {
-			for i := 0; i < 15; i++ {
-				if ctx.Err() != nil {
-					return
-				}
-				time.Sleep(300 * time.Millisecond)
-				if checkPortOpen(WarpHTTPAddr) && checkPortOpen(WarpSocks5Addr) {
-					warpReady.Store(true)
-					probeWarpEgress(ctx)
-					slog.Info("netguard: Cloudflare WARP 本地代理隔离隧道已就绪", "socks5", WarpSocks5Addr, "http", WarpHTTPAddr)
-					return
-				}
-			}
-		}()
-
-		_ = cmd.Wait()
-		warpReady.Store(false)
+		exited := make(chan struct{})
+		go func() { _ = cmd.Wait(); close(exited) }()
+		monitorWarpProxy(ctx, exited)
+		<-exited
 
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(3 * time.Second):
+		}
+	}
+}
+
+// The owner of the process also owns readiness. No startup probe may outlive
+// that process and publish a stale ready state for a replacement process.
+func monitorWarpProxy(ctx context.Context, exited <-chan struct{}) {
+	defer warpReady.Store(false)
+	ticker := time.NewTicker(300 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-exited:
+			return
+		case <-ticker.C:
+			ready := checkPortOpen(WarpHTTPAddr) && checkPortOpen(WarpSocks5Addr)
+			wasReady := warpReady.Swap(ready)
+			if ready {
+				probeWarpEgress(ctx)
+				if !wasReady {
+					slog.Info("netguard: Cloudflare WARP 本地代理隔离隧道已就绪", "socks5", WarpSocks5Addr, "http", WarpHTTPAddr)
+				}
+				ticker.Reset(15 * time.Second)
+			} else {
+				ticker.Reset(300 * time.Millisecond)
+			}
 		}
 	}
 }
@@ -688,6 +706,7 @@ func probeWarpEgress(ctx context.Context) {
 			Proxy: http.ProxyURL(proxyURL),
 		},
 	}
+	defer cli.CloseIdleConnections()
 	reqCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 

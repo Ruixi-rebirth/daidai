@@ -843,7 +843,7 @@ func (t *OCIIPTool) handleRoll(ctx context.Context, prefixes []string, maxRisk i
 					return nil, err
 				}
 				return &core.ToolResult{
-					Text: fmt.Sprintf("### OCI 抽中优质候选预留 IP\n- **候选 IP**: `%s` (尝试 `%d` 次)\n- **属地**: `%s`\n- **欺诈分**: `%d/100`\n- **国内连通**: `%s`\n\n发送 `/oci_bind` 或调用 `oci_ip(action=\"bind\", ip=\"%s\")` 即可热换绑到主机。",
+					Text: fmt.Sprintf("### OCI 抽中优质候选预留 IP\n- **候选 IP**: `%s` (尝试 `%d` 次)\n- **属地**: `%s`\n- **欺诈分**: `%d/100`\n- **国内连通**: `%s`\n\n你可以说“把公网 IP 换成 %s”来换绑到主机。",
 						candidateIP, attempt, rep.Country, rep.FraudScore, rep.GFWStatus, candidateIP),
 				}, nil
 			}

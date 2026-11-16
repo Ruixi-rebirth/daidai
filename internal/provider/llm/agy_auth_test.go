@@ -1,6 +1,8 @@
 package llm
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,5 +92,47 @@ func TestFormatAuthStatus(t *testing.T) {
 	}
 	if _, err := os.Stat(tokenFile); !os.IsNotExist(err) {
 		t.Fatalf("expected token file to be deleted")
+	}
+}
+
+func TestLoginPTYCancellationTerminatesActiveSession(t *testing.T) {
+	command := filepath.Join(t.TempDir(), "fake-auth")
+	script := "#!/bin/sh\nprintf '%s\\n' 'https://accounts.google.com/o/oauth2/v2/auth?client_id=test-only'\nread code\nsleep 30\n"
+	if err := os.WriteFile(command, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewAGYAuthManager(command, filepath.Join(t.TempDir(), "token"))
+	defer manager.Cancel()
+	startCtx, cancelStart := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelStart()
+	link, err := manager.StartLogin(startCtx)
+	if err != nil || !strings.HasPrefix(link, "https://accounts.google.com/") {
+		t.Fatalf("login link not extracted: %s %v", link, err)
+	}
+	submitCtx, cancelSubmit := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelSubmit()
+	_, err = manager.SubmitCode(submitCtx, "test-only-code")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("submission did not observe cancellation: %v", err)
+	}
+	manager.mu.Lock()
+	active := manager.active
+	manager.mu.Unlock()
+	if active != nil {
+		t.Fatal("cancelled authorization left child process/session active")
+	}
+}
+
+func TestFindOAuthURLSupportsOfficialPathsOnly(t *testing.T) {
+	for _, path := range []string{"/o/oauth2/auth?client_id=test", "/o/oauth2/v2/auth?client_id=test"} {
+		expected := "https://accounts.google.com" + path
+		if got := findAGYOAuthURL("登录链接：<" + expected + ">\n"); got != expected {
+			t.Fatalf("missed valid OAuth link: %q", got)
+		}
+	}
+	for _, input := range []string{"https://accounts.google.com.evil.test/o/oauth2/v2/auth?x=1", "https://accounts.google.com/o/oauth2/other?x=1", "https://accounts.google.com/o/oauth2/v2/auth", "https://evil.test/o/oauth2/v2/auth?x=1"} {
+		if got := findAGYOAuthURL(input); got != "" {
+			t.Fatalf("accepted non-authorization URL: %q", got)
+		}
 	}
 }
