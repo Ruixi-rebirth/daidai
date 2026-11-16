@@ -132,7 +132,6 @@ func finalize(e *Edition, selected []Item, leads []string) {
 			}
 			i.Title = core.TruncateRunes(i.Title, 60, "…")
 			i.Number = fmt.Sprintf("%02d", len(out)+1)
-			i.Page = len(out)/3 + 1
 			i.Meta = clipped(i.Meta, 60)
 			numberByID[i.ID] = i.Number
 			out = append(out, i)

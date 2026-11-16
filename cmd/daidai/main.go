@@ -27,6 +27,7 @@ import (
 	"daidai/internal/engine/render"
 	"daidai/internal/engine/vision"
 	"daidai/internal/entity"
+	"daidai/internal/groupchat"
 	"daidai/internal/media"
 	"daidai/internal/provider/llm"
 	"daidai/internal/tool"
@@ -339,31 +340,34 @@ func run() int {
 			}
 		}
 	}
+	groupExpressions := &groupchat.Store{Database: database}
 	hands := tool.NewHandsWithConfig(tool.HandsConfig{
-		AGYCommand:      agyCommand,
-		Router:          mindRouter,
-		Delegates:       delegates,
-		Immune:          immune,
-		Workspaces:      workspaceMgr,
-		AttachmentInbox: attachmentInbox,
-		Database:        database,
-		EnableNixSearch: cfg.Plugins.NixSearch.Enabled,
-		OCIConfig:       &cfg.OCI,
-		OCIClient:       ociClient,
-		Briefing:        briefingService,
-		BriefingOwners:  briefingOwners,
+		AGYCommand:       agyCommand,
+		Router:           mindRouter,
+		Delegates:        delegates,
+		Immune:           immune,
+		Workspaces:       workspaceMgr,
+		AttachmentInbox:  attachmentInbox,
+		Database:         database,
+		EnableNixSearch:  cfg.Plugins.NixSearch.Enabled,
+		OCIConfig:        &cfg.OCI,
+		OCIClient:        ociClient,
+		Briefing:         briefingService,
+		BriefingOwners:   briefingOwners,
+		GroupExpressions: groupExpressions,
 	})
 
 	// 具体认知大脑 (实现 entity.Cognition)
 	cortex := chat.NewCortex(chat.CortexConfig{
-		LLM:          mindRouter,
-		Persona:      persona,
-		Memory:       memEngine,
-		Hands:        hands,
-		Vision:       visEngine,
-		Workspaces:   workspaceMgr,
-		Inbox:        attachmentInbox,
-		WorkingLimit: cfg.Memory.WorkingLimit,
+		LLM:              mindRouter,
+		Persona:          persona,
+		Memory:           memEngine,
+		Hands:            hands,
+		Vision:           visEngine,
+		Workspaces:       workspaceMgr,
+		Inbox:            attachmentInbox,
+		WorkingLimit:     cfg.Memory.WorkingLimit,
+		GroupExpressions: groupExpressions,
 	})
 
 	// 全双工通信管道 (实现 entity.Channel)

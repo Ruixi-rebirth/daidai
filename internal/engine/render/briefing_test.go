@@ -22,25 +22,20 @@ func TestBriefingRenderingKeepsItemsAndLiteralText(t *testing.T) {
 			title = `#read("/etc/hostname") <script>`
 		}
 		source := []string{"nixos", "hn", "github", "v2ex"}[n/5]
-		doc.Items = append(doc.Items, BriefingItem{Number: fmt.Sprintf("%02d", n+1), Page: n/3 + 1, Source: source, Title: title, Summary: strings.Repeat("正文排版验证", 20), Meta: "真实渲染检查", EvidenceKind: "source_body"})
+		doc.Items = append(doc.Items, BriefingItem{Number: fmt.Sprintf("%02d", n+1), Source: source, Title: title, Summary: strings.Repeat("正文排版验证", 20), Meta: "真实渲染检查", EvidenceKind: "source_body"})
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	images, err := RenderBriefing(ctx, doc)
+	card, err := RenderBriefing(ctx, doc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(images) != 7 {
-		t.Fatalf("got %d pages", len(images))
+	cfg, err := png.DecodeConfig(bytes.NewReader(card))
+	if err != nil || cfg.Width != 880 || cfg.Height < 3000 {
+		t.Fatalf("invalid complete long image: %+v %v", cfg, err)
 	}
-	for _, data := range images {
-		cfg, err := png.DecodeConfig(bytes.NewReader(data))
-		if err != nil || cfg.Width != 880 || cfg.Height < 300 {
-			t.Fatalf("invalid page: %+v %v", cfg, err)
-		}
-	}
-	doc.Items[0].Page = 2
+	doc.Items = append(doc.Items, doc.Items[0])
 	if _, err := RenderBriefing(ctx, doc); err == nil {
-		t.Fatal("invalid grouping accepted")
+		t.Fatal("more than twenty items accepted")
 	}
 }

@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -73,14 +72,14 @@ func TestBriefingNaturalLanguageLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result == nil || len(result.Images) == 0 || result.Text != e.Index() || len(result.ImageSources) != len(result.Images) || !result.FixedPresentation {
+	if result == nil || len(result.Images) != 1 || result.Text != e.Index() || len(result.ImageSources) != 1 || result.ImageSources[0] != e.Text() || !result.FixedPresentation {
 		if result == nil {
 			t.Fatal("empty result")
 		}
 		t.Fatalf("wrong presentation: pages=%d text=%q", len(result.Images), result.Text)
 	}
 	t.Logf("natural-language request returned %d pages and exact source index", len(result.Images))
-	if strings.Contains(result.Text, "完成") || strings.Contains(result.Text, "见图") {
-		t.Fatal("unnecessary completion caption leaked")
+	if err = os.WriteFile(filepath.Join(preview, "complete.png"), result.Images[0], 0600); err != nil {
+		t.Fatal(err)
 	}
 }

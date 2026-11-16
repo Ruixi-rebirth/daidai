@@ -368,20 +368,16 @@ func (s *Service) Present(ctx context.Context, e *Edition) ([][]byte, []string, 
 	}
 	doc.SourceNote = strings.Join(notes, "；")
 	for _, i := range e.Items {
-		doc.Items = append(doc.Items, render.BriefingItem{Number: i.Number, Page: i.Page, Source: i.Source, Title: i.Title, Summary: i.Summary, Meta: i.Meta, EvidenceKind: i.EvidenceKind})
+		doc.Items = append(doc.Items, render.BriefingItem{Number: i.Number, Source: i.Source, Title: i.Title, Summary: i.Summary, Meta: i.Meta, EvidenceKind: i.EvidenceKind})
 	}
 	if len(e.Items) == 0 {
 		return nil, nil, nil
 	}
-	images, err := render.RenderBriefing(ctx, doc)
+	image, err := render.RenderBriefing(ctx, doc)
 	if err != nil {
 		return nil, nil, err
 	}
-	var pageSources []string
-	for index := range images {
-		pageSources = append(pageSources, e.PageText(index+1))
-	}
-	return images, pageSources, nil
+	return [][]byte{image}, []string{e.Text()}, nil
 }
 func (s *Service) Cancel(platform, recipient string, group bool) bool {
 	s.mu.Lock()

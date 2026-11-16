@@ -57,7 +57,7 @@ func (s *Service) deliver(parent context.Context, e *Edition, sub Subscription, 
 		remaining = d.Remaining
 	}
 	u := &entity.Utterance{Platform: sub.Platform, ChannelID: sub.Recipient, IsGroup: sub.IsGroup, Proactive: true}
-	content := e.PageText(0)
+	content := e.Text()
 	if resume {
 		u.Text = remaining
 		content = remaining
@@ -176,7 +176,7 @@ func (s *Service) FailedView(ctx context.Context, e *Edition, sub Subscription, 
 		d = &Delivery{Edition: e.ID, Platform: sub.Platform, Recipient: sub.Recipient, IsGroup: sub.IsGroup}
 	}
 	d.Attempts++
-	d.Remaining = e.PageText(0)
+	d.Remaining = e.Text()
 	s.failureState(d, sendErr)
 	if err = s.Store.SaveDelivery(ctx, d); err != nil {
 		slog.Warn("briefing: 无法保存查询投递状态")

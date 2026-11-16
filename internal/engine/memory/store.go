@@ -15,6 +15,7 @@ import (
 	"daidai/internal/core"
 	"daidai/internal/db"
 	"daidai/internal/entity"
+	"daidai/internal/groupchat"
 )
 
 const (
@@ -532,7 +533,11 @@ func (m *MemoryEngine) Commit(ctx context.Context, event *entity.SensoryEvent, r
 
 	if replyText != "" {
 		var err error
-		botMsgID, err = dbMgr.LogBotReply(ctx, event.Platform, chatType, event.ChannelID, replyText, event.SenderID, userMsgID)
+		historyText := replyText
+		if event.IsGroup && event.GroupExpression == groupchat.Dream {
+			historyText = "[呆呆的梦境联想：虚构故事，不是群成员的真实经历]\n" + replyText
+		}
+		botMsgID, err = dbMgr.LogBotReply(ctx, event.Platform, chatType, event.ChannelID, historyText, event.SenderID, userMsgID)
 		if err != nil {
 			slog.Warn("memory: 保存机器人回复失败", "platform", event.Platform, "channel", event.ChannelID, "err", err)
 		}
@@ -562,7 +567,11 @@ func (m *MemoryEngine) Commit(ctx context.Context, event *entity.SensoryEvent, r
 		go func(ev entity.SensoryEvent, uText, rText string, uID, bID int64) {
 			defer m.asyncWG.Done()
 			if needExtract {
-				m.consolidateUserFacts(asyncCtx, &ev, rText)
+				factContext := rText
+				if ev.GroupExpression != "" {
+					factContext = ""
+				}
+				m.consolidateUserFacts(asyncCtx, &ev, factContext)
 			}
 			if emb == nil || asyncCtx.Err() != nil {
 				return
@@ -575,7 +584,7 @@ func (m *MemoryEngine) Commit(ctx context.Context, event *entity.SensoryEvent, r
 					_ = dbMgr.UpdateMessageEmbedding(bgCtx, ev.Platform, uID, vec, identity)
 				}
 			}
-			if bID > 0 && len([]rune(rText)) >= 6 {
+			if bID > 0 && ev.GroupExpression == "" && len([]rune(rText)) >= 6 {
 				if vec, identity, err := embedWithIdentity(bgCtx, emb, rText); err == nil && len(vec) > 0 && identity != "" && bgCtx.Err() == nil {
 					_ = dbMgr.UpdateMessageEmbedding(bgCtx, ev.Platform, bID, vec, identity)
 				}

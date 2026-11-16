@@ -35,6 +35,7 @@ graph TD
 - [认知、模型与记忆](workflow/cognition.md)：模型工具循环、回复、持久化和记忆范围。
 - [权限、工具与运行环境](workflow/security-operations.md)：安全边界、OCI、网页抓取、图片渲染和待验证事项。
 - [每日极客技术早报](workflow/briefing.md)：采集、编辑、图卡、归档、群与私聊订阅及失败处理。
+- [群内碎碎念与梦境联想](workflow/group-expressions.md)：自然语言开关、择机表达、频率与记忆边界。
 
 ## 当前设计约束
 

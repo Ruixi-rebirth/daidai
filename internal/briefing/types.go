@@ -17,7 +17,6 @@ var labels = map[string]string{"nixos": "❄️ NixOS 生态", "hn": "🔥 Hacke
 type Item struct {
 	ID            string    `json:"id"`
 	Number        string    `json:"number"`
-	Page          int       `json:"page"`
 	Source        string    `json:"source"`
 	Title         string    `json:"title"`
 	OriginalTitle string    `json:"original_title"`
@@ -105,7 +104,7 @@ func identity(i Item) string {
 	}
 	return canonical(i.URL)
 }
-func (e *Edition) PageText(page int) string {
+func (e *Edition) Text() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# 极客早报 · %s\n\n截止 %s\n", e.ID, e.Cutoff)
 	if e.Basic {
@@ -113,9 +112,6 @@ func (e *Edition) PageText(page int) string {
 	}
 	last := ""
 	for _, i := range e.Items {
-		if page != 0 && i.Page != page {
-			continue
-		}
 		if i.Source != last {
 			fmt.Fprintf(&b, "\n## %s\n", labels[i.Source])
 			last = i.Source
@@ -138,7 +134,7 @@ func (e *Edition) Index() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "极客早报 · %s\n", e.ID)
 	for _, i := range e.Items {
-		fmt.Fprintf(&b, "\n[%s 原文](%s)", i.Number, i.URL)
+		fmt.Fprintf(&b, "\n[%s · %s](%s)", i.Number, escape(i.Title), i.URL)
 		if i.DiscussionURL != "" {
 			fmt.Fprintf(&b, " · [讨论](%s)", i.DiscussionURL)
 		}

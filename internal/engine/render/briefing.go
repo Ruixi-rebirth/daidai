@@ -12,7 +12,6 @@ var briefingTemplate string
 
 type BriefingItem struct {
 	Number       string `json:"number"`
-	Page         int    `json:"page"`
 	Source       string `json:"source"`
 	Title        string `json:"title"`
 	Summary      string `json:"summary"`
@@ -28,35 +27,18 @@ type BriefingDocument struct {
 	SourceNote string         `json:"source_note"`
 	Items      []BriefingItem `json:"items"`
 	Leads      []string       `json:"leads"`
-	PageNumber int            `json:"page_number"`
-	TotalPages int            `json:"total_pages"`
 }
 
-func RenderBriefing(ctx context.Context, doc BriefingDocument) ([][]byte, error) {
+func RenderBriefing(ctx context.Context, doc BriefingDocument) ([]byte, error) {
 	if len(doc.Items) == 0 || len(doc.Items) > 20 {
 		return nil, fmt.Errorf("briefing requires 1–20 items")
 	}
-	for n, i := range doc.Items {
-		if i.Page != n/3+1 {
-			return nil, fmt.Errorf("invalid briefing page grouping")
-		}
-	}
-	doc.TotalPages = doc.Items[len(doc.Items)-1].Page
 	if doc.Leads == nil {
 		doc.Leads = []string{}
 	}
-	var images [][]byte
-	for p := 1; p <= doc.TotalPages; p++ {
-		doc.PageNumber = p
-		b, err := json.Marshal(doc)
-		if err != nil {
-			return nil, err
-		}
-		card, err := renderTypstAssets(ctx, briefingTemplate, map[string][]byte{"content.json": b})
-		if err != nil {
-			return nil, err
-		}
-		images = append(images, card)
+	b, err := json.Marshal(doc)
+	if err != nil {
+		return nil, err
 	}
-	return images, nil
+	return renderTypstAssets(ctx, briefingTemplate, map[string][]byte{"content.json": b})
 }

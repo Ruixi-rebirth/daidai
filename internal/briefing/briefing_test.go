@@ -120,13 +120,13 @@ func TestEditorKeepsFivePerSectionAndStableNumbering(t *testing.T) {
 		t.Fatalf("unexpected editorial result: items=%d basic=%v", len(e.Items), basic)
 	}
 	for n, item := range e.Items {
-		if item.Source != sources[n/5] || item.Number != fmt.Sprintf("%02d", n+1) || item.Page != n/3+1 {
+		if item.Source != sources[n/5] || item.Number != fmt.Sprintf("%02d", n+1) {
 			t.Fatalf("lost section or numbering: %+v", item)
 		}
 	}
 	index := e.Index()
-	if strings.Contains(index, "中文标题") || !strings.Contains(index, "[20 原文](https://example.com/v2ex/4)") {
-		t.Fatal("clickable index must match the cards without repeating their titles")
+	if !strings.Contains(index, "中文标题") || !strings.Contains(index, "[20 · 中文标题](https://example.com/v2ex/4)") {
+		t.Fatal("clickable index must identify each story by number and title")
 	}
 }
 

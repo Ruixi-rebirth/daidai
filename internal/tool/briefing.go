@@ -116,7 +116,7 @@ func (t *BriefingTool) Execute(ctx context.Context, raw json.RawMessage) (*core.
 			slog.Warn("briefing: 无法读取投递状态")
 		} else if d != nil && d.Status != "sending" {
 			d.Status = "sent"
-			d.Delivered = e.PageText(0)
+			d.Delivered = e.Text()
 			d.Remaining = ""
 			d.ErrorKind = ""
 			d.Next = time.Time{}
@@ -128,16 +128,16 @@ func (t *BriefingTool) Execute(ctx context.Context, raw json.RawMessage) (*core.
 	}
 	failed := func(ctx context.Context, err error) { t.service.FailedView(ctx, e, sub, err) }
 	if len(e.Items) == 0 {
-		return &core.ToolResult{Text: "空刊说明已由系统准备好，无需复述；若无其他问题只输出‘完成’即可。", Caption: e.PageText(0), ImageOnly: args.OnlyBriefing == nil || *args.OnlyBriefing, OnDelivered: commit, OnDeliveryFailed: failed}, nil
+		return &core.ToolResult{Text: "空刊说明已由系统准备好，无需复述；若无其他问题只输出‘完成’即可。", Caption: e.Text(), ImageOnly: args.OnlyBriefing == nil || *args.OnlyBriefing, OnDelivered: commit, OnDeliveryFailed: failed}, nil
 	}
 	images, sources, renderErr := t.service.Present(ctx, e)
 	if renderErr != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return &core.ToolResult{Text: "完整文字早报已由系统准备好，不要改写或重复；若无其他问题只输出‘完成’，有其他问题继续回答。", Caption: e.PageText(0), ImageOnly: args.OnlyBriefing == nil || *args.OnlyBriefing, OnDelivered: commit, OnDeliveryFailed: failed}, nil
+		return &core.ToolResult{Text: "完整文字早报已由系统准备好，不要改写或重复；若无其他问题只输出‘完成’，有其他问题继续回答。", Caption: e.Text(), ImageOnly: args.OnlyBriefing == nil || *args.OnlyBriefing, OnDelivered: commit, OnDeliveryFailed: failed}, nil
 	}
-	return &core.ToolResult{Text: "整期早报图卡及原文索引已准备好，系统会确定交付。不要复述标题、摘要或索引，也不要加‘见图’或‘已发送’。如果用户没有别的问题，只输出‘完成’即可，系统不把这个结束标记发给用户；有其他问题则正常回答。", Images: images, ImageSources: sources, Caption: e.Index(), InlineImages: true, ImageOnly: args.OnlyBriefing == nil || *args.OnlyBriefing, FallbackText: e.PageText(0), OnDelivered: commit, OnDeliveryFailed: failed}, nil
+	return &core.ToolResult{Text: "整期早报图卡及原文索引已准备好，系统会确定交付。不要复述标题、摘要或索引，也不要加‘见图’或‘已发送’。如果用户没有别的问题，只输出‘完成’即可，系统不把这个结束标记发给用户；有其他问题则正常回答。", Images: images, ImageSources: sources, Caption: e.Index(), InlineImages: true, ImageOnly: args.OnlyBriefing == nil || *args.OnlyBriefing, FallbackText: e.Text(), OnDelivered: commit, OnDeliveryFailed: failed}, nil
 }
 func (t *BriefingTool) resolveDate(ctx context.Context, event *entity.SensoryEvent, value string) (string, error) {
 	now := t.service.Now()

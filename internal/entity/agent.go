@@ -1425,6 +1425,10 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			if thinkCtx.Err() != nil {
 				return
 			}
+			if event.GroupInterjection && event.StillValid != nil && !event.StillValid() {
+				a.commitObservedGroupMessage(event)
+				return
+			}
 			if event.Platform == "qq" && event.IsGroup && !event.GroupInterjection && len(utterance.MentionUserIDs) == 0 && event.SenderID != "" {
 				utterance.MentionUserIDs = []string{event.SenderID}
 			}

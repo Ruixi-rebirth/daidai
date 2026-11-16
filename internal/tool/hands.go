@@ -13,6 +13,7 @@ import (
 	"daidai/internal/core"
 	"daidai/internal/db"
 	"daidai/internal/entity"
+	"daidai/internal/groupchat"
 	"daidai/internal/media"
 	"daidai/internal/provider/llm"
 )
@@ -26,18 +27,19 @@ type HandsRegistry struct {
 
 // HandsConfig 双手挂载配置
 type HandsConfig struct {
-	AGYCommand      string
-	Router          *llm.MindRouter
-	Delegates       *entity.Delegates
-	Immune          *entity.ImmuneSystem
-	Workspaces      *entity.WorkspaceManager
-	AttachmentInbox *media.Inbox
-	Database        *db.Manager
-	EnableNixSearch bool
-	OCIConfig       *config.OCIConfig
-	OCIClient       *OCIClient
-	Briefing        *briefing.Service
-	BriefingOwners  map[string]string
+	AGYCommand       string
+	Router           *llm.MindRouter
+	Delegates        *entity.Delegates
+	Immune           *entity.ImmuneSystem
+	Workspaces       *entity.WorkspaceManager
+	AttachmentInbox  *media.Inbox
+	Database         *db.Manager
+	EnableNixSearch  bool
+	OCIConfig        *config.OCIConfig
+	OCIClient        *OCIClient
+	Briefing         *briefing.Service
+	BriefingOwners   map[string]string
+	GroupExpressions *groupchat.Store
 }
 
 // NewHandsWithConfig 按配置挂载原子双手
@@ -46,6 +48,9 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 		tools: make(map[string]core.Tool),
 	}
 	h.Register(NewRenderTool())
+	if cfg.GroupExpressions != nil {
+		h.Register(NewGroupExpressionTool(cfg.GroupExpressions))
+	}
 	if cfg.Briefing != nil {
 		h.Register(NewBriefingTool(cfg.Briefing, cfg.BriefingOwners, false))
 		h.Register(NewBriefingTool(cfg.Briefing, cfg.BriefingOwners, true))
