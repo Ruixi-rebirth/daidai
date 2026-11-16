@@ -1415,7 +1415,10 @@ func qqQuotedFiles(event *entity.SensoryEvent) ([]*core.Attachment, int) {
 }
 
 // dispatchEvent 解析 WebSocket 网关下发的消息事件并推入防抖队列 (零前缀纯净 ID)
-func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
+func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	d, ok := payload["d"].(map[string]any)
 	if !ok {
 		return true
@@ -1440,6 +1443,52 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 	msgID, _ = d["id"].(string)
 	rawContent, _ := d["content"].(string)
 	content = cleanQQContent(rawContent)
+
+	switch eventType {
+	case "GROUP_AT_MESSAGE_CREATE": // 群聊中被 @ 的消息
+		isGroup = true
+		botMentioned = true
+		convID, _ = d["group_openid"].(string)
+		if author, ok := d["author"].(map[string]any); ok {
+			userID, _ = author["member_openid"].(string)
+			senderName, _ = author["username"].(string)
+		}
+	case "GROUP_MESSAGE_CREATE": // 群聊全量消息；仅唤醒 @ 机器人的消息
+		isGroup = true
+		fullGroupEvent = true
+		botMentioned = qqMessageMentionsBot(d)
+		convID, _ = d["group_openid"].(string)
+		if author, ok := d["author"].(map[string]any); ok {
+			userID, _ = author["member_openid"].(string)
+			senderName, _ = author["username"].(string)
+		}
+
+	case "C2C_MESSAGE_CREATE": // 好友私聊单聊消息
+		isGroup = false
+		if author, ok := d["author"].(map[string]any); ok {
+			userID, _ = author["user_openid"].(string)
+			senderName, _ = author["username"].(string)
+		}
+		convID = userID
+
+	default:
+		return true
+	}
+	if qqMessageAuthorIsBot(d) || (isGroup && q.isKnownGroupBot(convID, userID)) {
+		if isGroup {
+			q.cancelPendingGroupInterjection(convID)
+		}
+		slog.Debug("qq: 忽略机器人消息，避免机器人之间互相触发", "eventType", eventType, "channelID", convID, "msgID", msgID)
+		return true
+	}
+	if msgID != "" && q.dedup != nil && q.dedup.Contains(msgID) {
+		slog.Debug("qq: 拦截到重复投递的事件消息", "msgID", msgID)
+		return true
+	}
+	if msgID == "" {
+		slog.Warn("qq: 忽略缺少原消息 ID 的事件，无法使用被动回复凭证", "eventType", eventType, "channelID", convID)
+		return true
+	}
 
 	// 只有明确标记为图片的附件进入视觉模型；类型不明的附件按普通文件处理，须用户明确要求后才读取。
 	if attList, ok := d["attachments"].([]any); ok {
@@ -1490,7 +1539,7 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 							slog.Info("qq: 语音消息使用极速模式 ASR 转录", "msgID", msgID, "text", asrReferText)
 							recognizedText = asrReferText
 						} else if audioURL != "" {
-							recognizedText = q.transcribeVoiceAudio(context.Background(), audioURL, fileName)
+							recognizedText = q.transcribeVoiceAudio(ctx, audioURL, fileName)
 							if recognizedText != "" {
 								slog.Info("qq: 极速模式 ASR 未命中，多模态原生转录成功", "msgID", msgID, "text", recognizedText)
 							}
@@ -1498,7 +1547,7 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 					} else {
 						// 多语精准模式：优先调用多模态大模型原生倾听音频原声，支持全球全语种（中、英、日、韩等）且彻底杜绝平台空耳
 						if audioURL != "" {
-							recognizedText = q.transcribeVoiceAudio(context.Background(), audioURL, fileName)
+							recognizedText = q.transcribeVoiceAudio(ctx, audioURL, fileName)
 							if recognizedText != "" {
 								slog.Info("qq: 语音消息多模态原生转录成功", "msgID", msgID, "text", recognizedText)
 							}
@@ -1553,50 +1602,8 @@ func (q *QQChannel) dispatchEvent(payload map[string]any) bool {
 		}
 	}
 
-	switch eventType {
-	case "GROUP_AT_MESSAGE_CREATE": // 群聊中被 @ 的消息
-		isGroup = true
-		botMentioned = true
-		convID, _ = d["group_openid"].(string)
-		if author, ok := d["author"].(map[string]any); ok {
-			userID, _ = author["member_openid"].(string)
-			senderName, _ = author["username"].(string)
-		}
-	case "GROUP_MESSAGE_CREATE": // 群聊全量消息；仅唤醒 @ 机器人的消息
-		isGroup = true
-		fullGroupEvent = true
-		botMentioned = qqMessageMentionsBot(d)
-		convID, _ = d["group_openid"].(string)
-		if author, ok := d["author"].(map[string]any); ok {
-			userID, _ = author["member_openid"].(string)
-			senderName, _ = author["username"].(string)
-		}
-
-	case "C2C_MESSAGE_CREATE": // 好友私聊单聊消息
-		isGroup = false
-		if author, ok := d["author"].(map[string]any); ok {
-			userID, _ = author["user_openid"].(string)
-			senderName, _ = author["username"].(string)
-		}
-		convID = userID
-
-	default:
-		return true
-	}
-	if qqMessageAuthorIsBot(d) || (isGroup && q.isKnownGroupBot(convID, userID)) {
-		if isGroup {
-			q.cancelPendingGroupInterjection(convID)
-		}
-		slog.Debug("qq: 忽略机器人消息，避免机器人之间互相触发", "eventType", eventType, "channelID", convID, "msgID", msgID)
-		return true
-	}
-	if msgID != "" && q.dedup != nil && q.dedup.Contains(msgID) {
-		slog.Debug("qq: 拦截到重复投递的事件消息", "msgID", msgID)
-		return true
-	}
-	if msgID == "" {
-		slog.Warn("qq: 忽略缺少原消息 ID 的事件，无法使用被动回复凭证", "eventType", eventType, "channelID", convID)
-		return true
+	if ctx.Err() != nil {
+		return false
 	}
 
 	var replyCtx *entity.SensoryEvent
@@ -2016,7 +2023,6 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 
 	sendPart := func(part qqOutgoingPart) error {
 		quoteContext := strings.TrimSpace(u.FallbackText)
-		quoteContext = core.TruncateRunes(quoteContext, core.MaxUserMessageRunes, "\n[引用正文过长，后续内容已截断]")
 		if u.IsGroup {
 			if len(part.image) > 0 {
 				if quoteContext != "" {

@@ -1,9 +1,10 @@
 package qq
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"testing"
-	"time"
 
 	"daidai/internal/entity"
 )
@@ -14,10 +15,10 @@ func TestQQChannel_VoiceMessageWithASR(t *testing.T) {
 		immune: entity.NewImmuneSystem("USER_VOICE_123"),
 	}
 
-	var capturedEvent *entity.SensoryEvent
-	_ = channel.Start(context.Background(), func(event *entity.SensoryEvent) {
-		capturedEvent = event
-	})
+	events := startTestQQChannel(t, channel)
+	channel.voiceModeMu.Lock()
+	channel.voiceMode = VoiceModeFast
+	channel.voiceModeMu.Unlock()
 
 	payload := map[string]any{
 		"t": "C2C_MESSAGE_CREATE",
@@ -40,14 +41,9 @@ func TestQQChannel_VoiceMessageWithASR(t *testing.T) {
 		},
 	}
 
-	channel.dispatchEvent(payload)
+	channel.dispatchEvent(context.Background(), payload)
 
-	// 等待防抖窗口触发 (测试环境合并)
-	time.Sleep(2200 * time.Millisecond)
-
-	if capturedEvent == nil {
-		t.Fatalf("expected sensory event dispatched for voice message")
-	}
+	capturedEvent := awaitTestQQEvent(t, events)
 	if capturedEvent.Content != "呆呆今天星期几" {
 		t.Fatalf("expected content '呆呆今天星期几', got %q", capturedEvent.Content)
 	}
@@ -68,10 +64,7 @@ func TestQQChannel_VoiceMessageWithoutASRFallback(t *testing.T) {
 		immune: entity.NewImmuneSystem("USER_VOICE_456"),
 	}
 
-	var capturedEvent *entity.SensoryEvent
-	_ = channel.Start(context.Background(), func(event *entity.SensoryEvent) {
-		capturedEvent = event
-	})
+	events := startTestQQChannel(t, channel)
 
 	payload := map[string]any{
 		"t": "C2C_MESSAGE_CREATE",
@@ -94,17 +87,54 @@ func TestQQChannel_VoiceMessageWithoutASRFallback(t *testing.T) {
 		},
 	}
 
-	channel.dispatchEvent(payload)
+	channel.dispatchEvent(context.Background(), payload)
 
-	time.Sleep(2200 * time.Millisecond)
-
-	if capturedEvent == nil {
-		t.Fatalf("expected sensory event dispatched")
-	}
+	capturedEvent := awaitTestQQEvent(t, events)
 	if capturedEvent.Content != "【收到一段语音消息，但未能识别出文字内容】" {
 		t.Fatalf("expected fallback voice content, got %q", capturedEvent.Content)
 	}
 	if len(capturedEvent.Files) != 0 {
 		t.Fatalf("expected 0 files, got %d", len(capturedEvent.Files))
+	}
+}
+
+func TestIgnoredVoiceMessagesDoNotStartTranscription(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	for _, reason := range []string{"duplicate", "bot", "unknown_event", "cancelled"} {
+		t.Run(reason, func(t *testing.T) {
+			logs.Reset()
+			channel := &QQChannel{dedup: newDedupCache(100)}
+			author := map[string]any{"user_openid": "sender", "bot": reason == "bot"}
+			payload := map[string]any{
+				"t": "C2C_MESSAGE_CREATE",
+				"d": map[string]any{
+					"id": "ignored-voice", "author": author,
+					"attachments": []any{map[string]any{
+						"content_type": "voice", "url": "file:///untrusted-voice.wav",
+					}},
+				},
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			switch reason {
+			case "duplicate":
+				channel.dedup.Remember("ignored-voice")
+			case "unknown_event":
+				payload["t"] = "IGNORED_EVENT"
+			case "cancelled":
+				cancel()
+			}
+			accepted := channel.dispatchEvent(ctx, payload)
+			if accepted != (reason != "cancelled") {
+				t.Fatalf("unexpected sequence acceptance: %v", accepted)
+			}
+			// An attempted download of this URL fails validation and logs a warning.
+			if logs.Len() != 0 {
+				t.Fatalf("ignored message started attachment processing: %s", logs.String())
+			}
+		})
 	}
 }

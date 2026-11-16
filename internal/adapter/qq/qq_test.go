@@ -2,12 +2,87 @@ package qq
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
+	"daidai/internal/core"
 	"daidai/internal/db"
 	"daidai/internal/entity"
 )
+
+type qqTestTransport func(*http.Request) (*http.Response, error)
+
+func (f qqTestTransport) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestQQMediaQuoteCompletenessAfterLongReport(t *testing.T) {
+	for _, group := range []bool{false, true} {
+		for _, length := range []int{100, core.MaxUserMessageRunes + 100} {
+			cache := newMsgCache(10, nil)
+			client := NewClient("test", "test")
+			client.httpClient.Transport = qqTestTransport(func(req *http.Request) (*http.Response, error) {
+				body := `{"id":"sent-report"}`
+				if strings.HasSuffix(req.URL.Path, "/files") {
+					body = `{"file_info":"uploaded-image"}`
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+			})
+			chatType := "private"
+			if group {
+				chatType = "group"
+			}
+			client.SetOnMessageSent(func(msgID, refIndex, targetType, targetID string, metadata QuoteMetadata) {
+				cache.SetTypedAsync(msgID, metadata.Text, chatType, targetID, metadata.Kind, metadata.TextComplete)
+			})
+			channel := &QQChannel{client: client}
+			body := strings.Repeat("文", length)
+			if err := channel.Transmit(context.Background(), &entity.Utterance{
+				ChannelID: "recipient", IsGroup: group, Proactive: true,
+				Text: "日报", CardData: []byte("image"), FallbackText: body,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			record, found := cache.GetRecord("sent-report", chatType, "recipient")
+			if !found || record.TextComplete != (length <= core.MaxUserMessageRunes) {
+				t.Fatalf("group=%v length=%d: found=%v complete=%v", group, length, found, record.TextComplete)
+			}
+			if length <= core.MaxUserMessageRunes && record.Content != body {
+				t.Fatal("complete report lost its original body")
+			}
+		}
+	}
+}
+
+func startTestQQChannel(t *testing.T, channel *QQChannel) <-chan *entity.SensoryEvent {
+	t.Helper()
+	events := make(chan *entity.SensoryEvent, 1)
+	if err := channel.Start(context.Background(), func(event *entity.SensoryEvent) {
+		events <- event
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := channel.Stop(ctx); err != nil {
+			t.Error(err)
+		}
+	})
+	return events
+}
+
+func awaitTestQQEvent(t *testing.T, events <-chan *entity.SensoryEvent) *entity.SensoryEvent {
+	t.Helper()
+	select {
+	case event := <-events:
+		return event
+	case <-time.After(3 * time.Second):
+		t.Fatal("expected sensory event dispatched")
+		return nil
+	}
+}
 
 func TestMsgCache_PersistenceAndHit(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -42,10 +117,7 @@ func TestQQChannel_MessageReferenceResolutionAndZeroPrefix(t *testing.T) {
 		dedup:    newDedupCache(100),
 	}
 
-	var capturedEvent *entity.SensoryEvent
-	_ = channel.Start(context.Background(), func(event *entity.SensoryEvent) {
-		capturedEvent = event
-	})
+	events := startTestQQChannel(t, channel)
 
 	// 模拟腾讯推送 GROUP_AT_MESSAGE_CREATE 且携带 message_reference
 	payload := map[string]any{
@@ -63,10 +135,10 @@ func TestQQChannel_MessageReferenceResolutionAndZeroPrefix(t *testing.T) {
 		},
 	}
 
-	channel.dispatchEvent(payload)
+	channel.dispatchEvent(context.Background(), payload)
 
 	// 等待防抖窗口触发
-	time.Sleep(2200 * time.Millisecond)
+	capturedEvent := awaitTestQQEvent(t, events)
 
 	if capturedEvent == nil {
 		t.Fatalf("expected sensory event dispatched")
@@ -93,10 +165,7 @@ func TestQQChannel_SensoryEventWithQuoteMarkdown(t *testing.T) {
 		dedup: newDedupCache(100),
 	}
 
-	var capturedEvent *entity.SensoryEvent
-	_ = channel.Start(context.Background(), func(event *entity.SensoryEvent) {
-		capturedEvent = event
-	})
+	events := startTestQQChannel(t, channel)
 
 	testIncoming := &entity.SensoryEvent{
 		Platform:   "qq",
@@ -112,7 +181,7 @@ func TestQQChannel_SensoryEventWithQuoteMarkdown(t *testing.T) {
 	channel.IngestRaw(testIncoming)
 
 	// 等待防抖窗口触发 (测试环境合并)
-	time.Sleep(2200 * time.Millisecond)
+	capturedEvent := awaitTestQQEvent(t, events)
 
 	if capturedEvent == nil {
 		t.Fatalf("expected sensory event passed to superagent")
@@ -141,10 +210,7 @@ func TestQQChannel_V2MsgElementsQuoteResolution(t *testing.T) {
 		dedup: newDedupCache(100),
 	}
 
-	var capturedEvent *entity.SensoryEvent
-	_ = channel.Start(context.Background(), func(event *entity.SensoryEvent) {
-		capturedEvent = event
-	})
+	events := startTestQQChannel(t, channel)
 
 	// 模拟官方 v2 原生引用消息包 (message_type: 103, msg_elements)
 	payload := map[string]any{
@@ -167,10 +233,10 @@ func TestQQChannel_V2MsgElementsQuoteResolution(t *testing.T) {
 		},
 	}
 
-	channel.dispatchEvent(payload)
+	channel.dispatchEvent(context.Background(), payload)
 
 	// 等待防抖窗口触发
-	time.Sleep(2200 * time.Millisecond)
+	capturedEvent := awaitTestQQEvent(t, events)
 
 	if capturedEvent == nil {
 		t.Fatalf("expected sensory event to be captured")

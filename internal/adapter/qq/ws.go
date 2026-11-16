@@ -323,7 +323,7 @@ func (q *QQChannel) runWebSocketSession(ctx context.Context) error {
 					"t": payload.T,
 					"d": rawData,
 				}
-				if !q.dispatchEvent(eventMap) {
+				if !q.dispatchEvent(ctx, eventMap) {
 					return fmt.Errorf("QQ event queue is full; reconnecting from the last accepted sequence")
 				}
 			} else {
