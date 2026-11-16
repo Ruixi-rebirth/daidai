@@ -964,10 +964,6 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 		if toolCallsUsed >= maxToolCallsPerThink {
 			activeTools = nil
 		}
-		if len(directCardData) > 0 {
-			// 已生成待发送图像，本轮仅需模型给出一句自然配文，不再重复触发工具
-			activeTools = nil
-		}
 
 		resp, err := c.llm.ChatWithTools(ctx, messages, activeTools, &core.ChatOptions{
 			Temperature: 0.7,
