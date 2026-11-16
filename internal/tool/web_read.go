@@ -43,9 +43,8 @@ func (t *ReadLinkTool) Execute(ctx context.Context, raw json.RawMessage) (*core.
 	if task == "" {
 		task = "概括页面主要内容"
 	}
-	if len([]rune(task)) > 500 {
-		task = string([]rune(task)[:500])
+	if len([]rune(task)) > core.MaxUserMessageRunes {
+		return &core.ToolResult{Text: fmt.Sprintf("网页处理要求不能超过 %d 个字符，请概括具体目标后重试。", core.MaxUserMessageRunes)}, nil
 	}
-	query, _ := json.Marshal(map[string]string{"query": target + " 用户任务：" + task})
-	return t.search.Execute(ctx, query)
+	return t.search.run(ctx, webRequest{URL: target, Task: task})
 }

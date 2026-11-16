@@ -3,7 +3,10 @@ package tool
 import (
 	"bytes"
 	"context"
+	"daidai/internal/db"
+	"daidai/internal/entity"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -65,5 +68,23 @@ func TestSysInfoTool_Execute(t *testing.T) {
 
 	if res.Text == "" {
 		t.Fatalf("expected non-empty sysinfo text")
+	}
+}
+
+func TestRegisteredMemoryToolUsesConfiguredDatabase(t *testing.T) {
+	manager := db.NewManager(t.TempDir())
+	defer manager.Close()
+	ctx := context.Background()
+	if err := manager.ApplyFactMutations(ctx, "telegram", "scoped-user", []db.FactMutation{{Action: "ADD", Fact: "仅在指定数据库的测试事实"}}); err != nil {
+		t.Fatal(err)
+	}
+	registry := NewHandsWithConfig(HandsConfig{Database: manager})
+	event := &entity.SensoryEvent{Platform: "telegram", ChannelID: "private", SenderID: "scoped-user", Role: entity.RolePartner}
+	result, err := registry.Execute(entity.WithSensoryEvent(ctx, event), "manage_memory", json.RawMessage(`{"action":"list"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Text, "仅在指定数据库的测试事实") {
+		t.Fatalf("tool ignored configured database: %s", result.Text)
 	}
 }
