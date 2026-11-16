@@ -26,7 +26,7 @@ func TestVisionReportsTruncatedAPIObservation(t *testing.T) {
 		t.Run(finishReason, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				fmt.Fprintf(w, `{"choices":[{"message":{"content":"图片上有一张表格"},"finish_reason":%q}]}`, finishReason)
+				_, _ = fmt.Fprintf(w, `{"choices":[{"message":{"content":"图片上有一张表格"},"finish_reason":%q}]}`, finishReason)
 			}))
 			defer server.Close()
 			engine := NewEngine(Config{APIKey: "fixture", BaseURL: server.URL, Sources: sources})

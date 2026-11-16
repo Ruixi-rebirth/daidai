@@ -48,7 +48,11 @@ func TestParseApplicantIndex(t *testing.T) {
 func TestAccessTool_FullLifecycle(t *testing.T) {
 	tempBase := t.TempDir()
 	dbMgr := db.NewManager(filepath.Join(tempBase, "db"))
-	defer dbMgr.Close()
+	t.Cleanup(func() {
+		if err := dbMgr.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 
 	partnerID := "partner_qq_001"
 	immune := entity.NewImmuneSystem(partnerID)
@@ -218,7 +222,11 @@ func TestAccessTargetResolutionRequiresUniqueIdentity(t *testing.T) {
 
 func TestAccessTargetDoesNotTreatStorageFailureAsEmptyList(t *testing.T) {
 	database := db.NewManager(t.TempDir())
-	defer database.Close()
+	t.Cleanup(func() {
+		if err := database.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	ctx := context.Background()
 	if err := database.SetUserRole(ctx, "qq", "authorized-id", "friend", "owner"); err != nil {
 		t.Fatal(err)
@@ -239,7 +247,11 @@ func TestAccessTargetDoesNotTreatStorageFailureAsEmptyList(t *testing.T) {
 
 func TestGrantReportsEffectiveRoleWithoutImplicitDemotion(t *testing.T) {
 	database := db.NewManager(t.TempDir())
-	defer database.Close()
+	t.Cleanup(func() {
+		if err := database.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	ctx := context.Background()
 	if err := database.GrantCollaborator(ctx, "qq", "existing-collaborator", "owner"); err != nil {
 		t.Fatal(err)

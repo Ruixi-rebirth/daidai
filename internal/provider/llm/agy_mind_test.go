@@ -3,7 +3,6 @@ package llm
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 
@@ -147,9 +146,7 @@ func TestMindRouter_QueryChannelUsage(t *testing.T) {
 
 func TestAGYMindProvider_NotLoggedIn_FailFast(t *testing.T) {
 	tmpHome := t.TempDir()
-	origHome := os.Getenv("HOME")
 	t.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
 
 	provider := NewAGYMindProvider(AGYMindConfig{
 		Command: "agy",

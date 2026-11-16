@@ -3,16 +3,13 @@ package tool
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"strings"
 	"testing"
 )
 
 func TestWebSearchTool_NotLoggedIn_FailFast(t *testing.T) {
 	tmpHome := t.TempDir()
-	origHome := os.Getenv("HOME")
 	t.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
 
 	searchTool := NewWebSearchTool(nil)
 

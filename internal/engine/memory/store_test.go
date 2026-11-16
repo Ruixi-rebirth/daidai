@@ -14,7 +14,11 @@ import (
 func TestMemoryEngine_LexicalRecallAndCommit(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbMgr := db.NewManager(tmpDir)
-	defer dbMgr.Close()
+	t.Cleanup(func() {
+		if err := dbMgr.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 
 	ctx := context.Background()
 	engine := NewMemoryEngine(nil)
@@ -121,7 +125,11 @@ func (m *mockEmbedder) Embed(_ context.Context, text string) ([]float32, error) 
 func TestMemoryEngine_HybridBM25AndVectorRRF(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbMgr := db.NewManager(tmpDir)
-	defer dbMgr.Close()
+	t.Cleanup(func() {
+		if err := dbMgr.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 
 	ctx := context.Background()
 	engine := NewMemoryEngine(nil)
@@ -145,7 +153,11 @@ func TestMemoryEngine_HybridBM25AndVectorRRF(t *testing.T) {
 
 func TestWorkingContextStopsBeforeCurrentTurnEvenWithQueuedMessages(t *testing.T) {
 	mgr := db.NewManager(t.TempDir())
-	defer mgr.Close()
+	t.Cleanup(func() {
+		if err := mgr.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	engine := NewMemoryEngine(nil)
 	engine.SetDBManager(mgr)
 	ctx := context.Background()

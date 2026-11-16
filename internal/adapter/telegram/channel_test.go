@@ -17,7 +17,11 @@ func (f transportFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 
 func TestOwnerAuthorizationFollowsConfiguredUsername(t *testing.T) {
 	database := db.NewManager(t.TempDir())
-	defer database.Close()
+	t.Cleanup(func() {
+		if err := database.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	immune := entity.NewImmuneSystem("qq-owner")
 	c := New(Config{OwnerUsername: "Ruixi_rebirth"}, database, nil, immune)
 	if err := c.initQuotes(context.Background()); err != nil {

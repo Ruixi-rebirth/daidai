@@ -24,7 +24,11 @@ import (
 func testChannel(t *testing.T) *Channel {
 	t.Helper()
 	database := db.NewManager(t.TempDir())
-	t.Cleanup(func() { database.Close() })
+	t.Cleanup(func() {
+		if err := database.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	c := New(Config{OwnerUsername: "owner", Token: "private-token"}, database, nil, entity.NewImmuneSystem(""))
 	c.bot = user{ID: 100, Username: "TestBot", FirstName: "呆呆"}
 	if err := c.initQuotes(context.Background()); err != nil {
@@ -188,7 +192,11 @@ func TestAlbumReceiptsRestoreRenderedTextAndRealImages(t *testing.T) {
 		if err := r.ParseMultipartForm(1 << 20); err != nil {
 			t.Fatal(err)
 		}
-		defer r.MultipartForm.RemoveAll()
+		defer func() {
+			if err := r.MultipartForm.RemoveAll(); err != nil {
+				t.Error(err)
+			}
+		}()
 		if r.FormValue("chat_id") != "42" || r.FormValue("message_thread_id") != "7" {
 			t.Fatal("topic destination lost")
 		}
@@ -255,7 +263,13 @@ func TestPollingPersistsOffsetAndStops(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	defer c.Stop(ctx)
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cleanupCancel()
+		if err := c.Stop(cleanupCtx); err != nil {
+			t.Error(err)
+		}
+	})
 	select {
 	case <-handled:
 	case <-ctx.Done():

@@ -78,7 +78,13 @@ func TestSuperAgent_CreationAndPerception(t *testing.T) {
 	if err := superAgent.Start(ctx); err != nil {
 		t.Fatalf("start superAgent failed: %v", err)
 	}
-	defer superAgent.Stop(ctx)
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cleanupCancel()
+		if err := superAgent.Stop(cleanupCtx); err != nil {
+			t.Error(err)
+		}
+	})
 
 	// 模拟感知入站（零前缀）
 	event := &SensoryEvent{

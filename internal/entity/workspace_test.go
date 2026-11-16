@@ -12,7 +12,11 @@ import (
 func TestWorkspaceManager_ActivationAndBookmarks(t *testing.T) {
 	tempBase := t.TempDir()
 	dbMgr := db.NewManager(filepath.Join(tempBase, "db"))
-	defer dbMgr.Close()
+	t.Cleanup(func() {
+		if err := dbMgr.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 
 	// 模拟创建两个真实目录和一个未激活的目录
 	projA := filepath.Join(tempBase, "project-alpha")
@@ -103,7 +107,11 @@ func TestWorkspaceManager_ActivationAndBookmarks(t *testing.T) {
 func TestWorkspaceManagerPlatformIsolationSurvivesReload(t *testing.T) {
 	base := t.TempDir()
 	store := db.NewManager(filepath.Join(base, "db"))
-	defer store.Close()
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	defaultDir := filepath.Join(base, "sandbox")
 	projects := map[string]string{"qq": filepath.Join(base, "qq-project"), "telegram": filepath.Join(base, "tg-project")}
 	wm := NewWorkspaceManager(defaultDir, store)
@@ -137,7 +145,11 @@ func TestWorkspaceManagerPlatformIsolationSurvivesReload(t *testing.T) {
 func TestWorkspaceManager_AutoPrunePhysicallyDeletedWorkspace(t *testing.T) {
 	tempBase := t.TempDir()
 	dbMgr := db.NewManager(filepath.Join(tempBase, "db"))
-	defer dbMgr.Close()
+	t.Cleanup(func() {
+		if err := dbMgr.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 
 	sandbox := filepath.Join(tempBase, "sandbox")
 	projA := filepath.Join(tempBase, "project-ghost")

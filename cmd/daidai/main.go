@@ -238,9 +238,10 @@ func run() int {
 		slog.Warn("读取数据库角色失败，协作者权限暂不可用", "err", roleErr)
 	} else {
 		for _, role := range storedRoles {
-			if role.Role == "collaborator" {
+			switch role.Role {
+			case "collaborator":
 				immune.AddCollaborator(role.UserID)
-			} else if role.Role == "friend" {
+			case "friend":
 				immune.AddPrivateUser(role.UserID)
 			}
 		}

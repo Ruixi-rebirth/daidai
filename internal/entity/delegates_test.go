@@ -260,7 +260,13 @@ func TestQueueTimeoutAndStop(t *testing.T) {
 	if err := d.StartQueue(context.Background(), func(_ context.Context, ticket *Ticket, _ string, _ error) { completed <- ticket.ID }); err != nil {
 		t.Fatal(err)
 	}
-	defer d.StopQueue(context.Background())
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cleanupCancel()
+		if err := d.StopQueue(cleanupCtx); err != nil {
+			t.Error(err)
+		}
+	})
 	first := d.CreateTicket("owner", "room", "goal", "", "", "")
 	if err := d.EnqueueTicket(first.ID, nil); err != nil {
 		t.Fatal(err)
@@ -322,7 +328,13 @@ func TestQueueWaitDoesNotConsumeExecutionTimeout(t *testing.T) {
 	if err := d.StartQueue(context.Background(), func(_ context.Context, ticket *Ticket, _ string, _ error) { completed <- ticket.ID }); err != nil {
 		t.Fatal(err)
 	}
-	defer d.StopQueue(context.Background())
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cleanupCancel()
+		if err := d.StopQueue(cleanupCtx); err != nil {
+			t.Error(err)
+		}
+	})
 	first := d.CreateTicket("owner", "room", "first", "", "", "")
 	if err := d.EnqueueTicket(first.ID, nil); err != nil {
 		t.Fatal(err)

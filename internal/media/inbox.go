@@ -703,7 +703,8 @@ func isScopedInboxDirectory(name string) bool {
 		}
 	}
 	for _, char := range suffix {
-		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z')) {
+		valid := (char >= '0' && char <= '9') || (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z')
+		if !valid {
 			return false
 		}
 	}

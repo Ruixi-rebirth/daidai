@@ -87,7 +87,11 @@ func awaitTestQQEvent(t *testing.T, events <-chan *entity.SensoryEvent) *entity.
 func TestMsgCache_PersistenceAndHit(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbMgr := db.NewManager(tmpDir)
-	defer dbMgr.Close()
+	t.Cleanup(func() {
+		if err := dbMgr.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 
 	cache1 := newMsgCache(10, dbMgr)
 	testMsgID := "msg_123456"
@@ -105,7 +109,11 @@ func TestMsgCache_PersistenceAndHit(t *testing.T) {
 func TestQQChannel_MessageReferenceResolutionAndZeroPrefix(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbMgr := db.NewManager(tmpDir)
-	defer dbMgr.Close()
+	t.Cleanup(func() {
+		if err := dbMgr.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	cache := newMsgCache(10, dbMgr)
 
 	referencedID := "ref_msg_888"

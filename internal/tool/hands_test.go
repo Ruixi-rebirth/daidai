@@ -73,7 +73,11 @@ func TestSysInfoTool_Execute(t *testing.T) {
 
 func TestRegisteredMemoryToolUsesConfiguredDatabase(t *testing.T) {
 	manager := db.NewManager(t.TempDir())
-	defer manager.Close()
+	t.Cleanup(func() {
+		if err := manager.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	ctx := context.Background()
 	if err := manager.ApplyFactMutations(ctx, "telegram", "scoped-user", []db.FactMutation{{Action: "ADD", Fact: "仅在指定数据库的测试事实"}}); err != nil {
 		t.Fatal(err)

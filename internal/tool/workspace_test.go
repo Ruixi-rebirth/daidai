@@ -15,7 +15,11 @@ import (
 func TestWorkspaceTool_CurrentListAndSwitch(t *testing.T) {
 	tempBase := t.TempDir()
 	dbMgr := db.NewManager(filepath.Join(tempBase, "db"))
-	defer dbMgr.Close()
+	t.Cleanup(func() {
+		if err := dbMgr.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 
 	projA := filepath.Join(tempBase, "project-1")
 	projB := filepath.Join(tempBase, "project-2")

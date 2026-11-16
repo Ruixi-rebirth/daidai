@@ -61,9 +61,7 @@ func TestFaceTool_MissingDelegates(t *testing.T) {
 
 func TestFaceTool_NotLoggedIn_FailFast(t *testing.T) {
 	tmpHome := t.TempDir()
-	origHome := os.Getenv("HOME")
 	t.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
 
 	tmpDir := t.TempDir()
 	delegates := entity.NewDelegates(&dummyWorker{})

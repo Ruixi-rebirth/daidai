@@ -13,7 +13,11 @@ import (
 
 func TestMemorySourcesCanPageThroughAllOriginalMessages(t *testing.T) {
 	store := db.NewManager(t.TempDir())
-	defer store.Close()
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	ctx := context.Background()
 	var ids []int64
 	for i := range 30 {
@@ -71,7 +75,11 @@ func TestMemorySourcesCanPageThroughAllOriginalMessages(t *testing.T) {
 
 func TestMemoryAddIsAdditiveAndRetainsRepeatedEvidence(t *testing.T) {
 	store := db.NewManager(t.TempDir())
-	defer store.Close()
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	tool := NewMemoryTool(store)
 	ctx := context.Background()
 	for _, fact := range []string{"周末喜欢去公园跑步", "周末喜欢去公园跑步", "周末喜欢去公园跑步和野餐"} {

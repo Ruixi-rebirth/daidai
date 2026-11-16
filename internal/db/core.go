@@ -505,7 +505,7 @@ func (m *Manager) ListUserRoles(ctx context.Context, platform string) ([]UserRol
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var roles []UserRole
 	for rows.Next() {
 		var role UserRole
@@ -576,7 +576,7 @@ func (m *Manager) ListPendingPrivateAccessRequests(ctx context.Context, platform
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var requests []PrivateAccessRequest
 	for rows.Next() {
 		var request PrivateAccessRequest
@@ -653,7 +653,7 @@ func (m *Manager) ListPrivateAccessInvites(ctx context.Context, platform string,
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var invites []PrivateAccessInvite
 	for rows.Next() {
 		var invite PrivateAccessInvite

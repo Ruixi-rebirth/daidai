@@ -57,7 +57,7 @@ func (c *Channel) FetchFile(ctx context.Context, ref string, limit int64) ([]byt
 		return nil, err
 	}
 	if result.Size > limit {
-		return nil, fmt.Errorf("Telegram file exceeds %d byte limit", limit)
+		return nil, fmt.Errorf("telegram file exceeds %d byte limit", limit)
 	}
 	if result.Path == "" || path.Clean(result.Path) != result.Path || strings.HasPrefix(result.Path, "/") || strings.HasPrefix(result.Path, "../") || strings.ContainsAny(result.Path, "\\?#") {
 		return nil, fmt.Errorf("invalid Telegram file path")
@@ -68,25 +68,25 @@ func (c *Channel) FetchFile(ctx context.Context, ref string, limit int64) ([]byt
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.telegram.org/file/bot"+c.cfg.Token+"/"+strings.Join(segments, "/"), nil)
 	if err != nil {
-		return nil, fmt.Errorf("Telegram file request construction failed")
+		return nil, fmt.Errorf("telegram file request construction failed")
 	}
 	response, err := c.http.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("Telegram file download failed")
+		return nil, fmt.Errorf("telegram file download failed")
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Telegram file download returned status %d", response.StatusCode)
+		return nil, fmt.Errorf("telegram file download returned status %d", response.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
 	if err != nil {
-		return nil, fmt.Errorf("Telegram file download interrupted")
+		return nil, fmt.Errorf("telegram file download interrupted")
 	}
 	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("Telegram file exceeds %d byte limit", limit)
+		return nil, fmt.Errorf("telegram file exceeds %d byte limit", limit)
 	}
 	return data, nil
 }

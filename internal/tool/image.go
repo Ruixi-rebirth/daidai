@@ -326,7 +326,8 @@ func isAGYConversationID(value string) bool {
 			return false
 		}
 		for _, char := range part {
-			if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')) {
+			valid := (char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')
+			if !valid {
 				return false
 			}
 		}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 
@@ -14,8 +13,8 @@ import (
 
 type dummyWorker struct{}
 
-func (d *dummyWorker) Name() string                                              { return "dummy" }
-func (d *dummyWorker) Description() string                                       { return "dummy worker" }
+func (d *dummyWorker) Name() string        { return "dummy" }
+func (d *dummyWorker) Description() string { return "dummy worker" }
 func (d *dummyWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (string, error) {
 	return "ok", nil
 }
@@ -23,9 +22,7 @@ func (d *dummyWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (stri
 func TestImageTool_NotLoggedIn_FailFast(t *testing.T) {
 	// 隔离 HOME 目录，模拟未登录状态
 	tmpHome := t.TempDir()
-	origHome := os.Getenv("HOME")
 	t.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
 
 	// 确认当前未登录
 	if err := llm.CheckAGYAuth(); !errors.Is(err, llm.ErrAGYNotLoggedIn) {

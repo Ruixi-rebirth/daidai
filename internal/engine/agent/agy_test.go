@@ -23,7 +23,11 @@ func getAGYTestSession(t *testing.T, worker *AGYWorker, platform, channelID, cwd
 func TestAGYSessionPersistenceAndResetArePlatformScoped(t *testing.T) {
 	base := t.TempDir()
 	store := db.NewManager(filepath.Join(base, "db"))
-	defer store.Close()
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	worker := NewAGYWorkerWithConfig(AGYWorkerConfig{DefaultDir: base, SessionDB: store})
 	ctx := context.Background()
 	sessions := make(map[string]*AgySessionState)
@@ -158,9 +162,7 @@ func TestAGYWorker_ResolveWorkDir(t *testing.T) {
 
 func TestAGYWorker_NotLoggedIn_FailFast(t *testing.T) {
 	tmpHome := t.TempDir()
-	origHome := os.Getenv("HOME")
 	t.Setenv("HOME", tmpHome)
-	defer os.Setenv("HOME", origHome)
 
 	worker := NewAGYWorker(tmpHome, nil)
 	ticket := &entity.Ticket{

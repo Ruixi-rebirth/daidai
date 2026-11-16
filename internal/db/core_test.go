@@ -8,7 +8,11 @@ import (
 
 func TestFactSourceListsAreValidatedAtomically(t *testing.T) {
 	manager := NewManager(t.TempDir())
-	defer manager.Close()
+	t.Cleanup(func() {
+		if err := manager.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	ctx := context.Background()
 	newMessage := func(user, text string) int64 {
 		t.Helper()
@@ -47,7 +51,11 @@ func TestFactSourceListsAreValidatedAtomically(t *testing.T) {
 
 func TestManager_MessagesAndFactMutations(t *testing.T) {
 	mgr := NewManager(t.TempDir())
-	defer mgr.Close()
+	t.Cleanup(func() {
+		if err := mgr.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 
 	ctx := context.Background()
 
@@ -170,7 +178,11 @@ func TestManager_MessagesAndFactMutations(t *testing.T) {
 
 func TestPrivateFactSourceScope(t *testing.T) {
 	m := NewManager(t.TempDir())
-	defer m.Close()
+	t.Cleanup(func() {
+		if err := m.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name, user, chat, conv string

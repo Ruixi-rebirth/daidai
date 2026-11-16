@@ -98,7 +98,7 @@ func (c *Channel) call(ctx context.Context, method string, body io.Reader, conte
 		}
 		return fmt.Errorf("telegram %s transport failed", method)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var envelope struct {
 		OK     bool            `json:"ok"`
 		Result json.RawMessage `json:"result"`

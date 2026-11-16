@@ -95,7 +95,7 @@ func quotedImagesFromEvent(event *entity.SensoryEvent) ([]*core.Attachment, int)
 		}
 	}
 	for current := event; current != nil; current = current.ReplyContext {
-		if !(current.ContentComplete && current.ContentKind == "text_card") {
+		if !current.ContentComplete || current.ContentKind != "text_card" {
 			omitted += current.OmittedImages
 		}
 	}
@@ -1297,20 +1297,6 @@ func validateToolCalls(calls []core.ToolCall) error {
 		}
 	}
 	return nil
-}
-
-func cardFallbackCaption(content string) string {
-	for _, line := range strings.Split(content, "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "#") {
-			continue
-		}
-		title := strings.TrimSpace(strings.TrimLeft(line, "#"))
-		if title != "" {
-			return fmt.Sprintf("📄 %s", core.TruncateRunes(title, 80, "…"))
-		}
-	}
-	return "📄 整理内容"
 }
 
 // RecordInbound persists accepted user input before debounce can merge messages
