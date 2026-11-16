@@ -360,7 +360,9 @@ func (c *Channel) Stop(ctx context.Context) error {
 	select {
 	case <-done:
 		if c.queue != nil {
-			c.queue.Stop()
+			if err := c.queue.Shutdown(ctx); err != nil {
+				return err
+			}
 		}
 		c.mu.Lock()
 		c.cancel = nil

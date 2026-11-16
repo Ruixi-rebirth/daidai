@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/png"
@@ -16,6 +17,7 @@ import (
 	"daidai/internal/core"
 	"daidai/internal/db"
 	"daidai/internal/entity"
+	"daidai/internal/kernel"
 	"daidai/internal/media"
 )
 
@@ -277,5 +279,26 @@ func TestPollingPersistsOffsetAndStops(t *testing.T) {
 	}
 	if c.Ready() {
 		t.Fatal("stopped channel reports ready")
+	}
+}
+
+func TestStopWaitsForActiveHandler(t *testing.T) {
+	c := testChannel(t)
+	started, release := make(chan struct{}), make(chan struct{})
+	c.queue = kernel.NewDebounceManager(kernel.DebounceConfig{}, func(*entity.SensoryEvent) { close(started); <-release })
+	c.cancel = func() {}
+	c.done = make(chan struct{})
+	close(c.done)
+	c.queue.Push(&entity.SensoryEvent{Platform: "telegram", ChannelID: "42", Content: "/help"})
+	<-started
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := c.Stop(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("stop returned before handler finished: %v", err)
+	}
+	close(release)
+	if err := c.Stop(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }

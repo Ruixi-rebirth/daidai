@@ -66,3 +66,12 @@ func TestDebounceManager_MergeAndImmediateControlBypass(t *testing.T) {
 		t.Fatalf("合并文本不匹配，得到: %q, 预期: %q", finalMergedText, expected)
 	}
 }
+
+func TestTargetedStopUsesImmediateControlChannel(t *testing.T) {
+	if !isImmediateControlEvent("/stop tkt_123") {
+		t.Fatal("targeted stop would wait behind ordinary turns")
+	}
+	if isImmediateControlEvent("/stopping tkt_123") {
+		t.Fatal("ordinary text was treated as a stop command")
+	}
+}

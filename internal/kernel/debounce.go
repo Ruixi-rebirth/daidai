@@ -121,7 +121,7 @@ func (m *DebounceManager) Push(event *core.SensoryEvent) bool {
 	if isImmediateControlEvent(event.Content) {
 		trimmedCommand := strings.TrimSpace(event.Content)
 		controlSlots := m.controlSlots
-		if trimmedCommand == "/stop" {
+		if isStopCommand(trimmedCommand) {
 			controlSlots = m.stopSlots
 		}
 		select {
@@ -253,6 +253,9 @@ func (m *DebounceManager) Push(event *core.SensoryEvent) bool {
 
 func isImmediateControlEvent(content string) bool {
 	command := strings.TrimSpace(content)
+	if isStopCommand(command) {
+		return true
+	}
 	switch command {
 	case "继续", "/continue",
 		"/tasks", "/status", "/sysinfo", "/usage", "/model", "/models",
@@ -272,6 +275,10 @@ func isImmediateControlEvent(content string) bool {
 	// Authorization-code parsing is case-insensitive in SuperAgent.
 	lowerCommand := strings.ToLower(command)
 	return strings.HasPrefix(lowerCommand, "/agy code ") || strings.HasPrefix(lowerCommand, "/agy auth ")
+}
+
+func isStopCommand(command string) bool {
+	return command == "/stop" || strings.HasPrefix(command, "/stop ")
 }
 
 func controlCommandName(command string) string {
