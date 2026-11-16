@@ -57,7 +57,7 @@ func (t *MemoryTool) Parameters() map[string]any {
 			"action": map[string]any{
 				"type":        "string",
 				"enum":        []string{"add", "update", "delete", "search", "list", "profile", "source"},
-				"description": "操作类型：profile 生成当前用户的印象与记忆图卡；list 列出当前页记忆；source 查询指定记忆的原始消息依据；profile、list 默认第 1 页、每页 12 条，下一页或上一页使用 page_direction，指定页码使用 page；search 检索当前范围的长期事实与历史对话，命中事实超过 12 条时每页展示 12 条，翻页沿用相同 query；add、update、delete 管理当前范围的长期事实",
+				"description": "操作类型：profile 生成当前用户的印象与记忆图卡；list 列出当前页记忆；source 分页查询指定记忆的原始消息依据，每页 5 条；profile、list 默认第 1 页、每页 12 条，下一页或上一页使用 page_direction，指定页码使用 page；search 检索当前范围的长期事实与历史对话，命中事实超过 12 条时每页展示 12 条，翻页沿用相同 query；add、update、delete 管理当前范围的长期事实",
 			},
 			"fact": map[string]any{
 				"type":        "string",
@@ -74,12 +74,12 @@ func (t *MemoryTool) Parameters() map[string]any {
 			"page": map[string]any{
 				"type":        "integer",
 				"minimum":     1,
-				"description": "profile、list、search 页码（从 1 开始）；search 翻页时沿用相同 query，用户说下一页、上一页或指定页码时按上下文传入",
+				"description": "profile、list、search、source 页码（从 1 开始）；search 翻页时沿用相同 query，用户说下一页、上一页或指定页码时按上下文传入",
 			},
 			"page_direction": map[string]any{
 				"type":        "string",
 				"enum":        []string{"next", "previous", "first"},
-				"description": "profile、list 页码方向；翻页时按此参数移动当前列表页，用户指定 page 时优先使用 page",
+				"description": "profile、list、search、source 页码方向；翻页时按此参数移动当前列表页，用户指定 page 时优先使用 page",
 			},
 		},
 		"required": []string{"action"},
@@ -120,30 +120,7 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 		if args.FactID <= 0 {
 			return &core.ToolResult{Text: "参数错误：source 操作必须提供有效的 fact_id。"}, nil
 		}
-		sources, err := t.db.ListVisibleFactSources(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup, args.FactID)
-		if err != nil {
-			return nil, fmt.Errorf("读取记忆来源失败: %w", err)
-		}
-		if len(sources) == 0 {
-			return &core.ToolResult{Text: fmt.Sprintf("记忆 ID %d 没有可查看的来源记录，或它不属于当前会话可见范围。", args.FactID)}, nil
-		}
-		var lines []string
-		for i, source := range sources {
-			if i == 5 {
-				break
-			}
-			text := singleLineText(source.Text)
-			text = core.TruncateRunes(text, 300, "…")
-			if source.Excerpt {
-				lines = append(lines, "- 已保存的来源摘录（旧记忆未关联原消息）：“"+text+"”")
-			} else {
-				lines = append(lines, fmt.Sprintf("- %s · 消息 %d：“%s”", source.CreatedAt.Format("2006-01-02 15:04"), source.MessageID, text))
-			}
-		}
-		if len(sources) > 5 {
-			lines = append(lines, fmt.Sprintf("另有 %d 条较早的来源消息。", len(sources)-5))
-		}
-		return &core.ToolResult{Text: fmt.Sprintf("记忆 ID %d 的来源：\n%s", args.FactID, strings.Join(lines, "\n"))}, nil
+		return t.sources(ctx, event, args)
 
 	case "ADD":
 		if factText == "" {
@@ -339,6 +316,44 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 	default:
 		return &core.ToolResult{Text: fmt.Sprintf("未知的记忆操作类型: %s", args.Action)}, nil
 	}
+}
+
+func (t *MemoryTool) sources(ctx context.Context, event *entity.SensoryEvent, args memoryArgs) (*core.ToolResult, error) {
+	const pageSize = 5
+	key := fmt.Sprintf("%s:source:%d", profilePageKey(event), args.FactID)
+	page := t.resolveProfilePage(key, args.Page, args.PageDirection)
+	sources, total, err := t.db.PageVisibleFactSources(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup, args.FactID, page, pageSize)
+	if err != nil {
+		return nil, fmt.Errorf("读取记忆来源失败: %w", err)
+	}
+	if total == 0 {
+		return &core.ToolResult{Text: fmt.Sprintf("记忆 ID %d 没有可查看的来源记录，或它不属于当前会话可见范围。", args.FactID)}, nil
+	}
+	totalPages := (total + pageSize - 1) / pageSize
+	resolved, atLastPage := t.reconcileProfilePage(key, page, totalPages, args.Page, args.PageDirection)
+	if atLastPage {
+		return &core.ToolResult{Text: fmt.Sprintf("记忆 ID %d 的来源已到最后一页（共 %d 页）。", args.FactID, totalPages)}, nil
+	}
+	if resolved > totalPages {
+		return &core.ToolResult{Text: fmt.Sprintf("记忆 ID %d 的来源共 %d 页，没有第 %d 页。", args.FactID, totalPages, resolved)}, nil
+	}
+	if resolved != page {
+		sources, _, err = t.db.PageVisibleFactSources(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup, args.FactID, resolved, pageSize)
+		if err != nil {
+			return nil, fmt.Errorf("重新读取记忆来源失败: %w", err)
+		}
+	}
+	t.setProfilePage(key, resolved)
+	lines := []string{fmt.Sprintf("记忆 ID %d 的来源 · 第 %d/%d 页 · 共 %d 条：", args.FactID, resolved, totalPages, total)}
+	for _, source := range sources {
+		text := core.TruncateRunes(singleLineText(source.Text), 300, "…")
+		if source.Excerpt {
+			lines = append(lines, "- 保存的来源摘录（未关联原消息）：“"+text+"”")
+		} else {
+			lines = append(lines, fmt.Sprintf("- %s · 消息 %d：“%s”", source.CreatedAt.Format("2006-01-02 15:04"), source.MessageID, text))
+		}
+	}
+	return &core.ToolResult{Text: strings.Join(lines, "\n")}, nil
 }
 
 func (t *MemoryTool) profile(ctx context.Context, event *entity.SensoryEvent, requestedPage int, direction string) (*core.ToolResult, error) {

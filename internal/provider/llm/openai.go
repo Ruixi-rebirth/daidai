@@ -40,7 +40,7 @@ func NewOpenAIProvider(cfg OpenAIConfig) *OpenAIProvider {
 		cfg.BaseURL = "https://api.openai.com/v1"
 	}
 	if cfg.Timeout <= 0 {
-		cfg.Timeout = 60 * time.Second
+		cfg.Timeout = 4 * time.Minute
 	}
 	return &OpenAIProvider{
 		cfg:             cfg,

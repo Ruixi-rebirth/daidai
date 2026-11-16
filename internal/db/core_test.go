@@ -38,7 +38,7 @@ func TestFactSourceListsAreValidatedAtomically(t *testing.T) {
 		if err != nil || len(facts) != 1 || facts[0].Content != "喜欢茶" {
 			t.Fatalf("%s did not roll back: facts=%v error=%v", action, facts, err)
 		}
-		sources, err := manager.ListVisibleFactSources(ctx, "qq", "owner", "chat", false, id)
+		sources, _, err := manager.PageVisibleFactSources(ctx, "qq", "owner", "chat", false, id, 1, 100)
 		if err != nil || len(sources) != 2 {
 			t.Fatalf("%s lost the previous sources: sources=%v error=%v", action, sources, err)
 		}

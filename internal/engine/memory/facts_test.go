@@ -82,7 +82,7 @@ func TestRepeatedFactAddsEvidenceWithoutDuplicatingFact(t *testing.T) {
 	if err != nil || len(facts) != 1 {
 		t.Fatalf("facts=%v error=%v", facts, err)
 	}
-	sources, err := store.ListVisibleFactSources(context.Background(), "qq", "user", "private", false, facts[0].ID)
+	sources, _, err := store.PageVisibleFactSources(context.Background(), "qq", "user", "private", false, facts[0].ID, 1, 100)
 	if err != nil || len(sources) != 2 {
 		t.Fatalf("expected both supporting messages, sources=%v error=%v", sources, err)
 	}
@@ -99,7 +99,7 @@ func TestMergedTurnRetainsEveryOriginalSourceMessage(t *testing.T) {
 	if err != nil || len(facts) != 1 {
 		t.Fatalf("facts=%v error=%v", facts, err)
 	}
-	sources, err := store.ListVisibleFactSources(context.Background(), "qq", "user", "private", false, facts[0].ID)
+	sources, _, err := store.PageVisibleFactSources(context.Background(), "qq", "user", "private", false, facts[0].ID, 1, 100)
 	if err != nil || len(sources) != 2 {
 		t.Fatalf("merged fact lost the original evidence: sources=%v error=%v", sources, err)
 	}

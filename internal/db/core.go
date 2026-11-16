@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS user_fact_sources (
     FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_fact_sources_message ON user_fact_sources(message_id, fact_id);
+CREATE INDEX IF NOT EXISTS idx_fact_sources_page ON user_fact_sources(fact_id, linked_at DESC, message_id DESC);
 
 CREATE TABLE IF NOT EXISTS qq_quote_records (
     msg_id        TEXT NOT NULL,
@@ -1167,59 +1168,73 @@ type FactSource struct {
 	Excerpt   bool
 }
 
-// ListVisibleFactSources returns source messages only when the fact belongs to
-// the user's currently visible scope. It also exposes the saved quote for facts
-// created before message-level provenance was recorded.
-func (m *Manager) ListVisibleFactSources(ctx context.Context, platform, userID, groupID string, isGroup bool, factID int64) ([]FactSource, error) {
+// PageVisibleFactSources reads a consistent count and page of original messages
+// in the current fact scope. A saved excerpt is one item if no messages remain.
+func (m *Manager) PageVisibleFactSources(ctx context.Context, platform, userID, groupID string, isGroup bool, factID int64, page, pageSize int) ([]FactSource, int, error) {
+	if page < 1 || pageSize < 1 || pageSize > 100 || page-1 > int(^uint(0)>>1)/pageSize {
+		return nil, 0, fmt.Errorf("invalid source page %d with size %d", page, pageSize)
+	}
 	database, err := m.GetConn(platform)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	tx, err := database.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
 	scopeType, scopeID := "global", ""
 	if isGroup {
 		if strings.TrimSpace(groupID) == "" {
-			return nil, fmt.Errorf("group ID is required to read group fact sources")
+			return nil, 0, fmt.Errorf("group ID is required to read group fact sources")
 		}
 		scopeType, scopeID = "group", groupID
 	}
 	var quote string
-	err = database.QueryRowContext(ctx, `SELECT quote FROM user_facts
-		WHERE id = ? AND platform = ? AND user_id = ? AND scope_type = ? AND scope_id = ? AND status = 'active'`,
-		factID, NormPlatform(platform), userID, scopeType, scopeID).Scan(&quote)
+	args := []any{factID, NormPlatform(platform), userID, scopeType, scopeID}
+	err = tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT substr(quote, 1, %d) FROM user_facts
+		WHERE id = ? AND platform = ? AND user_id = ? AND scope_type = ? AND scope_id = ? AND status = 'active'`, core.MaxUserMessageRunes), args...).Scan(&quote)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+		return nil, 0, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	rows, err := database.QueryContext(ctx, `SELECT m.id, m.text, m.created_at
-		FROM user_fact_sources s
+	const sourceQuery = `FROM user_fact_sources s
 		JOIN user_facts f ON f.id = s.fact_id
 		JOIN messages m ON m.id = s.message_id AND m.platform = f.platform AND m.user_id = f.user_id AND m.is_bot = 0
 			AND ((f.scope_type = 'global' AND m.chat_type = 'private') OR (f.scope_type = 'group' AND m.chat_type = 'group' AND m.conv_id = f.scope_id))
-		WHERE s.fact_id = ? AND f.platform = ? AND f.user_id = ? AND f.scope_type = ? AND f.scope_id = ? AND f.status = 'active'
-		ORDER BY s.linked_at DESC, m.id DESC LIMIT 20`, factID, NormPlatform(platform), userID, scopeType, scopeID)
+		WHERE s.fact_id = ? AND f.platform = ? AND f.user_id = ? AND f.scope_type = ? AND f.scope_id = ? AND f.status = 'active'`
+	var total int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) `+sourceQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	if total == 0 && strings.TrimSpace(quote) != "" {
+		if page == 1 {
+			return []FactSource{{Text: quote, Excerpt: true}}, 1, nil
+		}
+		return nil, 1, nil
+	}
+	query := fmt.Sprintf(`SELECT m.id, substr(m.text, 1, %d), m.created_at `, core.MaxUserMessageRunes) + sourceQuery + ` ORDER BY s.linked_at DESC, m.id DESC LIMIT ? OFFSET ?`
+	rows, err := tx.QueryContext(ctx, query, append(args, pageSize, (page-1)*pageSize)...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer func() { _ = rows.Close() }()
-	sources := make([]FactSource, 0, 4)
+	sources := make([]FactSource, 0, pageSize)
 	for rows.Next() {
 		var source FactSource
 		var createdAt int64
 		if err := rows.Scan(&source.MessageID, &source.Text, &createdAt); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		source.CreatedAt = time.UnixMilli(createdAt)
 		sources = append(sources, source)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	if len(sources) == 0 && strings.TrimSpace(quote) != "" {
-		sources = append(sources, FactSource{Text: quote, Excerpt: true})
-	}
-	return sources, nil
+	return sources, total, nil
 }
 
 // UpdateMessageEmbedding 异步回填消息的稠密语义向量

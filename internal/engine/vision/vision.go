@@ -367,7 +367,8 @@ func (e *Engine) describeWithAPI(ctx context.Context, imageURLs []string, userTe
 
 	var res struct {
 		Choices []struct {
-			Message struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
@@ -381,6 +382,10 @@ func (e *Engine) describeWithAPI(ctx context.Context, imageURLs []string, userTe
 	output := strings.TrimSpace(res.Choices[0].Message.Content)
 	if output == "" {
 		return "", nil, fmt.Errorf("empty output from vision model")
+	}
+	switch strings.ToLower(strings.TrimSpace(res.Choices[0].FinishReason)) {
+	case "length", "max_tokens", "max_output_tokens":
+		output = "[视觉模型输出已截断，以下仅为部分观察]\n" + output
 	}
 	return output, processedIndexes, nil
 }

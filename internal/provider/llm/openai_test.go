@@ -1,12 +1,55 @@
 package llm
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"daidai/internal/core"
 )
+
+func TestOpenAIRequestRespondsToCallerCancellation(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		close(entered)
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+	provider := NewOpenAIProvider(OpenAIConfig{BaseURL: server.URL, APIKey: "fixture", Model: "fixture"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := provider.Chat(ctx, []core.ChatMessage{{Role: core.RoleUser, Content: "hello"}}, nil)
+		done <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("request did not reach fixture server")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("caller cancellation was not preserved: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("long request did not respond to cancellation")
+	}
+}
 
 func TestOpenAIChatRequest_Serialization(t *testing.T) {
 	req := openAIChatRequest{
