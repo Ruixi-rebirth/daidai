@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"log/slog"
@@ -35,6 +36,7 @@ func (c *Channel) Transmit(ctx context.Context, u *entity.Utterance) error {
 	for len(sources) < len(images) {
 		sources = append(sources, "")
 	}
+	sources = sources[:len(images)]
 	// Validate before delivering any part of the response.
 	for _, data := range images {
 		if len(data) == 0 || len(data) > core.MaxImageBytes {
@@ -55,6 +57,13 @@ func (c *Channel) Transmit(ctx context.Context, u *entity.Utterance) error {
 	}
 	delivered := ""
 	sent := false
+	deliveredImages := 0
+	partial := func(err error, remainingText string) error {
+		completeSources, pendingSources := imageDeliveryText(sources, deliveredImages)
+		return &entity.PartialDeliveryError{Err: err,
+			DeliveredText:   joinDeliveryText(completeSources, delivered),
+			UndeliveredText: joinDeliveryText(pendingSources, remainingText)}
+	}
 	for start := 0; start < len(images); start += 10 {
 		end := min(start+10, len(images))
 		batchCaption := ""
@@ -63,12 +72,18 @@ func (c *Channel) Transmit(ctx context.Context, u *entity.Utterance) error {
 		}
 		results, err := c.sendImages(ctx, u.ChannelID, reply, images[start:end], batchCaption)
 		if err != nil {
-			if sent {
-				return &entity.PartialDeliveryError{Err: err, DeliveredText: delivered, UndeliveredText: text}
+			var receiptErr *entity.PartialDeliveryError
+			if sent || errors.As(err, &receiptErr) {
+				remaining := text
+				if !sent {
+					remaining = joinDeliveryText(caption, text)
+				}
+				return partial(err, remaining)
 			}
 			return err
 		}
 		sent = true
+		deliveredImages = end
 		if batchCaption != "" {
 			delivered = batchCaption
 		}
@@ -99,13 +114,60 @@ func (c *Channel) Transmit(ctx context.Context, u *entity.Utterance) error {
 		}
 		if err := c.sendFormattedText(ctx, u.ChannelID, formattedChunks[i], reply, chunk); err != nil {
 			if sent {
-				return &entity.PartialDeliveryError{Err: err, DeliveredText: strings.TrimSpace(delivered + "\n" + strings.Join(chunks[:i], "\n")), UndeliveredText: strings.Join(chunks[i:], "\n")}
+				delivered = joinDeliveryText(delivered, strings.Join(chunks[:i], "\n"))
+				return partial(err, strings.Join(chunks[i:], "\n"))
 			}
 			return err
 		}
 		sent = true
 	}
 	return nil
+}
+
+// A paginated card may repeat its full source on every page. Only count that
+// source as delivered after every page carrying it has been accepted.
+func imageDeliveryText(sources []string, delivered int) (complete, pending string) {
+	last := make(map[string]int)
+	for i, source := range sources {
+		if source = strings.TrimSpace(source); source != "" {
+			last[source] = i
+		}
+	}
+	seen := make(map[string]bool)
+	var done, todo []string
+	missingImages := 0
+	for i, source := range sources {
+		source = strings.TrimSpace(source)
+		if source == "" {
+			if i >= delivered {
+				missingImages++
+			}
+			continue
+		}
+		if seen[source] {
+			continue
+		}
+		seen[source] = true
+		if last[source] < delivered {
+			done = append(done, source)
+		} else {
+			todo = append(todo, source)
+		}
+	}
+	if missingImages > 0 {
+		todo = append(todo, fmt.Sprintf("[%d 张图片未发送完成；图片无法通过文字续发，请重新请求发送或生成。]", missingImages))
+	}
+	return strings.Join(done, "\n\n"), strings.Join(todo, "\n\n")
+}
+
+func joinDeliveryText(parts ...string) string {
+	var result []string
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			result = append(result, part)
+		}
+	}
+	return strings.Join(result, "\n\n")
 }
 
 // Telegram albums carry 2–10 photos. A remaining single photo uses sendPhoto.
