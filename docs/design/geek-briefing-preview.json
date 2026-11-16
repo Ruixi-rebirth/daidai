@@ -1,0 +1,115 @@
+{
+  "sample": true,
+  "edition_id": "sample-2026-11-16",
+  "date": "2026.11.16",
+  "weekday": "周一",
+  "cutoff": "08:01 SGT",
+  "leads": [
+    "01",
+    "06"
+  ],
+  "items": [
+    {
+      "id": "demo:nix:1",
+      "number": "01",
+      "page": 1,
+      "source": "nixos",
+      "title": "配置检查前移，部署时就发现问题",
+      "summary": "示例模块把必要参数检查放进部署阶段，减少服务启动后才暴露的配置错误。适合频繁调整自托管服务的人关注。",
+      "meta": "官方公告 · 新发布",
+      "url": "https://example.com/briefing/01",
+      "evidence_kind": "source_body"
+    },
+    {
+      "id": "demo:nix:2",
+      "number": "02",
+      "page": 1,
+      "source": "nixos",
+      "title": "给桌面配置一份可重复的排障记录",
+      "summary": "项目作者介绍了记录桌面组件版本与配置的方法，用来缩小升级后的排查范围。这是一种排障实践，不是通用修复方案。",
+      "meta": "社区首帖 · 18 个赞",
+      "url": "https://example.com/briefing/02",
+      "evidence_kind": "source_body"
+    },
+    {
+      "id": "demo:hn:3",
+      "number": "03",
+      "page": 1,
+      "source": "hn",
+      "title": "小服务的内存，先测清楚再优化",
+      "summary": "作者比较了缓存、连接池和日志缓冲的常驻开销，建议先定位占用大头。对资源有限的个人服务器，这比直接加配置更有参考价值。",
+      "meta": "240 分 · 68 条讨论",
+      "url": "https://example.com/briefing/03",
+      "discussion_url": "https://example.com/discuss/03",
+      "evidence_kind": "article_excerpt"
+    },
+    {
+      "id": "demo:hn:4",
+      "number": "04",
+      "page": 2,
+      "source": "hn",
+      "title": "SQLite 并发，重点是缩短写事务",
+      "summary": "文章用一个小型服务说明长事务怎样拖慢其他请求，并把网络调用移出写事务。这个例子有助于理解为什么数据库操作应该尽量短小。",
+      "meta": "196 分 · 41 条讨论",
+      "url": "https://example.com/briefing/04",
+      "discussion_url": "https://example.com/discuss/04",
+      "evidence_kind": "article_excerpt"
+    },
+    {
+      "id": "demo:hn:5",
+      "number": "05",
+      "page": 2,
+      "source": "hn",
+      "title": "生成代码以后，怎样验证改动？",
+      "summary": "作者分享了把需求、失败样例与验证结果一起保留的开发流程。重点是让代码改动可核对，而不是只看模型是否宣布完成。",
+      "meta": "181 分 · 52 条讨论",
+      "url": "https://example.com/briefing/05",
+      "discussion_url": "https://example.com/discuss/05",
+      "evidence_kind": "article_excerpt"
+    },
+    {
+      "id": "demo:github:6",
+      "number": "06",
+      "page": 2,
+      "source": "github",
+      "title": "Pocket Backup：轻量备份",
+      "summary": "一个用 Go 编写的命令行项目，README 介绍了增量备份和恢复检查。适合偏好简单工具、无需完整管理面板的个人服务。",
+      "meta": "Go · 860 Star · 三日内新项目",
+      "url": "https://example.com/briefing/06",
+      "evidence_kind": "readme_excerpt"
+    },
+    {
+      "id": "demo:github:7",
+      "number": "07",
+      "page": 3,
+      "source": "github",
+      "title": "Flake Lens：看清输入之间的依赖",
+      "summary": "项目用图形展示 flake 输入的依赖关系，帮助核对重复输入与锁定版本。适合在升级前确认哪些组件可能需要一起调整。",
+      "meta": "Nix · 420 Star · 近期维护",
+      "url": "https://example.com/briefing/07",
+      "evidence_kind": "readme_excerpt"
+    },
+    {
+      "id": "demo:v2ex:8",
+      "number": "08",
+      "page": 3,
+      "source": "v2ex",
+      "title": "备份做了，恢复真的试过吗？",
+      "summary": "发帖者复盘了一次恢复演练，提醒读者核对数据库、附件和密钥是否能一起还原。主题重点是恢复结果，而非只检查备份任务成功。",
+      "meta": "Linux · 36 条回复 · 首帖摘要",
+      "url": "https://example.com/briefing/08",
+      "evidence_kind": "source_body"
+    },
+    {
+      "id": "demo:v2ex:9",
+      "number": "09",
+      "page": 3,
+      "source": "v2ex",
+      "title": "低配机器上，你怎样安排日志保留？",
+      "summary": "",
+      "meta": "程序员 · 22 条回复",
+      "url": "https://example.com/briefing/09",
+      "evidence_kind": "title_only"
+    }
+  ]
+}

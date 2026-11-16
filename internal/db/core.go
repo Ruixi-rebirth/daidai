@@ -280,6 +280,20 @@ func (m *Manager) GetConn(platform string) (*sql.DB, error) {
 	}
 
 	dbPath := filepath.Join(m.baseDir, p+".db")
+	db, err := OpenSQLite(dbPath, schema)
+	if err != nil {
+		return nil, err
+	}
+	m.conns[p] = db
+	return db, nil
+}
+
+// OpenSQLite opens a private SQLite store with the caller's schema. Shared
+// application stores do not need to impersonate a messaging platform.
+func OpenSQLite(dbPath, schema string) (*sql.DB, error) {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
+		return nil, err
+	}
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)", dbPath)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -289,14 +303,13 @@ func (m *Manager) GetConn(platform string) (*sql.DB, error) {
 
 	if _, err := db.Exec(schema); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("init schema for %s failed: %w", p, err)
+		return nil, fmt.Errorf("init schema failed: %w", err)
 	}
 	if err := os.Chmod(dbPath, 0600); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("secure database file permissions for %s failed: %w", p, err)
+		return nil, fmt.Errorf("secure database file permissions failed: %w", err)
 	}
 
-	m.conns[p] = db
 	return db, nil
 }
 

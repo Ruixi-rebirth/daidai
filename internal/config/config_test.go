@@ -43,3 +43,18 @@ func TestExplicitZeroExecutionTimeoutDisablesDeadline(t *testing.T) {
 		t.Fatalf("explicit zero timeout must stay disabled, got %q (%v)", cfg.Agent.ExecutionTimeout, err)
 	}
 }
+
+func TestBriefingDefaultsAndValidation(t *testing.T) {
+	if !DefaultConfig().Briefing.Enabled || DefaultConfig().Briefing.Time != "08:00" || DefaultConfig().Briefing.Timezone != "Asia/Singapore" {
+		t.Fatal("incorrect briefing defaults")
+	}
+	for _, body := range []string{"briefing:\n  time: '25:00'\n", "briefing:\n  timezone: invalid/place\n"} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadConfig(path); err == nil {
+			t.Fatal("invalid briefing schedule accepted")
+		}
+	}
+}

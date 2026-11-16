@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"daidai/internal/briefing"
 	"daidai/internal/config"
 	"daidai/internal/core"
 	"daidai/internal/db"
@@ -35,6 +36,8 @@ type HandsConfig struct {
 	EnableNixSearch bool
 	OCIConfig       *config.OCIConfig
 	OCIClient       *OCIClient
+	Briefing        *briefing.Service
+	BriefingOwners  map[string]string
 }
 
 // NewHandsWithConfig 按配置挂载原子双手
@@ -43,6 +46,10 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 		tools: make(map[string]core.Tool),
 	}
 	h.Register(NewRenderTool())
+	if cfg.Briefing != nil {
+		h.Register(NewBriefingTool(cfg.Briefing, cfg.BriefingOwners, false))
+		h.Register(NewBriefingTool(cfg.Briefing, cfg.BriefingOwners, true))
+	}
 	h.Register(NewSysInfoTool())
 	h.Register(NewMemoryTool(cfg.Database, cfg.Router))
 	if cfg.Database != nil && cfg.Immune != nil {

@@ -2,6 +2,7 @@ package qq
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -294,5 +295,37 @@ func TestQQChannel_V2MsgElementsQuoteResolution(t *testing.T) {
 	expectedQuoted := "建议采用事件驱动架构与 Actor 模型结合"
 	if capturedEvent.ReplyContext.Content != expectedQuoted {
 		t.Fatalf("expected ReplyContext %q, got %q", expectedQuoted, capturedEvent.ReplyContext.Content)
+	}
+}
+
+func TestQQUsesPerPageSourcesForQuotesAndPartialDelivery(t *testing.T) {
+	client := NewClient("test", "test")
+	count := 0
+	var metadata []QuoteMetadata
+	client.SetOnMessageSent(func(_, _, _, _ string, m QuoteMetadata) { metadata = append(metadata, m) })
+	client.httpClient.Transport = qqTestTransport(func(req *http.Request) (*http.Response, error) {
+		body := `{"file_info":"uploaded"}`
+		status := 200
+		if !strings.HasSuffix(req.URL.Path, "/files") {
+			count++
+			body = `{"id":"sent"}`
+			if count == 2 {
+				status = 403
+				body = `{"code":403}`
+			}
+		}
+		return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})
+	channel := &QQChannel{client: client}
+	err := channel.Transmit(context.Background(), &entity.Utterance{ChannelID: "recipient", Proactive: true, Images: [][]byte{[]byte("one"), []byte("two")}, ImageSources: []string{"第一页原文", "第二页原文"}, FallbackText: "完整原文"})
+	var partial *entity.PartialDeliveryError
+	if !errors.As(err, &partial) {
+		t.Fatalf("expected partial failure, got %v", err)
+	}
+	if !strings.Contains(partial.DeliveredText, "第一页原文") || strings.Contains(partial.DeliveredText, "第二页原文") || !strings.Contains(partial.UndeliveredText, "第二页原文") {
+		t.Fatalf("wrong partial semantics: %+v", partial)
+	}
+	if len(metadata) == 0 || metadata[0].Text != "第一页原文" || metadata[0].Kind != qqQuoteTextCard {
+		t.Fatalf("wrong quote source: %+v", metadata)
 	}
 }

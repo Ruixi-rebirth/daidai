@@ -9,17 +9,20 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"daidai/internal/core"
+	"daidai/internal/entity"
 )
 
 const (
@@ -428,14 +431,18 @@ func mediaQuoteMetadata(content string) QuoteMetadata {
 // SendGroupMediaMessageWithContext associates the full text representation with
 // the image message so a later quote can recover the card's content.
 func (c *Client) SendGroupMediaMessageWithContext(ctx context.Context, groupOpenID, content string, imageData []byte, msgID string, metadata QuoteMetadata) error {
-	metadata.Kind = qqQuoteMixed
+	if metadata.Kind == "" {
+		metadata.Kind = qqQuoteMixed
+	}
 	return c.sendMediaMessage(ctx, "groups", groupOpenID, content, imageData, msgID, metadata)
 }
 
 // SendC2CMediaMessageWithContext associates the full text representation with
 // the image message so a later quote can recover the card's content.
 func (c *Client) SendC2CMediaMessageWithContext(ctx context.Context, userOpenID, content string, imageData []byte, msgID string, metadata QuoteMetadata) error {
-	metadata.Kind = qqQuoteMixed
+	if metadata.Kind == "" {
+		metadata.Kind = qqQuoteMixed
+	}
 	return c.sendMediaMessage(ctx, "users", userOpenID, content, imageData, msgID, metadata)
 }
 
@@ -448,7 +455,7 @@ func (c *Client) sendMediaMessage(ctx context.Context, targetType, targetID, con
 	}
 	fileInfo, err := c.UploadMedia(ctx, targetType, targetID, 1, imageData)
 	if err != nil {
-		return fmt.Errorf("%s image upload error: %w", targetType, err)
+		return &entity.UnsentError{Err: fmt.Errorf("%s image upload error: %w", targetType, err)}
 	}
 
 	url := fmt.Sprintf("%s/v2/%s/%s/messages", apiBaseURL, targetType, targetID)
@@ -547,12 +554,22 @@ func (c *Client) doJSON(ctx context.Context, method, url string, data any) ([]by
 			}
 			respBytes = retryBytes
 			resp.StatusCode = retryResp.StatusCode
+			resp.Header = retryResp.Header
 		} else {
 			return nil, fmt.Errorf("refresh QQ token after 401: %w", refErr)
 		}
 	}
 
 	if err := validateAPIResponse(resp.StatusCode, respBytes); err != nil {
+		var rejection *entity.DeliveryRejection
+		if errors.As(err, &rejection) && rejection.After > 0 {
+			value := resp.Header.Get("Retry-After")
+			if seconds, parseErr := strconv.ParseInt(value, 10, 32); parseErr == nil && seconds > 0 {
+				rejection.After = max(rejection.After, time.Duration(seconds)*time.Second)
+			} else if at, parseErr := http.ParseTime(value); parseErr == nil {
+				rejection.After = max(rejection.After, time.Until(at))
+			}
+		}
 		return respBytes, err
 	}
 
@@ -561,7 +578,15 @@ func (c *Client) doJSON(ctx context.Context, method, url string, data any) ([]by
 
 func validateAPIResponse(status int, respBytes []byte) error {
 	if status < 200 || status >= 300 {
-		return fmt.Errorf("api request failed [status=%d]: %s", status, summarizeAPIResponse(respBytes))
+		err := fmt.Errorf("api request failed [status=%d]: %s", status, summarizeAPIResponse(respBytes))
+		if status >= 400 && status < 500 {
+			delay := time.Duration(0)
+			if status == 429 {
+				delay = 5 * time.Minute
+			}
+			return &entity.DeliveryRejection{Err: err, After: delay}
+		}
+		return err
 	}
 	var apiError struct {
 		ErrCode int    `json:"err_code"`
@@ -577,7 +602,7 @@ func validateAPIResponse(status int, respBytes []byte) error {
 		if message == "" {
 			message = summarizeAPIResponse(respBytes)
 		}
-		return fmt.Errorf("api request rejected [code=%d]: %s", code, message)
+		return &entity.DeliveryRejection{Err: fmt.Errorf("api request rejected [code=%d]: %s", code, message)}
 	}
 	return nil
 }

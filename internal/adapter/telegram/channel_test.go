@@ -3,9 +3,11 @@ package telegram
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"daidai/internal/db"
 	"daidai/internal/entity"
@@ -75,5 +77,26 @@ func TestTransportFailureDoesNotExposeBotToken(t *testing.T) {
 	err := c.jsonCall(context.Background(), "getMe", map[string]any{}, nil)
 	if err == nil || strings.Contains(err.Error(), "secret-token") {
 		t.Fatalf("unsafe error: %v", err)
+	}
+}
+
+func TestProactiveOwnerVerificationRechecksUsername(t *testing.T) {
+	c := New(Config{Token: "secret", OwnerUsername: "Ruixi_rebirth"}, nil, nil, nil)
+	response := `{"ok":true,"result":{"id":123,"type":"private","username":"ruixi_rebirth"}}`
+	c.http.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(response))}, nil
+	})
+	if !c.VerifyOwnerPrivate(context.Background(), "123") {
+		t.Fatal("matching username rejected")
+	}
+	response = `{"ok":true,"result":{"id":123,"type":"private","username":"someone_else"}}`
+	if c.VerifyOwnerPrivate(context.Background(), "123") {
+		t.Fatal("numeric address became authorization")
+	}
+	response = `{"ok":false,"error_code":429,"parameters":{"retry_after":600}}`
+	err := c.jsonCall(context.Background(), "sendMessage", nil, nil)
+	var rejection *entity.DeliveryRejection
+	if !errors.As(err, &rejection) || rejection.After != 10*time.Minute {
+		t.Fatalf("rate-limit classification lost: %v", err)
 	}
 }

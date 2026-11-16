@@ -9,6 +9,7 @@
 - 自然语言调用工具，支持网页检索、系统状态查询和 AGY 工程任务
 - 生成图文卡片，并处理用户明确要求分析的图片或文件
 - 可选的 OCI 资源巡检与日报
+- 每日极客技术早报：四源精选、分页图卡、原文索引和自然语言订阅，支持 QQ/TG 私聊
 
 ## 快速开始
 
@@ -52,3 +53,4 @@ go build -o bin/daidai ./cmd/daidai
 - [工单与执行器](docs/workflow/agents.md)
 - [运行环境与部署](docs/workflow/runtime.md)
 - [安全与运维](docs/workflow/security-operations.md)
+- [极客早报与订阅](docs/workflow/briefing.md)

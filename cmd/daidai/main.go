@@ -17,6 +17,7 @@ import (
 
 	"daidai/internal/adapter/qq"
 	"daidai/internal/adapter/telegram"
+	"daidai/internal/briefing"
 	"daidai/internal/config"
 	"daidai/internal/core"
 	"daidai/internal/db"
@@ -286,6 +287,51 @@ func run() int {
 		attachmentInbox.RunCleanup(rootCtx)
 	}
 
+	channelRegistry := entity.NewChannelRegistry()
+	var telegramChannel *telegram.Channel
+	var briefingService *briefing.Service
+	briefingOwners := map[string]string{"qq": ownerOpenID, "telegram": strings.ToLower(strings.TrimPrefix(strings.TrimSpace(cfg.Telegram.OwnerUsername), "@"))}
+	if cfg.Briefing.Enabled {
+		briefingStore, openErr := briefing.Open("data/db/briefing.db")
+		if openErr != nil {
+			slog.Error("初始化早报归档失败", "err", openErr)
+			return 1
+		}
+		defer func() {
+			if closeErr := briefingStore.Close(); closeErr != nil {
+				slog.Warn("关闭早报归档失败")
+			}
+		}()
+		briefingService, err = briefing.New(rootCtx, briefingStore, cfg.Briefing, apiProvider, channelRegistry)
+		if err != nil {
+			slog.Error("初始化早报服务失败", "err", err)
+			return 1
+		}
+		defer func() {
+			cleanup, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
+			defer cancel()
+			if err := briefingService.Shutdown(cleanup); err != nil {
+				slog.Warn("早报服务清理未完成")
+			}
+		}()
+		briefingService.Verify = func(ctx context.Context, sub briefing.Subscription) bool {
+			if sub.Owner == "" || sub.Owner != briefingOwners[sub.Platform] {
+				return false
+			}
+			switch sub.Platform {
+			case "qq":
+				return cfg.QQ.Enabled && sub.Recipient == ownerOpenID
+			case "telegram":
+				return telegramChannel != nil && telegramChannel.VerifyOwnerPrivate(ctx, sub.Recipient)
+			}
+			return false
+		}
+		briefingService.Record = func(ctx context.Context, sub briefing.Subscription, text string) {
+			if _, err := database.LogBotReply(ctx, sub.Platform, "private", sub.Recipient, text, "", 0); err != nil {
+				slog.Error("briefing: 保存已送达历史失败")
+			}
+		}
+	}
 	hands := tool.NewHandsWithConfig(tool.HandsConfig{
 		AGYCommand:      agyCommand,
 		Router:          mindRouter,
@@ -297,6 +343,8 @@ func run() int {
 		EnableNixSearch: cfg.Plugins.NixSearch.Enabled,
 		OCIConfig:       &cfg.OCI,
 		OCIClient:       ociClient,
+		Briefing:        briefingService,
+		BriefingOwners:  briefingOwners,
 	})
 
 	// 具体认知大脑 (实现 entity.Cognition)
@@ -312,8 +360,6 @@ func run() int {
 	})
 
 	// 全双工通信管道 (实现 entity.Channel)
-	channelRegistry := entity.NewChannelRegistry()
-	var telegramChannel *telegram.Channel
 	if cfg.Telegram.Enabled {
 		telegramChannel = telegram.New(telegram.Config{Token: cfg.Telegram.Token, OwnerUsername: cfg.Telegram.OwnerUsername}, database, cortex.RecordInbound, immune)
 		telegramChannel.Inbox = attachmentInbox
@@ -348,6 +394,59 @@ func run() int {
 			mindRouter.RefreshModels(ctx)
 		},
 	})
+	if briefingService != nil {
+		superAgent.OnStop = func(ctx context.Context, event *entity.SensoryEvent) bool {
+			if !event.IsPartnerPrivate() {
+				return false
+			}
+			if !briefingService.Cancel(event.Platform, event.ChannelID) {
+				return false
+			}
+			if err := briefingService.Store.Pause(ctx, event.Platform, event.ChannelID, briefingService.Now().Format("2006-01-02")); err != nil {
+				slog.Warn("briefing: 保存取消状态失败")
+			}
+			return true
+		}
+		superAgent.OnSessionReset = func(ctx context.Context, event *entity.SensoryEvent) error {
+			if !event.IsPartnerPrivate() {
+				return nil
+			}
+			briefingService.Cancel(event.Platform, event.ChannelID)
+			return briefingService.Store.Viewed(ctx, event.Platform, event.ChannelID, "")
+		}
+		superAgent.OnPrivateInteraction = func(ctx context.Context, event *entity.SensoryEvent) {
+			noticeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			id, err := briefingService.Store.LastFailure(noticeCtx, event.Platform, event.ChannelID)
+			if err != nil || id == "" {
+				return
+			}
+			d, err := briefingService.Store.Delivery(noticeCtx, id, event.Platform, event.ChannelID)
+			if err != nil || d == nil {
+				return
+			}
+			text := id + " 的极客早报未完成投递，可以查询状态或补发。"
+			switch d.Status {
+			case "uncertain":
+				text = id + " 的早报发送结果未确认；如果没有收到，可以让我补发。"
+			case "partial":
+				text = id + " 的早报还有未送完的正文，可以说‘继续早报’补看。"
+			case "expired":
+				text = id + " 的早报已过自动补发时间，仍可让我查看已有刊物。"
+			}
+			if d.ErrorKind == "generation_failed" {
+				text = id + " 的早报生成未完成，可以让我重新尝试生成。"
+			}
+			u := &entity.Utterance{Platform: event.Platform, ChannelID: event.ChannelID, QuoteMsgID: event.RawMessageID, Text: text}
+			if err = channelRegistry.Transmit(noticeCtx, u); err != nil {
+				return
+			}
+			if err = briefingService.Store.Notice(noticeCtx, event.Platform, event.ChannelID); err != nil {
+				slog.Warn("briefing: 保存异常提醒状态失败")
+			}
+			briefingService.Record(noticeCtx, briefing.Subscription{Platform: event.Platform, Recipient: event.ChannelID}, text)
+		}
+	}
 
 	if err := superAgent.Start(rootCtx); err != nil {
 		slog.Error("启动 SuperAgent 失败", "err", err)
@@ -357,6 +456,9 @@ func run() int {
 		}
 		cleanupCancel()
 		return 1
+	}
+	if briefingService != nil {
+		briefingService.Start()
 	}
 
 	var ociSchedulerDone chan struct{}
@@ -397,6 +499,14 @@ func run() int {
 			"oci_scheduler": "disabled",
 		}
 		ready := true
+		if briefingService != nil {
+			checks["geek_briefing"] = "stopped"
+			if briefingService.Running.Load() {
+				checks["geek_briefing"] = "running"
+			} else {
+				ready = false
+			}
+		}
 		if cfg.Telegram.Enabled {
 			checks["telegram"] = "not_ready"
 			if telegramChannel != nil && telegramChannel.Ready() {
@@ -480,6 +590,11 @@ func run() int {
 	rootCancel()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
 	defer shutdownCancel()
+	if briefingService != nil {
+		if err := briefingService.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("早报服务未能在停机期限内收敛")
+		}
+	}
 	if ociSchedulerDone != nil {
 		select {
 		case <-ociSchedulerDone:

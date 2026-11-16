@@ -138,8 +138,9 @@ const (
 )
 
 type qqOutgoingPart struct {
-	text  string
-	image []byte
+	text   string
+	image  []byte
+	source string
 }
 
 type passiveReplyBudget struct {
@@ -1981,16 +1982,24 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 		return fmt.Errorf("%w: QQ 单次发送最多 %d 条，当前文字需要 %d 条，请缩短回复", entity.ErrMessageTooLong, partLimit, len(chunks))
 	}
 	parts := make([]qqOutgoingPart, 0, len(chunks)+len(images)-1)
+	sources := make([]string, len(images))
+	for index := range images {
+		sources[index] = u.FallbackText
+		if index < len(u.ImageSources) {
+			sources[index] = u.ImageSources[index]
+		}
+	}
 	for i, chunk := range chunks {
 		part := qqOutgoingPart{text: chunk}
 		if i == 0 && len(images) > 0 {
 			part.image = images[0]
+			part.source = sources[0]
 		}
 		parts = append(parts, part)
 	}
 	if len(images) > 1 {
-		for _, image := range images[1:] {
-			parts = append(parts, qqOutgoingPart{image: image})
+		for index, image := range images[1:] {
+			parts = append(parts, qqOutgoingPart{image: image, source: sources[index+1]})
 		}
 	}
 	if len(parts) > partLimit {
@@ -2003,11 +2012,18 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 	defer func() { q.releasePassiveReplyReservations(budget, reservedCount) }()
 
 	sendPart := func(part qqOutgoingPart) error {
-		quoteContext := strings.TrimSpace(u.FallbackText)
+		quoteKind := qqQuoteMixed
+		if len(u.ImageSources) > 0 && part.source != "" {
+			quoteKind = qqQuoteTextCard
+		}
+		quoteContext := strings.TrimSpace(part.source)
+		if len(u.ImageSources) > 0 && quoteContext != "" && part.text != "" {
+			quoteContext = strings.TrimSpace(quoteContext + "\n\n" + part.text)
+		}
 		if u.IsGroup {
 			if len(part.image) > 0 {
 				if quoteContext != "" {
-					return q.client.SendGroupMediaMessageWithContext(ctx, u.ChannelID, part.text, part.image, u.QuoteMsgID, QuoteMetadata{Text: quoteContext, Kind: qqQuoteMixed, TextComplete: true})
+					return q.client.SendGroupMediaMessageWithContext(ctx, u.ChannelID, part.text, part.image, u.QuoteMsgID, QuoteMetadata{Text: quoteContext, Kind: quoteKind, TextComplete: true})
 				}
 				return q.client.SendGroupMediaMessage(ctx, u.ChannelID, part.text, part.image, u.QuoteMsgID)
 			}
@@ -2015,7 +2031,7 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 		}
 		if len(part.image) > 0 {
 			if quoteContext != "" {
-				return q.client.SendC2CMediaMessageWithContext(ctx, u.ChannelID, part.text, part.image, u.QuoteMsgID, QuoteMetadata{Text: quoteContext, Kind: qqQuoteMixed, TextComplete: true})
+				return q.client.SendC2CMediaMessageWithContext(ctx, u.ChannelID, part.text, part.image, u.QuoteMsgID, QuoteMetadata{Text: quoteContext, Kind: quoteKind, TextComplete: true})
 			}
 			return q.client.SendC2CMediaMessage(ctx, u.ChannelID, part.text, part.image, u.QuoteMsgID)
 		}
@@ -2045,6 +2061,7 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 
 	deliveredText := func() string {
 		var delivered strings.Builder
+		imageCount := 0
 		for _, part := range parts[:sentParts] {
 			if part.text != "" {
 				if delivered.Len() > 0 {
@@ -2053,16 +2070,20 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 				delivered.WriteString(part.text)
 			}
 			if len(part.image) > 0 {
-				if delivered.Len() > 0 {
-					delivered.WriteString("\n")
-				}
-				delivered.WriteString("[图片已发送]")
+				imageCount++
 			}
 		}
-		return delivered.String()
+		done, _ := entity.ImageDeliveryText(sources, imageCount)
+		return strings.TrimSpace(delivered.String() + "\n\n" + done)
 	}
 	undeliveredText := func(from int) string {
 		var remaining strings.Builder
+		imageCount := 0
+		for _, part := range parts[:from] {
+			if len(part.image) > 0 {
+				imageCount++
+			}
+		}
 		for _, part := range parts[from:] {
 			if part.text != "" {
 				if remaining.Len() > 0 {
@@ -2070,14 +2091,9 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 				}
 				remaining.WriteString(part.text)
 			}
-			if len(part.image) > 0 {
-				if remaining.Len() > 0 {
-					remaining.WriteString("\n\n")
-				}
-				remaining.WriteString("[图片未送达；文字续发无法恢复图片，请告诉我重新发送。]")
-			}
 		}
-		return remaining.String()
+		_, pending := entity.ImageDeliveryText(sources, imageCount)
+		return strings.TrimSpace(remaining.String() + "\n\n" + pending)
 	}
 	partsToSend := len(parts)
 	if limitedByBudget {
@@ -2152,7 +2168,13 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 	return nil
 }
 
-func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utterance, images [][]byte, content string, partLimit int, replyWindow time.Duration) error {
+func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utterance, images [][]byte, content string, partLimit int, replyWindow time.Duration) (sendErr error) {
+	attempted := false
+	defer func() {
+		if sendErr != nil && !attempted {
+			sendErr = &entity.UnsentError{Err: sendErr}
+		}
+	}()
 	if len(images) == 0 {
 		return fmt.Errorf("inline image message has no images")
 	}
@@ -2226,6 +2248,7 @@ func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utteranc
 		contentKind = qqQuoteMixed
 	}
 	metadata := QuoteMetadata{Text: quoteContext, Kind: contentKind, TextComplete: completeText}
+	attempted = true
 	if u.IsGroup {
 		err = q.client.SendGroupMessageWithContext(ctx, u.ChannelID, markdown.String(), u.QuoteMsgID, metadata)
 	} else {

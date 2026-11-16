@@ -100,15 +100,26 @@ func (c *Channel) call(ctx context.Context, method string, body io.Reader, conte
 	}
 	defer func() { _ = resp.Body.Close() }()
 	var envelope struct {
-		OK     bool            `json:"ok"`
-		Result json.RawMessage `json:"result"`
-		Code   int             `json:"error_code"`
+		OK         bool            `json:"ok"`
+		Result     json.RawMessage `json:"result"`
+		Code       int             `json:"error_code"`
+		Parameters struct {
+			RetryAfter int `json:"retry_after"`
+		} `json:"parameters"`
 	}
 	if err = json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&envelope); err != nil {
 		return fmt.Errorf("telegram %s response could not be decoded", method)
 	}
 	if !envelope.OK {
-		return &apiError{method: method, code: envelope.Code, status: resp.StatusCode}
+		err := &apiError{method: method, code: envelope.Code, status: resp.StatusCode}
+		if envelope.Code >= 400 && envelope.Code < 500 {
+			delay := time.Duration(0)
+			if envelope.Code == 429 {
+				delay = max(time.Duration(envelope.Parameters.RetryAfter)*time.Second, time.Minute)
+			}
+			return &entity.DeliveryRejection{Err: err, After: delay}
+		}
+		return err
 	}
 	if out != nil {
 		return json.Unmarshal(envelope.Result, out)
@@ -398,4 +409,20 @@ type apiError struct {
 
 func (e *apiError) Error() string {
 	return fmt.Sprintf("telegram %s rejected (status %d, code %d)", e.method, e.status, e.code)
+}
+
+// VerifyOwnerPrivate resolves the existing address and rechecks the configured
+// username. The numeric address is never an authorization binding.
+func (c *Channel) VerifyOwnerPrivate(ctx context.Context, address string) bool {
+	if c.cfg.OwnerUsername == "" || strings.Contains(address, "/") {
+		return false
+	}
+	var chat struct {
+		ID             int64 `json:"id"`
+		Type, Username string
+	}
+	if c.jsonCall(ctx, "getChat", map[string]string{"chat_id": address}, &chat) != nil {
+		return false
+	}
+	return chat.Type == "private" && strconv.FormatInt(chat.ID, 10) == address && strings.EqualFold(chat.Username, strings.TrimPrefix(strings.TrimSpace(c.cfg.OwnerUsername), "@"))
 }

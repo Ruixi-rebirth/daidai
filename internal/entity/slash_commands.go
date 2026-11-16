@@ -500,6 +500,9 @@ func (a *SuperAgent) handleStopCommand(ctx context.Context, event *SensoryEvent,
 		return
 	}
 	stoppedThinking := a.cancelThinkingRequester(event)
+	if a.OnStop != nil && a.OnStop(ctx, event) {
+		stoppedThinking = true
+	}
 	a.clearReplyContinuation(event)
 	aborted, stopping := 0, 0
 	if a.Delegates != nil {
@@ -558,6 +561,12 @@ func (a *SuperAgent) handleResetCommand(ctx context.Context, event *SensoryEvent
 	}
 	if attachmentCleaner, ok := a.Cognition.(interface{ ClearPendingAttachments(*SensoryEvent) }); ok {
 		attachmentCleaner.ClearPendingAttachments(event)
+	}
+	if a.OnSessionReset != nil {
+		if err := a.OnSessionReset(ctx, event); err != nil {
+			a.replyText(ctx, event, "近期对话已重置，但早报指代上下文未能清除，请稍后重试。 ")
+			return
+		}
 	}
 	if a.Delegates != nil {
 		if err := a.Delegates.ResetSession(event.Platform, event.ChannelID, currWs); err != nil {

@@ -559,7 +559,35 @@ func (c *Cortex) attachmentIntent(ctx context.Context, event *entity.SensoryEven
 }
 
 // Think 对感知事件进行认知推理并一次性合成全息生命表达体 (Utterance)
-func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity.Utterance, error) {
+func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (out *entity.Utterance, thinkErr error) {
+	var mediaCaption string
+	var mediaInline bool
+	var mediaCommits []func(context.Context)
+	var mediaFailures []func(context.Context, error)
+	defer func() {
+		if out == nil || thinkErr != nil {
+			return
+		}
+		if mediaCaption != "" {
+			out.Text = strings.TrimSpace(mediaCaption + "\n\n" + out.Text)
+			out.FixedPresentation = true
+		}
+		out.InlineImages = out.InlineImages || mediaInline
+		if len(mediaFailures) > 0 {
+			out.OnDeliveryFailed = func(ctx context.Context, err error) {
+				for _, failed := range mediaFailures {
+					failed(ctx, err)
+				}
+			}
+		}
+		if len(mediaCommits) > 0 {
+			out.OnDelivered = func(ctx context.Context) {
+				for _, commit := range mediaCommits {
+					commit(ctx)
+				}
+			}
+		}
+	}()
 	if event == nil {
 		return nil, fmt.Errorf("cortex cannot process a nil sensory event")
 	}
@@ -974,7 +1002,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			if len(directCardData) > 0 {
+			if len(directCardData) > 0 || mediaCaption != "" {
 				slog.Warn("cortex: 图片已生成但模型配文失败，直接交付图片", "err", err)
 				return mediaUtterance(), nil
 			}
@@ -984,7 +1012,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 			return nil, err
 		}
 		if resp == nil {
-			if len(directCardData) > 0 {
+			if len(directCardData) > 0 || mediaCaption != "" {
 				slog.Warn("cortex: 图片已生成但模型未返回配文，直接交付图片")
 				return mediaUtterance(), nil
 			}
@@ -1026,14 +1054,14 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 			}, nil
 		}
 		if len(resp.ToolCalls) > maxToolCallsPerThink {
-			if len(directCardData) > 0 {
+			if len(directCardData) > 0 || mediaCaption != "" {
 				slog.Warn("cortex: 图片已生成但模型超出工具调用上限，直接交付图片", "calls", len(resp.ToolCalls))
 				return mediaUtterance(), nil
 			}
 			return nil, fmt.Errorf("cortex reasoning failed: model returned %d tool calls; limit is %d", len(resp.ToolCalls), maxToolCallsPerThink)
 		}
 		if err := validateToolCalls(resp.ToolCalls); err != nil {
-			if len(directCardData) > 0 {
+			if len(directCardData) > 0 || mediaCaption != "" {
 				slog.Warn("cortex: 图片已生成但模型工具响应无效，直接交付图片", "err", err)
 				return mediaUtterance(), nil
 			}
@@ -1046,7 +1074,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 			if imageOnlyReply {
 				cleanText = ""
 			}
-			if cleanText == "" && len(directCardData) == 0 {
+			if cleanText == "" && len(directCardData) == 0 && mediaCaption == "" {
 				return nil, fmt.Errorf("cortex reasoning failed: model returned neither text nor media")
 			}
 			utterance := &entity.Utterance{
@@ -1176,7 +1204,6 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 				toolImages = append(toolImages, toolRes.ImageData)
 			}
 			if len(toolImages) > 0 {
-				imageOnlyReply = imageOnlyReply || toolRes.ImageOnly
 				imageFallback := strings.TrimSpace(toolRes.FallbackText)
 				if imageFallback == "" {
 					imageFallback = strings.TrimSpace(toolRes.Text)
@@ -1191,9 +1218,24 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (*entity
 					directCardFallbackText += imageFallback
 				}
 				directCardData = append(directCardData, toolImages...)
-				for range toolImages {
-					directImageSources = append(directImageSources, toolRes.FallbackText)
+				for index := range toolImages {
+					source := toolRes.FallbackText
+					if index < len(toolRes.ImageSources) {
+						source = toolRes.ImageSources[index]
+					}
+					directImageSources = append(directImageSources, source)
 				}
+				mediaInline = mediaInline || toolRes.InlineImages
+			}
+			if toolRes.Caption != "" {
+				mediaCaption = strings.TrimSpace(mediaCaption + "\n\n" + toolRes.Caption)
+			}
+			imageOnlyReply = imageOnlyReply || (toolRes.ImageOnly && (len(toolImages) > 0 || toolRes.Caption != ""))
+			if toolRes.OnDelivered != nil {
+				mediaCommits = append(mediaCommits, toolRes.OnDelivered)
+			}
+			if toolRes.OnDeliveryFailed != nil {
+				mediaFailures = append(mediaFailures, toolRes.OnDeliveryFailed)
 			}
 
 			outText := toolRes.Text

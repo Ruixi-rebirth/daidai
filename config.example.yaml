@@ -45,6 +45,12 @@ plugins:
 memory:
   working_limit: 30
 
+briefing:
+  enabled: true # 工具与调度可用；收件人需在搭档私聊自然语言订阅，默认无人订阅
+  timezone: "Asia/Singapore"
+  time: "08:00"
+  github_token: "" # 可选，提高 GitHub API 配额；使用现有秘密管理保存
+
 oci:
   enabled: false
   private_key: ""

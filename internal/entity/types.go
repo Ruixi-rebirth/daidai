@@ -100,7 +100,27 @@ type Utterance struct {
 	ImageSources            []string // 与 Images 对齐；文字渲染图保留正文，真实图片留空
 	InlineImages            bool     // 将多张图片作为 Markdown 图片引用放进同一条消息
 	InlineNonTextImageCount int      // InlineImages 中非正文分页渲染图的数量
+	OnDelivered             func(context.Context)
+	FixedPresentation       bool // 已由结构化视图完成排版，不再次把索引或文字回退转成图
+	OnDeliveryFailed        func(context.Context, error)
 }
+
+// DeliveryRejection is only used for an explicit platform rejection. Transport
+// errors and missing receipts remain ambiguous and must not be blindly retried.
+type DeliveryRejection struct {
+	Err   error
+	After time.Duration
+}
+
+// UnsentError means media preparation failed before a user-facing message was
+// attempted, so a text fallback cannot duplicate a delivered message.
+type UnsentError struct{ Err error }
+
+func (e *UnsentError) Error() string { return e.Err.Error() }
+func (e *UnsentError) Unwrap() error { return e.Err }
+
+func (e *DeliveryRejection) Error() string { return e.Err.Error() }
+func (e *DeliveryRejection) Unwrap() error { return e.Err }
 
 // PartialDeliveryError marks a channel failure after part of an utterance was
 // already delivered, so callers must not resend the full text fallback.

@@ -188,7 +188,20 @@ func (r *ChannelRegistry) Transmit(ctx context.Context, u *Utterance) error {
 		return fmt.Errorf("channel %q not mounted", u.Platform)
 	}
 
-	return ch.Transmit(ctx, u)
+	if err := ch.Transmit(ctx, u); err != nil {
+		if u.OnDeliveryFailed != nil {
+			commit, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+			defer cancel()
+			u.OnDeliveryFailed(commit, err)
+		}
+		return err
+	}
+	if u.OnDelivered != nil {
+		commitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		defer cancel()
+		u.OnDelivered(commitCtx)
+	}
+	return nil
 }
 
 // SuperAgent 呆呆超级数字生命体核心聚合根 (仅持有实际调度的核心职责)
@@ -201,6 +214,9 @@ type SuperAgent struct {
 	Workspaces                 *WorkspaceManager
 	AGYAuth                    AGYAuthenticator
 	OnAuthSuccess              func(ctx context.Context)
+	OnPrivateInteraction       func(context.Context, *SensoryEvent)
+	OnSessionReset             func(context.Context, *SensoryEvent) error
+	OnStop                     func(context.Context, *SensoryEvent) bool
 	pendingNotificationLocksMu sync.Mutex
 	pendingNotificationLocks   map[pendingNotificationKey]*sessionLockEntry
 	continuationMu             sync.Mutex
@@ -360,15 +376,18 @@ func (a *SuperAgent) lockPendingNotification(platform, recipientID string) func(
 
 // Config 生命体初始化依赖
 type Config struct {
-	PartnerID     string
-	Persona       *Persona
-	Immune        *ImmuneSystem
-	Cognition     Cognition
-	Delegates     *Delegates
-	Channels      *ChannelRegistry
-	Workspaces    *WorkspaceManager
-	AGYAuth       AGYAuthenticator
-	OnAuthSuccess func(ctx context.Context)
+	PartnerID            string
+	Persona              *Persona
+	Immune               *ImmuneSystem
+	Cognition            Cognition
+	Delegates            *Delegates
+	Channels             *ChannelRegistry
+	Workspaces           *WorkspaceManager
+	AGYAuth              AGYAuthenticator
+	OnAuthSuccess        func(ctx context.Context)
+	OnPrivateInteraction func(context.Context, *SensoryEvent)
+	OnSessionReset       func(context.Context, *SensoryEvent) error
+	OnStop               func(context.Context, *SensoryEvent) bool
 }
 
 // NewSuperAgent 组装生命体核心聚合根
@@ -387,14 +406,17 @@ func NewSuperAgent(cfg Config) *SuperAgent {
 	}
 
 	return &SuperAgent{
-		Persona:       persona,
-		Immune:        immune,
-		Cognition:     cfg.Cognition,
-		Delegates:     cfg.Delegates,
-		Channels:      channels,
-		Workspaces:    cfg.Workspaces,
-		AGYAuth:       cfg.AGYAuth,
-		OnAuthSuccess: cfg.OnAuthSuccess,
+		Persona:              persona,
+		Immune:               immune,
+		Cognition:            cfg.Cognition,
+		Delegates:            cfg.Delegates,
+		Channels:             channels,
+		Workspaces:           cfg.Workspaces,
+		AGYAuth:              cfg.AGYAuth,
+		OnAuthSuccess:        cfg.OnAuthSuccess,
+		OnPrivateInteraction: cfg.OnPrivateInteraction,
+		OnSessionReset:       cfg.OnSessionReset,
+		OnStop:               cfg.OnStop,
 	}
 }
 
@@ -546,13 +568,27 @@ func (a *SuperAgent) transmitUtterance(ctx context.Context, utterance *Utterance
 	}
 	var partialErr *PartialDeliveryError
 	if err := a.Channels.Transmit(ctx, utterance); err == nil {
+		if utterance.HasMedia() && len(utterance.ImageSources) > 0 {
+			var sources []string
+			seen := map[string]bool{}
+			for _, source := range append(append([]string(nil), utterance.ImageSources...), utterance.Text) {
+				source = strings.TrimSpace(source)
+				if source != "" && !seen[source] {
+					sources = append(sources, source)
+					seen[source] = true
+				}
+			}
+			if len(sources) > 0 {
+				return strings.Join(sources, "\n\n"), nil
+			}
+		}
 		if utterance.Text == "" && utterance.HasMedia() && strings.TrimSpace(utterance.FallbackText) != "" {
 			return utterance.FallbackText, nil
 		}
 		return utterance.Text, nil
 	} else if errors.As(err, &partialErr) {
 		slog.Warn("superagent: 消息部分送达，不重复发送正文", "channel", utterance.ChannelID, "err", err)
-		if ctx.Err() == nil && strings.TrimSpace(partialErr.UndeliveredText) != "" {
+		if !utterance.FixedPresentation && ctx.Err() == nil && strings.TrimSpace(partialErr.UndeliveredText) != "" {
 			a.setReplyContinuation(ctx, senderID, utterance, partialErr.UndeliveredText)
 		}
 		return partialErr.DeliveredText, nil
@@ -571,6 +607,12 @@ func (a *SuperAgent) transmitUtterance(ctx context.Context, utterance *Utterance
 		}
 		return a.transmitTextFallback(ctx, utterance, fallbackText, senderID)
 	} else {
+		if utterance.FixedPresentation {
+			var unsent *UnsentError
+			if !errors.As(err, &unsent) {
+				return "", err
+			}
+		}
 		if !utterance.HasMedia() {
 			a.setReplyContinuation(ctx, senderID, utterance, utterance.Text)
 			return "", err
@@ -1108,6 +1150,9 @@ func (a *SuperAgent) deliverPendingNotifications(ctx context.Context, event *Sen
 	if event == nil || event.IsGroup || event.RawMessageID == "" || (event.Role != RolePartner && event.Role != RoleCollaborator) {
 		return
 	}
+	if event.IsPartnerPrivate() && a.OnPrivateInteraction != nil {
+		a.OnPrivateInteraction(ctx, event)
+	}
 	unlock := a.lockPendingNotification(event.Platform, event.SenderID)
 	defer unlock()
 	loadCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -1383,7 +1428,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			if event.Platform == "qq" && event.IsGroup && !event.GroupInterjection && len(utterance.MentionUserIDs) == 0 && event.SenderID != "" {
 				utterance.MentionUserIDs = []string{event.SenderID}
 			}
-			if (event.Platform == "qq" || event.Platform == "telegram") && !event.GroupInterjection && !utterance.InlineImages && !requestsTextOnly(event.Content) && strings.TrimSpace(utterance.Text) != "" {
+			if (event.Platform == "qq" || event.Platform == "telegram") && !event.GroupInterjection && !utterance.FixedPresentation && !utterance.InlineImages && !requestsTextOnly(event.Content) && strings.TrimSpace(utterance.Text) != "" {
 				type automaticCardRenderer interface {
 					ShouldAutoRenderReply(string) bool
 					RenderCardPages(context.Context, *SensoryEvent, string, int) ([][]byte, error)

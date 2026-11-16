@@ -68,7 +68,15 @@ type Config struct {
 		} `yaml:"runners"`
 	} `yaml:"agent"`
 
-	OCI OCIConfig `yaml:"oci"`
+	OCI      OCIConfig      `yaml:"oci"`
+	Briefing BriefingConfig `yaml:"briefing"`
+}
+
+type BriefingConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	Timezone    string `yaml:"timezone"`
+	Time        string `yaml:"time"`
+	GitHubToken string `yaml:"github_token"`
 }
 
 // OCIConfig Oracle Cloud 账单、资源巡检与 IP 管理配置
@@ -91,6 +99,7 @@ func DefaultConfig() *Config {
 	cfg.Server.Port = 8080
 	cfg.Agent.MaxConcurrent = 1
 	cfg.Agent.ExecutionTimeout = "30m"
+	cfg.Briefing = BriefingConfig{Enabled: true, Timezone: "Asia/Singapore", Time: "08:00"}
 	return cfg
 }
 
@@ -101,7 +110,7 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config file error: %w", err)
 	}
 
-	var cfg Config
+	cfg := *DefaultConfig()
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&cfg); err != nil {
@@ -116,6 +125,12 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	defaults := DefaultConfig()
+	if _, err := time.LoadLocation(cfg.Briefing.Timezone); err != nil {
+		return nil, fmt.Errorf("briefing.timezone is invalid")
+	}
+	if _, err := time.Parse("15:04", cfg.Briefing.Time); err != nil {
+		return nil, fmt.Errorf("briefing.time must be HH:MM")
+	}
 	if cfg.Server.Port < 0 || cfg.Server.Port > 65535 {
 		return nil, fmt.Errorf("server.port must be 0 (default) or between 1 and 65535")
 	}

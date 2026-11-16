@@ -191,6 +191,10 @@ func ShouldRenderCard(md string) bool {
 }
 
 func renderTypst(ctx context.Context, doc string) ([]byte, error) {
+	return renderTypstAssets(ctx, doc, nil)
+}
+
+func renderTypstAssets(ctx context.Context, doc string, assets map[string][]byte) ([]byte, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("rendering requires a context")
 	}
@@ -199,6 +203,14 @@ func renderTypst(ctx context.Context, doc string) ([]byte, error) {
 		return nil, fmt.Errorf("create private render directory failed: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
+	for name, data := range assets {
+		if filepath.Base(name) != name || name == "." || name == ".." {
+			return nil, fmt.Errorf("invalid render asset name")
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, name), data, 0600); err != nil {
+			return nil, fmt.Errorf("write render asset: %w", err)
+		}
+	}
 	typPath := filepath.Join(tmpDir, "card.typ")
 	pngPath := filepath.Join(tmpDir, "card.png")
 	if err := os.WriteFile(filepath.Join(tmpDir, "code-theme.tmTheme"), codeTheme, 0600); err != nil {
