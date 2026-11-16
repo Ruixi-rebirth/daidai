@@ -1852,16 +1852,16 @@ func (m *Manager) listFacts(ctx context.Context, platform, userID, scopeFilter, 
 
 // FactMutation 长期记忆事实演进指令
 type FactMutation struct {
-	Action          string    `json:"action"`               // ADD, UPDATE 或 DELETE
-	FactID          int64     `json:"fact_id,omitempty"`    // 当 UPDATE 或 DELETE 时指定的目标事实 ID
-	SourceMessageID int64     `json:"-"`                    // 支撑该事实的入站消息记录 ID
-	EmbeddingModel  string    `json:"-"`                    // 生成向量的编码器配置哈希
-	Fact            string    `json:"fact,omitempty"`       // 新增或更新后的事实陈述
-	ExpectedFact    string    `json:"-"`                    // 非空时要求修改前事实仍与读取时一致
-	ScopeType       string    `json:"scope_type,omitempty"` // global 或 group
-	ScopeID         string    `json:"scope_id,omitempty"`   // 群号 (若是群专属事实)
-	Quote           string    `json:"quote,omitempty"`      // 来源原话
-	Embedding       []float32 `json:"-"`                    // 可选稠密语义向量
+	Action           string    `json:"action"`               // ADD, UPDATE 或 DELETE
+	FactID           int64     `json:"fact_id,omitempty"`    // 当 UPDATE 或 DELETE 时指定的目标事实 ID
+	SourceMessageIDs []int64   `json:"-"`                    // 提炼该事实所用的本轮原始入站消息
+	EmbeddingModel   string    `json:"-"`                    // 生成向量的编码器配置哈希
+	Fact             string    `json:"fact,omitempty"`       // 新增或更新后的事实陈述
+	ExpectedFact     string    `json:"-"`                    // 非空时要求修改前事实仍与读取时一致
+	ScopeType        string    `json:"scope_type,omitempty"` // global 或 group
+	ScopeID          string    `json:"scope_id,omitempty"`   // 群号 (若是群专属事实)
+	Quote            string    `json:"quote,omitempty"`      // 来源原话
+	Embedding        []float32 `json:"-"`                    // 可选稠密语义向量
 }
 
 // ApplyFactMutations 事务内批量执行事实新增、原地更新与删除（保持 FactID 稳定并校验目标存在性）
@@ -1920,7 +1920,7 @@ func (m *Manager) ApplyFactMutations(ctx context.Context, platform, userID strin
 				p, userID, scopeType, scopeID, factText,
 			).Scan(&existingID)
 			if err == nil && existingID > 0 {
-				if err := insertFactSource(ctx, tx, existingID, mut.SourceMessageID, p, userID, scopeType, scopeID, nowMs); err != nil {
+				if err := insertFactSources(ctx, tx, existingID, mut.SourceMessageIDs, p, userID, scopeType, scopeID, nowMs); err != nil {
 					return err
 				}
 				continue
@@ -1939,7 +1939,7 @@ func (m *Manager) ApplyFactMutations(ctx context.Context, platform, userID strin
 			if err != nil {
 				return err
 			}
-			if err := insertFactSource(ctx, tx, insertedFactID, mut.SourceMessageID, p, userID, scopeType, scopeID, nowMs); err != nil {
+			if err := insertFactSources(ctx, tx, insertedFactID, mut.SourceMessageIDs, p, userID, scopeType, scopeID, nowMs); err != nil {
 				return err
 			}
 
@@ -1981,11 +1981,11 @@ func (m *Manager) ApplyFactMutations(ctx context.Context, platform, userID strin
 				}
 				return fmt.Errorf("未找到 ID 为 %d 的生效记忆事实", mut.FactID)
 			}
-			if mut.SourceMessageID > 0 {
+			if len(mut.SourceMessageIDs) > 0 {
 				if _, err := tx.ExecContext(ctx, `DELETE FROM user_fact_sources WHERE fact_id = ?`, mut.FactID); err != nil {
 					return err
 				}
-				if err := insertFactSource(ctx, tx, mut.FactID, mut.SourceMessageID, p, userID, scopeType, scopeID, nowMs); err != nil {
+				if err := insertFactSources(ctx, tx, mut.FactID, mut.SourceMessageIDs, p, userID, scopeType, scopeID, nowMs); err != nil {
 					return err
 				}
 			}
@@ -2016,34 +2016,36 @@ func (m *Manager) ApplyFactMutations(ctx context.Context, platform, userID strin
 	return tx.Commit()
 }
 
-func insertFactSource(ctx context.Context, tx *sql.Tx, factID, messageID int64, platform, userID, scopeType, scopeID string, linkedAt int64) error {
-	if messageID <= 0 {
-		return nil
-	}
+func insertFactSources(ctx context.Context, tx *sql.Tx, factID int64, messageIDs []int64, platform, userID, scopeType, scopeID string, linkedAt int64) error {
 	chatType := "private"
 	convID := ""
 	if scopeType == "group" {
 		chatType = "group"
 		convID = scopeID
 	}
-	result, err := tx.ExecContext(ctx, `INSERT INTO user_fact_sources (fact_id, message_id, linked_at)
+	for _, messageID := range messageIDs {
+		if messageID <= 0 {
+			return fmt.Errorf("invalid memory source message ID %d", messageID)
+		}
+		result, err := tx.ExecContext(ctx, `INSERT INTO user_fact_sources (fact_id, message_id, linked_at)
 		SELECT ?, id, ? FROM messages
 		WHERE id = ? AND platform = ? AND user_id = ? AND chat_type = ? AND (chat_type = 'private' OR conv_id = ?) AND is_bot = 0
 		ON CONFLICT(fact_id, message_id) DO NOTHING`,
-		factID, linkedAt, messageID, platform, userID, chatType, convID)
-	if err != nil {
-		return err
-	}
-	if affected, err := result.RowsAffected(); err != nil {
-		return err
-	} else if affected == 0 {
-		var exists int
-		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM user_fact_sources WHERE fact_id = ? AND message_id = ?`, factID, messageID).Scan(&exists); err == nil {
-			return nil
-		} else if !errors.Is(err, sql.ErrNoRows) {
+			factID, linkedAt, messageID, platform, userID, chatType, convID)
+		if err != nil {
 			return err
 		}
-		return fmt.Errorf("memory source message %d is missing or outside the fact scope", messageID)
+		if affected, err := result.RowsAffected(); err != nil {
+			return err
+		} else if affected == 0 {
+			var exists int
+			if err := tx.QueryRowContext(ctx, `SELECT 1 FROM user_fact_sources WHERE fact_id = ? AND message_id = ?`, factID, messageID).Scan(&exists); err == nil {
+				continue
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			return fmt.Errorf("memory source message %d is missing or outside the fact scope", messageID)
+		}
 	}
 	return nil
 }

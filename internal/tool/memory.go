@@ -153,7 +153,7 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 			return &core.ToolResult{Text: fmt.Sprintf("参数错误：fact 内容不能超过 %d 个字符。", core.MaxFactContentRunes)}, nil
 		}
 		err := t.db.ApplyFactMutations(ctx, event.Platform, event.SenderID, []db.FactMutation{
-			{Action: "ADD", SourceMessageID: event.HistoryRecordID, Fact: factText, ScopeType: scopeType, ScopeID: scopeID, Quote: event.Content},
+			{Action: "ADD", SourceMessageIDs: event.HistoryRecordIDs, Fact: factText, ScopeType: scopeType, ScopeID: scopeID, Quote: event.Content},
 		})
 		if err != nil {
 			return nil, fmt.Errorf("写入长期记忆失败: %w", err)
@@ -175,7 +175,7 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 			return &core.ToolResult{Text: "群聊中只能更新当前用户在本群记录的个人记忆；全局记忆请在私聊中操作。"}, nil
 		}
 		err = t.db.ApplyFactMutations(ctx, event.Platform, event.SenderID, []db.FactMutation{
-			{Action: "UPDATE", FactID: args.FactID, SourceMessageID: event.HistoryRecordID, Fact: factText, ExpectedFact: target.Content, ScopeType: target.ScopeType, ScopeID: target.ScopeID, Quote: event.Content},
+			{Action: "UPDATE", FactID: args.FactID, SourceMessageIDs: event.HistoryRecordIDs, Fact: factText, ExpectedFact: target.Content, ScopeType: target.ScopeType, ScopeID: target.ScopeID, Quote: event.Content},
 		})
 		if err != nil {
 			return &core.ToolResult{Text: fmt.Sprintf("更新记忆失败：%v", err)}, nil
@@ -194,7 +194,7 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 			return &core.ToolResult{Text: "群聊中只能删除当前用户在本群记录的个人记忆；全局记忆请在私聊中操作。"}, nil
 		}
 		err = t.db.ApplyFactMutations(ctx, event.Platform, event.SenderID, []db.FactMutation{
-			{Action: "DELETE", FactID: args.FactID, SourceMessageID: event.HistoryRecordID, ExpectedFact: target.Content, ScopeType: target.ScopeType, ScopeID: target.ScopeID, Quote: event.Content},
+			{Action: "DELETE", FactID: args.FactID, SourceMessageIDs: event.HistoryRecordIDs, ExpectedFact: target.Content, ScopeType: target.ScopeType, ScopeID: target.ScopeID, Quote: event.Content},
 		})
 		if err != nil {
 			return &core.ToolResult{Text: fmt.Sprintf("删除记忆失败：%v", err)}, nil

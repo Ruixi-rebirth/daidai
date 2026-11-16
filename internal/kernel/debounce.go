@@ -632,30 +632,22 @@ func mergeEvents(events []*core.SensoryEvent) *core.SensoryEvent {
 		return events[0]
 	}
 	latest := events[len(events)-1]
-	merged := &core.SensoryEvent{
-		Platform:        latest.Platform,
-		IsGroup:         latest.IsGroup,
-		ChannelID:       latest.ChannelID,
-		SenderID:        latest.SenderID,
-		SenderName:      latest.SenderName,
-		Role:            latest.Role,
-		RawMessageID:    latest.RawMessageID,
-		HistoryRecordID: latest.HistoryRecordID,
-		OccurredAt:      latest.OccurredAt,
-		ReplyContext:    latest.ReplyContext,
-	}
+	// Preserve the latest envelope (including access and validity metadata).
+	// Only fields aggregated below start empty.
+	merged := *latest
+	merged.HistoryRecordIDs = nil
+	merged.OmittedImages, merged.OmittedFiles = 0, 0
+	merged.OmittedPendingImages, merged.OmittedPendingFiles = 0, 0
 
 	var textParts []string
 	var allImages []*core.Attachment
 	var allFiles []*core.Attachment
 
 	for _, ev := range events {
-		first := ev.HistoryStartRecordID
-		if first == 0 {
-			first = ev.HistoryRecordID
-		}
-		if first > 0 && (merged.HistoryStartRecordID == 0 || first < merged.HistoryStartRecordID) {
-			merged.HistoryStartRecordID = first
+		for _, id := range ev.HistoryRecordIDs {
+			if id > 0 {
+				merged.HistoryRecordIDs = append(merged.HistoryRecordIDs, id)
+			}
 		}
 		if ev.Content != "" {
 			textParts = append(textParts, ev.Content)
@@ -707,7 +699,7 @@ func mergeEvents(events []*core.SensoryEvent) *core.SensoryEvent {
 				currentURLs[attachment.URL] = struct{}{}
 			}
 		}
-		pendingImages := merged.PendingImages[:0]
+		pendingImages := make([]*core.Attachment, 0, len(merged.PendingImages))
 		for _, attachment := range merged.PendingImages {
 			if attachment == nil {
 				continue
@@ -726,7 +718,7 @@ func mergeEvents(events []*core.SensoryEvent) *core.SensoryEvent {
 				currentURLs[attachment.URL] = struct{}{}
 			}
 		}
-		pendingFiles := merged.PendingFiles[:0]
+		pendingFiles := make([]*core.Attachment, 0, len(merged.PendingFiles))
 		for _, attachment := range merged.PendingFiles {
 			if attachment == nil {
 				continue
@@ -738,5 +730,5 @@ func mergeEvents(events []*core.SensoryEvent) *core.SensoryEvent {
 		}
 		merged.PendingFiles = pendingFiles
 	}
-	return merged
+	return &merged
 }

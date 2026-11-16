@@ -88,6 +88,23 @@ func TestRepeatedFactAddsEvidenceWithoutDuplicatingFact(t *testing.T) {
 	}
 }
 
+func TestMergedTurnRetainsEveryOriginalSourceMessage(t *testing.T) {
+	store, engine, _ := newFactTestEngine(t, nil, `{"mutations":[{"action":"ADD","fact":"喜欢乌龙茶"}]}`)
+	first := factTestEvent(t, engine, "我喜欢乌龙茶")
+	last := factTestEvent(t, engine, "尤其是晚饭后")
+	last.Content = first.Content + "\n" + last.Content
+	last.HistoryRecordIDs = []int64{first.LastHistoryRecordID(), last.LastHistoryRecordID()}
+	engine.consolidateUserFacts(context.Background(), last, "")
+	facts, err := store.ListVisibleFacts(context.Background(), "qq", "user", "private", false)
+	if err != nil || len(facts) != 1 {
+		t.Fatalf("facts=%v error=%v", facts, err)
+	}
+	sources, err := store.ListVisibleFactSources(context.Background(), "qq", "user", "private", false, facts[0].ID)
+	if err != nil || len(sources) != 2 {
+		t.Fatalf("merged fact lost the original evidence: sources=%v error=%v", sources, err)
+	}
+}
+
 func TestModelAddDoesNotOverwriteSimilarFact(t *testing.T) {
 	store, engine, provider := newFactTestEngine(t, &factTestEmbedder{}, `{"mutations":[{"action":"ADD","fact":"喜欢乌龙茶"}]}`)
 	engine.consolidateUserFacts(context.Background(), factTestEvent(t, engine, "我喜欢乌龙茶"), "")
@@ -183,7 +200,7 @@ func TestUserFactLockWaitCanBeCancelled(t *testing.T) {
 }
 
 func TestFactMutationsCannotModifyUnknownOrOtherGroupFacts(t *testing.T) {
-	event := &entity.SensoryEvent{Platform: "qq", IsGroup: true, ChannelID: "group-a", SenderID: "user", HistoryRecordID: 42}
+	event := &entity.SensoryEvent{Platform: "qq", IsGroup: true, ChannelID: "group-a", SenderID: "user", HistoryRecordIDs: []int64{42}}
 	known := []*core.Fact{
 		{ID: 1, ScopeType: "group", ScopeID: "group-a", Content: "旧事实"},
 		{ID: 2, ScopeType: "group", ScopeID: "group-b", Content: "别的群的事实"},
@@ -194,7 +211,7 @@ func TestFactMutationsCannotModifyUnknownOrOtherGroupFacts(t *testing.T) {
 		{Action: "UPDATE", FactID: 1, Fact: "新事实", ScopeType: "global"},
 	}
 	got := normalizeFactMutations(event, known, mutations)
-	if len(got) != 1 || got[0].FactID != 1 || got[0].ScopeType != "group" || got[0].ScopeID != "group-a" || got[0].SourceMessageID != 42 || got[0].ExpectedFact != "旧事实" {
+	if len(got) != 1 || got[0].FactID != 1 || got[0].ScopeType != "group" || got[0].ScopeID != "group-a" || len(got[0].SourceMessageIDs) != 1 || got[0].SourceMessageIDs[0] != 42 || got[0].ExpectedFact != "旧事实" {
 		t.Fatalf("untrusted model mutation escaped its known scope: %v", got)
 	}
 }

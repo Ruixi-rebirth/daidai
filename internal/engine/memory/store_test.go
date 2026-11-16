@@ -70,7 +70,7 @@ func TestMemoryEngine_LexicalRecallAndCommit(t *testing.T) {
 	engine.Commit(ctx, event, "好胖的橘猫呀")
 
 	nextEvent := *event
-	nextEvent.HistoryRecordID, nextEvent.HistoryStartRecordID = 0, 0
+	nextEvent.HistoryRecordIDs = nil
 	history := engine.WorkingContext(ctx, &nextEvent, 10)
 	if len(history) != 2 {
 		t.Fatalf("expected 2 working context messages immediately after Commit, got %d", len(history))
@@ -171,7 +171,7 @@ func TestWorkingContextStopsBeforeCurrentTurnEvenWithQueuedMessages(t *testing.T
 	if len(history) != 1 || !strings.Contains(history[0].Content, "先前的消息") {
 		t.Fatalf("current or future message leaked into history: %+v", history)
 	}
-	mergedEnd.HistoryStartRecordID = current.HistoryRecordID
+	mergedEnd.HistoryRecordIDs = []int64{current.LastHistoryRecordID(), mergedEnd.LastHistoryRecordID()}
 	history = engine.WorkingContext(ctx, mergedEnd, 2)
 	if len(history) != 1 || !strings.Contains(history[0].Content, "先前的消息") {
 		t.Fatalf("merged turn duplicated in history: %+v", history)

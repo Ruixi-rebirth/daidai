@@ -19,7 +19,7 @@ func TestMemoryAddIsAdditiveAndRetainsRepeatedEvidence(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		event := &entity.SensoryEvent{Platform: "qq", ChannelID: "chat", SenderID: "user", Content: fact, HistoryRecordID: id}
+		event := &entity.SensoryEvent{Platform: "qq", ChannelID: "chat", SenderID: "user", Content: fact, HistoryRecordIDs: []int64{id}}
 		args, err := json.Marshal(memoryArgs{Action: "add", Fact: fact})
 		if err != nil {
 			t.Fatal(err)

@@ -6,6 +6,45 @@ import (
 	"time"
 )
 
+func TestFactSourceListsAreValidatedAtomically(t *testing.T) {
+	manager := NewManager(t.TempDir())
+	defer manager.Close()
+	ctx := context.Background()
+	newMessage := func(user, text string) int64 {
+		t.Helper()
+		id, err := manager.LogInboundMessage(ctx, "qq", "private", "chat", user, "", text, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	first := newMessage("owner", "喜欢茶")
+	second := newMessage("owner", "也喜欢咖啡")
+	foreign := newMessage("other-user", "别人的话")
+	if err := manager.ApplyFactMutations(ctx, "qq", "owner", []FactMutation{{Action: "ADD", Fact: "喜欢茶", SourceMessageIDs: []int64{first, first, second}}}); err != nil {
+		t.Fatal(err)
+	}
+	facts, err := manager.ListVisibleFacts(ctx, "qq", "owner", "chat", false)
+	if err != nil || len(facts) != 1 {
+		t.Fatalf("facts=%v error=%v", facts, err)
+	}
+	id := facts[0].ID
+	for _, action := range []string{"ADD", "UPDATE"} {
+		mutation := FactMutation{Action: action, FactID: id, Fact: "新事实", ExpectedFact: "喜欢茶", SourceMessageIDs: []int64{second, foreign}}
+		if err := manager.ApplyFactMutations(ctx, "qq", "owner", []FactMutation{mutation}); err == nil {
+			t.Fatalf("%s accepted another user's source", action)
+		}
+		facts, err := manager.ListVisibleFacts(ctx, "qq", "owner", "chat", false)
+		if err != nil || len(facts) != 1 || facts[0].Content != "喜欢茶" {
+			t.Fatalf("%s did not roll back: facts=%v error=%v", action, facts, err)
+		}
+		sources, err := manager.ListVisibleFactSources(ctx, "qq", "owner", "chat", false, id)
+		if err != nil || len(sources) != 2 {
+			t.Fatalf("%s lost the previous sources: sources=%v error=%v", action, sources, err)
+		}
+	}
+}
+
 func TestManager_MessagesAndFactMutations(t *testing.T) {
 	mgr := NewManager(t.TempDir())
 	defer mgr.Close()
@@ -146,7 +185,7 @@ func TestPrivateFactSourceScope(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = m.ApplyFactMutations(ctx, "qq", "owner", []FactMutation{{Action: "ADD", Fact: tc.name, SourceMessageID: id, ScopeType: "global"}})
+			err = m.ApplyFactMutations(ctx, "qq", "owner", []FactMutation{{Action: "ADD", Fact: tc.name, SourceMessageIDs: []int64{id}, ScopeType: "global"}})
 			if (err == nil) != tc.valid {
 				t.Fatalf("valid=%v, error=%v", tc.valid, err)
 			}

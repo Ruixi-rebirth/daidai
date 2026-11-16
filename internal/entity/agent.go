@@ -1207,7 +1207,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 	if event.StillValid != nil && !event.StillValid() {
 		return
 	}
-	if event.HistoryRecordID == 0 {
+	if event.LastHistoryRecordID() == 0 {
 		if recorder, ok := a.Cognition.(interface {
 			RecordInbound(context.Context, *SensoryEvent) error
 		}); ok {

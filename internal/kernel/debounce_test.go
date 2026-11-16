@@ -78,10 +78,28 @@ func TestTargetedStopUsesImmediateControlChannel(t *testing.T) {
 
 func TestMergedTurnPreservesEarliestHistoryBoundary(t *testing.T) {
 	merged := mergeEvents([]*core.SensoryEvent{
-		{HistoryRecordID: 10, Content: "第一条"},
-		{HistoryRecordID: 12, HistoryStartRecordID: 11, Content: "第二批"},
+		{HistoryRecordIDs: []int64{10}, Content: "第一条"},
+		{HistoryRecordIDs: []int64{11, 12}, Content: "第二批"},
+		{HistoryRecordIDs: []int64{12, 14, 12, 0}, Content: "重叠批次"},
 	})
-	if merged.HistoryRecordID != 12 || merged.HistoryStartRecordID != 10 {
+	if merged.LastHistoryRecordID() != 12 || merged.HistoryBoundaryID() != 10 || len(merged.HistoryRecordIDs) != 6 || merged.HistoryRecordIDs[1] != 11 || merged.HistoryRecordIDs[2] != 12 {
 		t.Fatalf("history boundaries lost: %+v", merged)
+	}
+}
+
+func TestMergedTurnPreservesPrivateAccessAndInputMetadata(t *testing.T) {
+	latest := &core.SensoryEvent{
+		Platform: "qq", ChannelID: "private", SenderID: "friend",
+		Role: core.RoleGuest, PrivateAccessGranted: true,
+		OmittedImages: 2, StillValid: func() bool { return false },
+	}
+	merged := mergeEvents([]*core.SensoryEvent{
+		{Content: "第一句", PrivateAccessGranted: true, OmittedImages: 1}, latest,
+	})
+	if !merged.PrivateAccessGranted || merged.StillValid == nil || merged.StillValid() {
+		t.Fatal("merged message lost its access or validity metadata")
+	}
+	if merged.OmittedImages != 3 || latest.OmittedImages != 2 {
+		t.Fatalf("incorrect aggregate or mutated input: merged=%d latest=%d", merged.OmittedImages, latest.OmittedImages)
 	}
 }

@@ -1826,7 +1826,7 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 					Content:              observedEvent.Content,
 					ReplyContext:         observedEvent.ReplyContext,
 					RawMessageID:         observedEvent.RawMessageID,
-					HistoryRecordID:      observedEvent.HistoryRecordID,
+					HistoryRecordIDs:     append([]int64(nil), observedEvent.HistoryRecordIDs...),
 					OccurredAt:           observedEvent.OccurredAt,
 					GroupMessageObserved: true,
 				}

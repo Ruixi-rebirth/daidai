@@ -263,10 +263,7 @@ func (m *MemoryEngine) WorkingContext(ctx context.Context, event *entity.Sensory
 		chatType = "group"
 	}
 
-	boundary := event.HistoryStartRecordID
-	if boundary == 0 {
-		boundary = event.HistoryRecordID
-	}
+	boundary := event.HistoryBoundaryID()
 	recents, err := dbMgr.RecentMessagesBefore(ctx, event.Platform, chatType, event.ChannelID, limit, boundary)
 	if err != nil || len(recents) == 0 {
 		return nil
@@ -367,10 +364,7 @@ func (m *MemoryEngine) recallPreviousSessionDigest(ctx context.Context, event *e
 		chatType = "group"
 	}
 
-	boundary := event.HistoryStartRecordID
-	if boundary == 0 {
-		boundary = event.HistoryRecordID
-	}
+	boundary := event.HistoryBoundaryID()
 	recents, err := dbMgr.RecentMessagesBefore(ctx, event.Platform, chatType, event.ChannelID, 30, boundary)
 	if err != nil || len(recents) == 0 {
 		return ""
@@ -482,7 +476,7 @@ func shouldRecordHistoryEvent(event *entity.SensoryEvent) bool {
 
 // RecordInbound persists each accepted raw user message before debounce or cognition can fail.
 func (m *MemoryEngine) RecordInbound(ctx context.Context, event *entity.SensoryEvent) error {
-	if m == nil || event == nil || event.Platform == "" || event.HistoryRecordID > 0 || !shouldRecordHistoryEvent(event) {
+	if m == nil || event == nil || event.Platform == "" || event.LastHistoryRecordID() > 0 || !shouldRecordHistoryEvent(event) {
 		return nil
 	}
 	dbMgr := m.getDB()
@@ -497,8 +491,7 @@ func (m *MemoryEngine) RecordInbound(ctx context.Context, event *entity.SensoryE
 	if err != nil {
 		return err
 	}
-	event.HistoryRecordID = id
-	event.HistoryStartRecordID = id
+	event.HistoryRecordIDs = []int64{id}
 	return nil
 }
 
@@ -520,12 +513,12 @@ func (m *MemoryEngine) Commit(ctx context.Context, event *entity.SensoryEvent, r
 	var userMsgID, botMsgID int64
 	userText := ""
 	if shouldRecordHistoryEvent(event) {
-		if event.HistoryRecordID == 0 {
+		if event.LastHistoryRecordID() == 0 {
 			if err := m.RecordInbound(ctx, event); err != nil {
 				slog.Warn("memory: 保存入站消息失败", "platform", event.Platform, "channel", event.ChannelID, "err", err)
 			}
 		}
-		userMsgID = event.HistoryRecordID
+		userMsgID = event.LastHistoryRecordID()
 		var err error
 		if userMsgID > 0 && visionSummary != "" {
 			userText, err = dbMgr.AppendMessageText(ctx, event.Platform, userMsgID, "[图片内容: "+visionSummary+"]")
@@ -558,6 +551,7 @@ func (m *MemoryEngine) Commit(ctx context.Context, event *entity.SensoryEvent, r
 		m.asyncMu.Unlock()
 
 		evCopy := *event
+		evCopy.HistoryRecordIDs = append([]int64(nil), event.HistoryRecordIDs...)
 		evCopy.Content = core.TruncateRunes(evCopy.Content, core.MaxUserMessageRunes, "\n[消息过长，后续内容已截断]")
 		evCopy.VisionSummary = visionSummary
 		if evCopy.ReplyContext != nil {
@@ -784,8 +778,8 @@ func normalizeFactMutations(event *entity.SensoryEvent, known []*core.Fact, muta
 	for _, mutation := range mutations {
 		bound := db.FactMutation{
 			Action: mutation.Action, Fact: mutation.Fact,
-			SourceMessageID: event.HistoryRecordID,
-			ScopeType:       scopeType, ScopeID: scopeID, Quote: event.Content,
+			SourceMessageIDs: append([]int64(nil), event.HistoryRecordIDs...),
+			ScopeType:        scopeType, ScopeID: scopeID, Quote: event.Content,
 		}
 		switch mutation.Action {
 		case "ADD":

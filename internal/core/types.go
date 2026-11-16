@@ -140,8 +140,7 @@ type SensoryEvent struct {
 	PrivateAccessGranted  bool          // 已授权访客私聊，但仍保持访客级工具权限
 	Content               string        // 纯文本内容
 	HistoryAttachmentNote string        // 持久化历史中使用的附件占位说明，不包含附件地址或内容
-	HistoryRecordID       int64         // 入站消息对应的持久化历史记录 ID
-	HistoryStartRecordID  int64         // 本轮最早入站消息；历史上下文必须位于此记录之前
+	HistoryRecordIDs      []int64       // 本轮原始入站消息的记录 ID，按合并顺序保留
 	Images                []*Attachment // 多模态图像感知
 	OmittedImages         int           // 超出单轮视觉识别上限、未纳入分析的图片数
 	PendingImages         []*Attachment // 同一发送者近期发送、尚未处理的图片元数据；仅显式请求时进行视觉分析
@@ -168,4 +167,31 @@ type SensoryEvent struct {
 // IsPartnerPrivate 判断当前感知事件是否为核心伙伴在私聊下发起的最高信任级交互
 func (e *SensoryEvent) IsPartnerPrivate() bool {
 	return e != nil && !e.IsGroup && e.Role == RolePartner
+}
+
+// HistoryBoundaryID is the earliest original record, before which prior
+// conversation history may be read. It also works for already merged events.
+func (e *SensoryEvent) HistoryBoundaryID() int64 {
+	if e == nil {
+		return 0
+	}
+	var first int64
+	for _, id := range e.HistoryRecordIDs {
+		if id > 0 && (first == 0 || id < first) {
+			first = id
+		}
+	}
+	return first
+}
+
+// LastHistoryRecordID associates this logical reply with its last input message.
+func (e *SensoryEvent) LastHistoryRecordID() int64 {
+	if e != nil {
+		for i := len(e.HistoryRecordIDs) - 1; i >= 0; i-- {
+			if e.HistoryRecordIDs[i] > 0 {
+				return e.HistoryRecordIDs[i]
+			}
+		}
+	}
+	return 0
 }
