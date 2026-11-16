@@ -650,6 +650,13 @@ func mergeEvents(events []*core.SensoryEvent) *core.SensoryEvent {
 	var allFiles []*core.Attachment
 
 	for _, ev := range events {
+		first := ev.HistoryStartRecordID
+		if first == 0 {
+			first = ev.HistoryRecordID
+		}
+		if first > 0 && (merged.HistoryStartRecordID == 0 || first < merged.HistoryStartRecordID) {
+			merged.HistoryStartRecordID = first
+		}
 		if ev.Content != "" {
 			textParts = append(textParts, ev.Content)
 		}

@@ -141,6 +141,7 @@ type SensoryEvent struct {
 	Content               string        // 纯文本内容
 	HistoryAttachmentNote string        // 持久化历史中使用的附件占位说明，不包含附件地址或内容
 	HistoryRecordID       int64         // 入站消息对应的持久化历史记录 ID
+	HistoryStartRecordID  int64         // 本轮最早入站消息；历史上下文必须位于此记录之前
 	Images                []*Attachment // 多模态图像感知
 	OmittedImages         int           // 超出单轮视觉识别上限、未纳入分析的图片数
 	PendingImages         []*Attachment // 同一发送者近期发送、尚未处理的图片元数据；仅显式请求时进行视觉分析

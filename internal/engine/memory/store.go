@@ -252,7 +252,11 @@ func (m *MemoryEngine) WorkingContext(ctx context.Context, event *entity.Sensory
 		chatType = "group"
 	}
 
-	recents, err := dbMgr.RecentMessages(ctx, event.Platform, chatType, event.ChannelID, limit)
+	boundary := event.HistoryStartRecordID
+	if boundary == 0 {
+		boundary = event.HistoryRecordID
+	}
+	recents, err := dbMgr.RecentMessagesBefore(ctx, event.Platform, chatType, event.ChannelID, limit, boundary)
 	if err != nil || len(recents) == 0 {
 		return nil
 	}
@@ -352,7 +356,11 @@ func (m *MemoryEngine) recallPreviousSessionDigest(ctx context.Context, event *e
 		chatType = "group"
 	}
 
-	recents, err := dbMgr.RecentMessages(ctx, event.Platform, chatType, event.ChannelID, 30)
+	boundary := event.HistoryStartRecordID
+	if boundary == 0 {
+		boundary = event.HistoryRecordID
+	}
+	recents, err := dbMgr.RecentMessagesBefore(ctx, event.Platform, chatType, event.ChannelID, 30, boundary)
 	if err != nil || len(recents) == 0 {
 		return ""
 	}
@@ -479,6 +487,7 @@ func (m *MemoryEngine) RecordInbound(ctx context.Context, event *entity.SensoryE
 		return err
 	}
 	event.HistoryRecordID = id
+	event.HistoryStartRecordID = id
 	return nil
 }
 

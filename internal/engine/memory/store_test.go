@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -68,7 +69,9 @@ func TestMemoryEngine_LexicalRecallAndCommit(t *testing.T) {
 	}
 	engine.Commit(ctx, event, "好胖的橘猫呀")
 
-	history := engine.WorkingContext(ctx, event, 10)
+	nextEvent := *event
+	nextEvent.HistoryRecordID, nextEvent.HistoryStartRecordID = 0, 0
+	history := engine.WorkingContext(ctx, &nextEvent, 10)
 	if len(history) != 2 {
 		t.Fatalf("expected 2 working context messages immediately after Commit, got %d", len(history))
 	}
@@ -137,5 +140,46 @@ func TestMemoryEngine_HybridBM25AndVectorRRF(t *testing.T) {
 	hits, err := SearchMessagesByBM25(ctx, dbMgr, "qq", "9999", "容器网络方案", 5)
 	if err != nil || len(hits) != 1 || !strings.Contains(hits[0].Text, "Cilium") {
 		t.Fatalf("expected zero-lexical-overlap synonym query to recall Cilium message via vector+RRF, got: %+v (err=%v)", hits, err)
+	}
+}
+
+func TestWorkingContextStopsBeforeCurrentTurnEvenWithQueuedMessages(t *testing.T) {
+	mgr := db.NewManager(t.TempDir())
+	defer mgr.Close()
+	engine := NewMemoryEngine(nil)
+	engine.SetDBManager(mgr)
+	ctx := context.Background()
+	makeEvent := func(id, content string) *entity.SensoryEvent {
+		return &entity.SensoryEvent{Platform: "telegram", ChannelID: "group", IsGroup: true, SenderID: "tg:1", SenderName: "用户", RawMessageID: id, Content: content, OccurredAt: time.Now()}
+	}
+	previous := makeEvent("1", "先前的消息")
+	current := makeEvent("2", "当前请求")
+	mergedEnd := makeEvent("3", "本轮追加内容")
+	for _, event := range []*entity.SensoryEvent{previous, current, mergedEnd} {
+		if err := engine.RecordInbound(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Enough later messages to crowd earlier history out of an unbounded query.
+	for i := 0; i < 20; i++ {
+		event := makeEvent(fmt.Sprint(i+4), "后来的排队消息")
+		if err := engine.RecordInbound(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	history := engine.WorkingContext(ctx, current, 2)
+	if len(history) != 1 || !strings.Contains(history[0].Content, "先前的消息") {
+		t.Fatalf("current or future message leaked into history: %+v", history)
+	}
+	mergedEnd.HistoryStartRecordID = current.HistoryRecordID
+	history = engine.WorkingContext(ctx, mergedEnd, 2)
+	if len(history) != 1 || !strings.Contains(history[0].Content, "先前的消息") {
+		t.Fatalf("merged turn duplicated in history: %+v", history)
+	}
+	if err := mgr.ResetSessionHistoryInChat("telegram", "group", "group"); err != nil {
+		t.Fatal(err)
+	}
+	if history = engine.WorkingContext(ctx, current, 2); len(history) != 0 {
+		t.Fatal("history cutoff bypassed reset boundary")
 	}
 }

@@ -75,3 +75,13 @@ func TestTargetedStopUsesImmediateControlChannel(t *testing.T) {
 		t.Fatal("ordinary text was treated as a stop command")
 	}
 }
+
+func TestMergedTurnPreservesEarliestHistoryBoundary(t *testing.T) {
+	merged := mergeEvents([]*core.SensoryEvent{
+		{HistoryRecordID: 10, Content: "第一条"},
+		{HistoryRecordID: 12, HistoryStartRecordID: 11, Content: "第二批"},
+	})
+	if merged.HistoryRecordID != 12 || merged.HistoryStartRecordID != 10 {
+		t.Fatalf("history boundaries lost: %+v", merged)
+	}
+}

@@ -1267,6 +1267,12 @@ func sessionHistoryBoundary(ctx context.Context, db *sql.DB, chatType, convID st
 
 // RecentMessages 读取指定会话最近 limit 条纯净消息 (正序返回)
 func (m *Manager) RecentMessages(ctx context.Context, platform, chatType, convID string, limit int) ([]StoredMessage, error) {
+	return m.RecentMessagesBefore(ctx, platform, chatType, convID, limit, 0)
+}
+
+// RecentMessagesBefore excludes the current turn and later queued messages.
+// A zero boundary requests the latest history, for callers outside a live turn.
+func (m *Manager) RecentMessagesBefore(ctx context.Context, platform, chatType, convID string, limit int, beforeID int64) ([]StoredMessage, error) {
 	if limit <= 0 {
 		limit = 30
 	}
@@ -1282,26 +1288,24 @@ func (m *Manager) RecentMessages(ctx context.Context, platform, chatType, convID
 		return nil, err
 	}
 
-	query := `
-		SELECT id, platform, chat_type, conv_id, user_id, name, substr(text, 1, %d), is_bot, created_at, reply_to_uid
-		FROM messages 
-		WHERE platform = ? AND chat_type = ? AND conv_id = ? AND created_at > ?
-		ORDER BY id DESC
-		LIMIT ?
-	`
-	query = fmt.Sprintf(query, core.MaxUserMessageRunes+1)
-	queryArgs := []any{p, chatType, convID, resetAt, limit}
+	boundaryColumn := "created_at"
+	var boundaryValue any = resetAt
 	if resetID.Valid {
-		query = `
-			SELECT id, platform, chat_type, conv_id, user_id, name, substr(text, 1, %d), is_bot, created_at, reply_to_uid
-			FROM messages
-			WHERE platform = ? AND chat_type = ? AND conv_id = ? AND id > ?
-			ORDER BY id DESC
-			LIMIT ?
-		`
-		query = fmt.Sprintf(query, core.MaxUserMessageRunes+1)
-		queryArgs = []any{p, chatType, convID, resetID.Int64, limit}
+		boundaryColumn = "id"
+		boundaryValue = resetID.Int64
 	}
+	query := fmt.Sprintf(`
+		SELECT id, platform, chat_type, conv_id, user_id, name, substr(text, 1, %d), is_bot, created_at, reply_to_uid
+		FROM messages
+		WHERE platform = ? AND chat_type = ? AND conv_id = ? AND %s > ?
+	`, core.MaxUserMessageRunes+1, boundaryColumn)
+	queryArgs := []any{p, chatType, convID, boundaryValue}
+	if beforeID > 0 {
+		query += " AND id < ?"
+		queryArgs = append(queryArgs, beforeID)
+	}
+	query += " ORDER BY id DESC LIMIT ?"
+	queryArgs = append(queryArgs, limit)
 	rows, err := db.QueryContext(ctx, query, queryArgs...)
 	if err != nil {
 		return nil, err
