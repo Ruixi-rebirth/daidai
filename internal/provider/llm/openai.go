@@ -244,10 +244,13 @@ func (p *OpenAIProvider) ChatWithTools(ctx context.Context, messages []core.Chat
 	}
 
 	p.mu.RLock()
-	currentModel := p.cfg.Model
+	currentModel := strings.TrimSpace(p.cfg.Model)
 	baseURL := strings.TrimRight(p.cfg.BaseURL, "/")
 	apiKey := p.cfg.APIKey
 	p.mu.RUnlock()
+	if currentModel == "" {
+		return nil, fmt.Errorf("API chat model is not configured")
+	}
 
 	var reqTools []core.ToolDefinition
 	if len(tools) > 0 {

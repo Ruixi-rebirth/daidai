@@ -8,11 +8,30 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"daidai/internal/core"
 )
+
+func TestUnconfiguredChatModelDoesNotSubmitMessages(t *testing.T) {
+	var called atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called.Store(true)
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"unexpected response"}}]}`)
+	}))
+	defer server.Close()
+	for _, model := range []string{"", "   "} {
+		provider := NewOpenAIProvider(OpenAIConfig{BaseURL: server.URL, Model: model})
+		if _, err := provider.Chat(context.Background(), []core.ChatMessage{{Role: core.RoleUser, Content: "private conversation"}}, nil); err == nil {
+			t.Fatalf("unconfigured model %q was submitted", model)
+		}
+	}
+	if called.Load() {
+		t.Fatal("private messages reached an unconfigured chat provider")
+	}
+}
 
 func TestOpenAIRequestRespondsToCallerCancellation(t *testing.T) {
 	entered := make(chan struct{})

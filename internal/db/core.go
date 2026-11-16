@@ -104,7 +104,7 @@ CREATE TABLE IF NOT EXISTS qq_quote_records (
     msg_id        TEXT NOT NULL,
     chat_type     TEXT NOT NULL CHECK (chat_type IN ('private', 'group')),
     conv_id       TEXT NOT NULL CHECK (length(conv_id) > 0),
-    direction     TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound', 'legacy')),
+    direction     TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound')),
     content       TEXT NOT NULL DEFAULT '',
     content_kind  TEXT NOT NULL CHECK (content_kind IN ('text', 'text_card', 'mixed_media', 'image', 'file', 'unknown')),
     text_complete INTEGER NOT NULL CHECK (text_complete IN (0, 1)),
@@ -2065,22 +2065,6 @@ func insertFactSources(ctx context.Context, tx *sql.Tx, factID int64, messageIDs
 	return nil
 }
 
-// DeleteMsgCache 删除指定的平台消息缓存条目。
-func (m *Manager) DeleteMsgCache(platform, msgID string) error {
-	if msgID == "" {
-		return nil
-	}
-	db, err := m.GetConn(platform)
-	if err != nil {
-		return err
-	}
-	_, err = db.Exec("DELETE FROM msg_cache WHERE msg_id = ?", msgID)
-	if err != nil && strings.Contains(err.Error(), "no such table: msg_cache") {
-		return nil
-	}
-	return err
-}
-
 // QQQuoteRecord stores the semantic content available when a QQ message is
 // quoted. It keeps rendered transport payloads separate from readable text.
 type QQQuoteRecord struct {
@@ -2097,7 +2081,7 @@ func (m *Manager) SaveQQQuoteRecord(ctx context.Context, record QQQuoteRecord) e
 	if record.MsgID == "" || (record.ChatType != "private" && record.ChatType != "group") || strings.TrimSpace(record.ConvID) == "" {
 		return fmt.Errorf("QQ quote record requires message ID and valid conversation scope")
 	}
-	if record.Direction != "inbound" && record.Direction != "outbound" && record.Direction != "legacy" {
+	if record.Direction != "inbound" && record.Direction != "outbound" {
 		return fmt.Errorf("invalid QQ quote direction %q", record.Direction)
 	}
 	switch record.ContentKind {
@@ -2206,26 +2190,6 @@ func boolToSQLite(value bool) int {
 		return 1
 	}
 	return 0
-}
-
-// GetMsgCache reads a durable reference body when it is no longer in the bounded in-memory cache.
-func (m *Manager) GetMsgCache(ctx context.Context, platform, msgID, chatType, convID string) (string, error) {
-	if msgID == "" || (chatType != "private" && chatType != "group") || strings.TrimSpace(convID) == "" {
-		return "", nil
-	}
-	db, err := m.GetConn(platform)
-	if err != nil {
-		return "", err
-	}
-	var content string
-	err = db.QueryRowContext(ctx, "SELECT substr(content, 1, ?) FROM msg_cache WHERE msg_id = ? AND chat_type = ? AND conv_id = ?", core.MaxUserMessageRunes+1, msgID, chatType, convID).Scan(&content)
-	if err != nil && strings.Contains(err.Error(), "no such table: msg_cache") {
-		return "", nil
-	}
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	return core.TruncateRunes(content, core.MaxUserMessageRunes, "…[消息已截断]"), err
 }
 
 // WorkspaceEntry 工作空间条目

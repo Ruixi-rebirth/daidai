@@ -100,9 +100,45 @@ func TestMsgCache_PersistenceAndHit(t *testing.T) {
 
 	// 模拟进程重启，重新从 SQLite 加载
 	cache2 := newMsgCache(10, dbMgr)
+	for _, cache := range []*msgCache{cache1, cache2} {
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := cache.Close(ctx); err != nil {
+				t.Error(err)
+			}
+		})
+	}
 	hit := cache2.Get(testMsgID, "private", "user_123")
 	if hit != testContent {
 		t.Fatalf("expected cache hit %q, got %q", testContent, hit)
+	}
+}
+
+func TestQuoteCacheFallsBackToScopedHistory(t *testing.T) {
+	manager := db.NewManager(t.TempDir())
+	t.Cleanup(func() {
+		if err := manager.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if _, err := manager.LogInboundMessage(context.Background(), "qq", "group", "group-a", "user", "", "原始正文", "message-id"); err != nil {
+		t.Fatal(err)
+	}
+	cache := newMsgCache(1, manager)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := cache.Close(ctx); err != nil {
+			t.Error(err)
+		}
+	})
+	record, found := cache.GetRecord("message-id", "group", "group-a")
+	if !found || record.Content != "原始正文" || record.Direction != "inbound" {
+		t.Fatalf("history fallback failed: record=%v found=%v", record, found)
+	}
+	if _, found := cache.GetRecord("message-id", "group", "group-b"); found {
+		t.Fatal("quoted history escaped its conversation")
 	}
 }
 

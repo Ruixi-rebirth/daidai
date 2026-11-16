@@ -395,25 +395,6 @@ func (c *msgCache) GetRecord(msgID, chatType, convID string) (db.QQQuoteRecord, 
 	if found {
 		return c.hydrateInboundRecord(ctx, entry), true
 	}
-	legacyContent, legacyErr := c.db.GetMsgCache(ctx, "qq", msgID, chatType, convID)
-	if legacyErr != nil {
-		slog.Warn("qq: 读取旧版引用缓存失败", "msgID", msgID, "err", legacyErr)
-	}
-	if legacyContent != "" {
-		if entity.IsSensitiveAuthCommand(legacyContent) {
-			if deleteErr := c.db.DeleteMsgCache("qq", msgID); deleteErr != nil {
-				slog.Warn("qq: 删除旧版缓存中的敏感授权内容失败", "msgID", msgID, "err", deleteErr)
-			}
-			return db.QQQuoteRecord{}, false
-		}
-		complete := false
-		const legacyMarker = "\u241eDAIDAI_FULL_TEXT_V1\u241e\n"
-		if strings.HasPrefix(legacyContent, legacyMarker) {
-			legacyContent = strings.TrimPrefix(legacyContent, legacyMarker)
-			complete = true
-		}
-		return db.QQQuoteRecord{MsgID: msgID, Content: legacyContent, ChatType: chatType, ConvID: convID, Direction: "legacy", ContentKind: qqQuoteUnknown, TextComplete: complete}, true
-	}
 	content, err := c.db.MessageContentByPlatformID(ctx, "qq", chatType, convID, msgID)
 	if err != nil {
 		slog.Warn("qq: 从历史消息读取引用正文失败", "msgID", msgID, "err", err)
