@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"daidai/internal/config"
@@ -19,6 +21,26 @@ func (f ipTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { re
 
 func ipTestResponse(code int, body string) *http.Response {
 	return &http.Response{StatusCode: code, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
+}
+
+type testMockHostIPManager struct {
+	mu         sync.Mutex
+	addedIPs   []string
+	deletedIPs []string
+}
+
+func (m *testMockHostIPManager) AddIP(ctx context.Context, ip string, maskBits int, iface string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.addedIPs = append(m.addedIPs, fmt.Sprintf("%s/%d@%s", ip, maskBits, iface))
+	return nil
+}
+
+func (m *testMockHostIPManager) DelIP(ctx context.Context, ip string, maskBits int, iface string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deletedIPs = append(m.deletedIPs, fmt.Sprintf("%s/%d@%s", ip, maskBits, iface))
+	return nil
 }
 
 func newIPTestTool(t *testing.T) *OCIIPTool {
@@ -121,7 +143,7 @@ func TestIPRollUnavailableScoreStopsAndCleansOnlyOwnCandidate(t *testing.T) {
 	tool.qualityHTTP.Transport = ipTestTransport(func(_ *http.Request) (*http.Response, error) {
 		return ipTestResponse(429, ""), nil
 	})
-	result, err := tool.handleRoll(context.Background(), nil, 50, false)
+	result, err := tool.handleRoll(context.Background(), nil, 50, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,28 +152,195 @@ func TestIPRollUnavailableScoreStopsAndCleansOnlyOwnCandidate(t *testing.T) {
 	}
 }
 
-func TestIPCheckUnboundSkipsProbe(t *testing.T) {
+func TestIPCheckUnboundRunsNonDisruptiveProbe(t *testing.T) {
 	tool := newIPTestTool(t)
-	tool.client.httpClient.Transport = ipTestTransport(func(r *http.Request) (*http.Response, error) {
-		if r.Method != http.MethodGet {
-			t.Fatalf("unexpected mutation: %s", r.Method)
+	mockHost := &testMockHostIPManager{}
+	tool.hostIP = mockHost
+
+	imdsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/vnics") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"vnicId":"test-vnic","privateIp":"10.0.0.206","macAddr":"02:00:17:03:d7:f0","subnetCidrBlock":"10.0.0.0/24"}]`))
+			return
 		}
-		return ipTestResponse(200, `[{"id":"manual","ipAddress":"8.8.8.8","lifecycleState":"AVAILABLE"}]`), nil
+		http.NotFound(w, r)
+	}))
+	defer imdsServer.Close()
+	origIMDS := imdsBaseURL
+	imdsBaseURL = imdsServer.URL
+	defer func() { imdsBaseURL = origIMDS }()
+
+	candidateState := "AVAILABLE"
+	candidatePrivateIP := ""
+	secPrivateCreated := false
+	secPrivateDeleted := false
+
+	tool.client.httpClient.Transport = ipTestTransport(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/20160918/publicIps") && !strings.Contains(r.URL.Path, "/candidate-1"):
+			return ipTestResponse(200, `[{"id":"candidate-1","ipAddress":"8.8.8.8","lifecycleState":"AVAILABLE","displayName":"cand"}]`), nil
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/20160918/privateIps"):
+			return ipTestResponse(200, `[{"id":"primary-priv-id","isPrimary":true,"ipAddress":"10.0.0.206"}]`), nil
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/20160918/privateIps"):
+			secPrivateCreated = true
+			return ipTestResponse(200, `{"id":"sec-priv-id","isPrimary":false,"ipAddress":"10.0.0.250","vnicId":"test-vnic"}`), nil
+		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/candidate-1"):
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body["privateIpId"] == "sec-priv-id" {
+				candidateState = "ASSIGNED"
+				candidatePrivateIP = "sec-priv-id"
+			} else if body["privateIpId"] == "" {
+				candidateState = "AVAILABLE"
+				candidatePrivateIP = ""
+			} else {
+				t.Fatalf("unexpected privateIpId in PUT: %v", body)
+			}
+			return ipTestResponse(200, fmt.Sprintf(`{"id":"candidate-1","ipAddress":"8.8.8.8","lifecycleState":"%s","privateIpId":"%s"}`, candidateState, candidatePrivateIP)), nil
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/candidate-1"):
+			return ipTestResponse(200, fmt.Sprintf(`{"id":"candidate-1","ipAddress":"8.8.8.8","lifecycleState":"%s","privateIpId":"%s"}`, candidateState, candidatePrivateIP)), nil
+		case r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/sec-priv-id"):
+			secPrivateDeleted = true
+			return ipTestResponse(204, ""), nil
+		default:
+			t.Fatalf("unexpected OCI call: %s %s", r.Method, r.URL.Path)
+			return nil, fmt.Errorf("unexpected request")
+		}
 	})
+
 	tool.qualityHTTP.Transport = ipTestTransport(func(r *http.Request) (*http.Response, error) {
 		switch r.URL.Host {
 		case "ip-api.com":
-			return ipTestResponse(200, `{"status":"success","proxy":false}`), nil
+			return ipTestResponse(200, `{"status":"success","country":"Singapore","countryCode":"SG","city":"Singapore","as":"AS31898","proxy":false}`), nil
 		case "scamalytics.com":
 			return ipTestResponse(200, `{"score":"0"}`), nil
+		case "api.globalping.io":
+			if r.Method == http.MethodPost {
+				return ipTestResponse(202, `{"id":"meas-test"}`), nil
+			}
+			return ipTestResponse(200, `{"status":"finished","results":[{"result":{"status":"finished","stats":{"rcv":2,"avg":180}}},{"result":{"status":"finished","stats":{"rcv":2,"avg":190}}}]}`), nil
 		default:
-			t.Fatalf("must not probe unbound address: %s", r.URL)
+			t.Fatalf("unexpected quality probe: %s", r.URL)
 			return nil, fmt.Errorf("unexpected probe")
 		}
 	})
-	result, err := tool.handleCheck(context.Background(), "8.8.8.8", 443)
-	if err != nil || result == nil || !strings.Contains(result.Text, "未绑定：不做") {
-		t.Fatalf("%v %+v", err, result)
+
+	ctx := entity.WithSensoryEvent(context.Background(), &entity.SensoryEvent{Role: entity.RolePartner, SenderID: "owner"})
+	result, err := tool.handleCheck(ctx, "8.8.8.8", 443)
+	if err != nil {
+		t.Fatalf("handleCheck: %v", err)
+	}
+	if !secPrivateCreated || !secPrivateDeleted {
+		t.Fatalf("secondary private IP lifecycle failed: created=%v, deleted=%v", secPrivateCreated, secPrivateDeleted)
+	}
+	if len(mockHost.addedIPs) != 1 || !strings.HasPrefix(mockHost.addedIPs[0], "10.0.0.250/24") {
+		t.Fatalf("expected host IP added, got: %v", mockHost.addedIPs)
+	}
+	if len(mockHost.deletedIPs) != 1 || !strings.HasPrefix(mockHost.deletedIPs[0], "10.0.0.250/24") {
+		t.Fatalf("expected host IP deleted, got: %v", mockHost.deletedIPs)
+	}
+	if !strings.Contains(result.Text, "临时辅助私网测试") || !strings.Contains(result.Text, "主 IP 活跃零中断") {
+		t.Fatalf("result missing non-disruptive confirmation: %s", result.Text)
+	}
+	if !strings.Contains(result.Text, "2/2 节点连通") {
+		t.Fatalf("result missing probe stats: %s", result.Text)
+	}
+}
+
+func TestIPRollWithCheckChina(t *testing.T) {
+	tool := newIPTestTool(t)
+	mockHost := &testMockHostIPManager{}
+	tool.hostIP = mockHost
+
+	imdsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/vnics") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"vnicId":"test-vnic","privateIp":"10.0.0.206","macAddr":"02:00:17:03:d7:f0","subnetCidrBlock":"10.0.0.0/24"}]`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer imdsServer.Close()
+	origIMDS := imdsBaseURL
+	imdsBaseURL = imdsServer.URL
+	defer func() { imdsBaseURL = origIMDS }()
+
+	creates := 0
+	candStates := make(map[string]string)
+	tool.client.httpClient.Transport = ipTestTransport(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/publicIps"):
+			creates++
+			id := fmt.Sprintf("cand-%d", creates)
+			candStates[id] = "AVAILABLE"
+			return ipTestResponse(200, fmt.Sprintf(`{"id":"%s","ipAddress":"8.8.8.%d","lifecycleState":"AVAILABLE"}`, id, creates)), nil
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/20160918/privateIps"):
+			return ipTestResponse(200, `[{"id":"primary-priv-id","isPrimary":true,"ipAddress":"10.0.0.206"}]`), nil
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/20160918/privateIps"):
+			return ipTestResponse(200, `{"id":"sec-priv-id","isPrimary":false,"ipAddress":"10.0.0.250","vnicId":"test-vnic"}`), nil
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/cand-"):
+			parts := strings.Split(r.URL.Path, "/")
+			id := parts[len(parts)-1]
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			state := "ASSIGNED"
+			privID := body["privateIpId"]
+			if privID == "" {
+				state = "AVAILABLE"
+			}
+			candStates[id] = state
+			return ipTestResponse(200, fmt.Sprintf(`{"id":"%s","lifecycleState":"%s","privateIpId":"%s"}`, id, state, privID)), nil
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/cand-"):
+			parts := strings.Split(r.URL.Path, "/")
+			id := parts[len(parts)-1]
+			state := candStates[id]
+			if state == "" {
+				return ipTestResponse(404, ""), nil
+			}
+			privID := ""
+			if state == "ASSIGNED" {
+				privID = "sec-priv-id"
+			}
+			return ipTestResponse(200, fmt.Sprintf(`{"id":"%s","ipAddress":"8.8.8.%d","lifecycleState":"%s","privateIpId":"%s"}`, id, creates, state, privID)), nil
+		case r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/sec-priv-id"):
+			return ipTestResponse(204, ""), nil
+		case r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/cand-"):
+			parts := strings.Split(r.URL.Path, "/")
+			id := parts[len(parts)-1]
+			delete(candStates, id)
+			return ipTestResponse(204, ""), nil
+		default:
+			t.Fatalf("unexpected OCI call: %s %s", r.Method, r.URL.Path)
+			return nil, fmt.Errorf("unexpected request")
+		}
+	})
+
+	tool.qualityHTTP.Transport = ipTestTransport(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Host {
+		case "api.globalping.io":
+			if r.Method == http.MethodPost {
+				return ipTestResponse(202, `{"id":"meas-test"}`), nil
+			}
+			rcv := 0
+			if creates >= 2 {
+				rcv = 2
+			}
+			return ipTestResponse(200, fmt.Sprintf(`{"status":"finished","results":[{"result":{"status":"finished","stats":{"rcv":%d,"avg":180}}}]}`, rcv)), nil
+		default:
+			t.Fatalf("unexpected quality probe: %s", r.URL)
+			return nil, fmt.Errorf("unexpected probe")
+		}
+	})
+
+	result, err := tool.handleRoll(context.Background(), nil, 100, false, true)
+	if err != nil {
+		t.Fatalf("handleRoll checkChina: %v", err)
+	}
+	if creates != 2 {
+		t.Fatalf("expected 2 creates (1 rejected due to loss, 1 kept), got %d", creates)
+	}
+	if !strings.Contains(result.Text, "国内连通诊断") || !strings.Contains(result.Text, "已释放此前候选：1") {
+		t.Fatalf("result missing china check details: %s", result.Text)
 	}
 }
 
@@ -204,7 +393,7 @@ func TestIPRollRejectionAndCancellation(t *testing.T) {
 			if mode == "score" {
 				maxRisk = 20
 			}
-			result, err := tool.handleRoll(ctx, prefixes, maxRisk, false)
+			result, err := tool.handleRoll(ctx, prefixes, maxRisk, false, false)
 			if mode == "cancel" {
 				if err == nil || creates != 1 || deletes != 1 {
 					t.Fatalf("creates=%d deletes=%d err=%v", creates, deletes, err)

@@ -803,15 +803,6 @@ func (a *SuperAgent) clearReplyContinuation(event *SensoryEvent) {
 	a.continuationMu.Unlock()
 }
 
-func requestsTextOnly(content string) bool {
-	for _, phrase := range []string{"纯文字", "只用文字", "只发文字", "不要图片", "不用图片", "别发图片", "不要转图", "别转图", "不要转成图片", "不要渲染成图片"} {
-		if strings.Contains(content, phrase) {
-			return true
-		}
-	}
-	return false
-}
-
 func (a *SuperAgent) replyText(ctx context.Context, event *SensoryEvent, text string) {
 	_ = a.transmitReplyText(ctx, event, text)
 }
@@ -1432,7 +1423,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			if event.Platform == "qq" && event.IsGroup && !event.GroupInterjection && len(utterance.MentionUserIDs) == 0 && event.SenderID != "" {
 				utterance.MentionUserIDs = []string{event.SenderID}
 			}
-			if (event.Platform == "qq" || event.Platform == "telegram") && !event.GroupInterjection && !utterance.FixedPresentation && !utterance.InlineImages && !requestsTextOnly(event.Content) && strings.TrimSpace(utterance.Text) != "" {
+			if (event.Platform == "qq" || event.Platform == "telegram") && !event.GroupInterjection && !utterance.FixedPresentation && !utterance.InlineImages && strings.TrimSpace(utterance.Text) != "" {
 				type automaticCardRenderer interface {
 					ShouldAutoRenderReply(string) bool
 					RenderCardPages(context.Context, *SensoryEvent, string, int) ([][]byte, error)

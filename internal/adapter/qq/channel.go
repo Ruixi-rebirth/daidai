@@ -628,14 +628,15 @@ func (q *QQChannel) setKnownGroupBot(ctx context.Context, groupID string, bot gr
 	return nil
 }
 
-func groupBotRegistryRequest(content string) (marked, matched bool) {
-	if !strings.Contains(content, "机器人") {
-		return false, false
+func groupBotCommand(content string) (marked, matched bool) {
+	trimmed := strings.TrimSpace(content)
+	if strings.HasPrefix(trimmed, "/bot mark") {
+		return true, true
 	}
-	if strings.Contains(content, "取消") || strings.Contains(content, "解除") || strings.Contains(content, "不是") {
+	if strings.HasPrefix(trimmed, "/bot unmark") {
 		return false, true
 	}
-	return true, strings.Contains(content, "标记") || strings.Contains(content, "记住") || strings.Contains(content, "是机器人")
+	return false, false
 }
 
 func qqMentionedGroupMembers(eventData map[string]any) []groupBotMention {
@@ -671,15 +672,14 @@ func qqMentionedGroupMembers(eventData map[string]any) []groupBotMention {
 	return members
 }
 
-func (q *QQChannel) handleGroupBotRegistryRequest(ctx context.Context, groupID, messageID, senderID string, role entity.UserRole, content string, eventData map[string]any) {
-	marked, _ := groupBotRegistryRequest(content)
+func (q *QQChannel) handleGroupBotRegistryRequest(ctx context.Context, groupID, messageID, senderID string, role entity.UserRole, marked bool, content string, eventData map[string]any) {
 	if role != entity.RolePartner {
 		q.replyGroupMessage(ctx, groupID, messageID, "只有核心搭档可以管理群聊中的机器人标记。")
 		return
 	}
 	members := qqMentionedGroupMembers(eventData)
 	if len(members) == 0 {
-		q.replyGroupMessage(ctx, groupID, messageID, "我没有识别到被标记的群成员。请 @ 呆呆，并同时 @ 要标记或取消标记的机器人。")
+		q.replyGroupMessage(ctx, groupID, messageID, "未检测到被操作的群成员。请在使用指令的同时 @ 目标成员，例如：/bot mark @目标 或 /bot unmark @目标")
 		return
 	}
 	if q.historyRecorder != nil {
@@ -1753,14 +1753,23 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 			}
 			q.msgCache.SetInboundTypedAsync(msgID, content, chatType, convID, contentKind, len([]rune(content)) <= core.MaxUserMessageRunes)
 		}
-		if q.inbox != nil && (len(files) > 0 || len(images) > 0) {
+		if q.inbox != nil && (!isGroup || botAddressed) && (len(files) > 0 || len(images) > 0) {
 			q.inbox.RememberPending(attachmentScope, append(append([]*core.Attachment(nil), files...), images...))
 		}
 		if isGroup && botAddressed {
-			if _, matched := groupBotRegistryRequest(content); matched {
+			trimmed := strings.TrimSpace(content)
+			if strings.HasPrefix(trimmed, "/bot") {
+				marked, matched := groupBotCommand(trimmed)
+				if !matched {
+					q.replyGroupMessage(context.Background(), convID, msgID, "群机器人管理指令用法：\n- /bot mark @成员 ：标记为机器人（不触发回复）\n- /bot unmark @成员 ：取消机器人标记")
+					if q.dedup != nil {
+						q.dedup.Remember(msgID)
+					}
+					return true
+				}
 				q.cancelPendingGroupInterjection(convID)
 				manageCtx, manageCancel := context.WithTimeout(context.Background(), 10*time.Second)
-				q.handleGroupBotRegistryRequest(manageCtx, convID, msgID, userID, role, content, d)
+				q.handleGroupBotRegistryRequest(manageCtx, convID, msgID, userID, role, marked, content, d)
 				manageCancel()
 				if q.dedup != nil {
 					q.dedup.Remember(msgID)
@@ -1778,7 +1787,7 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 			}
 			// Ordinary group messages are saved to formal group history. Attachments
 			// stay pending and slash commands never execute without an @ mention.
-			canInterject := len(images) == 0 && omittedImages == 0 && len(files) == 0 && omittedFiles == 0 && len(pendingImages) == 0 && len(pendingFiles) == 0 && omittedPendingImages == 0 && omittedPendingFiles == 0 && !strings.HasPrefix(content, "/") && content != "继续"
+			canInterject := len(images) == 0 && omittedImages == 0 && len(files) == 0 && omittedFiles == 0 && !strings.HasPrefix(content, "/") && content != "继续"
 			observedEvent := &entity.SensoryEvent{
 				Platform:              "qq",
 				ChannelID:             convID,

@@ -15,6 +15,9 @@ type preparedViewModel struct {
 }
 
 func (*preparedViewModel) Name() string { return "prepared-view" }
+func (*preparedViewModel) Chat(context.Context, []core.ChatMessage, *core.ChatOptions) (string, error) {
+	return `{"text_only": false}`, nil
+}
 func (m *preparedViewModel) ChatWithTools(context.Context, []core.ChatMessage, []core.ToolDefinition, *core.ChatOptions) (*core.ChatResponse, error) {
 	m.round++
 	if m.round == 1 {

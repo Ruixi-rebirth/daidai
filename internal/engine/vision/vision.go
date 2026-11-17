@@ -106,6 +106,9 @@ func (e *Engine) IsAvailable() bool {
 	if cmd == "" {
 		return false
 	}
+	if cmd == "agy" || e.cfg.RequireAGYAuth {
+		return llm.CheckAGYAuth() == nil
+	}
 	_, err := exec.LookPath(cmd)
 	return err == nil
 }
@@ -151,7 +154,7 @@ func (e *Engine) DescribeWithImages(ctx context.Context, imageURLs []string, use
 	if _, lookupErr := exec.LookPath(cliCmd); lookupErr != nil {
 		return "", nil, err
 	}
-	if e.cfg.RequireAGYAuth {
+	if cliCmd == "agy" || e.cfg.RequireAGYAuth {
 		if authErr := llm.CheckAGYAuth(); authErr != nil {
 			slog.Warn("vision: API 凭证被拒绝且 CLI 认证不可用，无法回退", "err", authErr)
 			return "", nil, err
@@ -227,7 +230,7 @@ func (e *Engine) describeWithCLI(ctx context.Context, imageURLs []string, userTe
 	for _, p := range tmpFiles {
 		prompt += p + "\n"
 	}
-	if e.cfg.RequireAGYAuth {
+	if cliCmd == "agy" || e.cfg.RequireAGYAuth {
 		if err := llm.CheckAGYAuth(); err != nil {
 			return "", nil, err
 		}
@@ -236,7 +239,7 @@ func (e *Engine) describeWithCLI(ctx context.Context, imageURLs []string, userTe
 	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	args := []string{"-p", prompt, "--output-format", "text", "--mode", "plan", "--sandbox"}
+	args := []string{"-p", prompt, "--output-format", "text", "--mode", "plan", "--sandbox", "--dangerously-skip-permissions"}
 
 	cmd := exec.CommandContext(callCtx, cliCmd, args...)
 	cmd.Dir = tmpWorkDir

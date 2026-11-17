@@ -184,10 +184,10 @@ func ShouldRenderCard(md string) bool {
 			tableLines++
 		}
 	}
-	if tableLines >= 3 || headings >= 2 || (headings >= 1 && runeCount >= 100) || (nonEmptyLines >= 5 && listItems >= 3) {
+	if tableLines >= 3 || headings >= 2 || (headings >= 1 && runeCount >= 60) || (nonEmptyLines >= 4 && listItems >= 3) {
 		return true
 	}
-	return runeCount >= 180 || (runeCount >= 130 && nonEmptyLines >= 4)
+	return runeCount >= 80 || (runeCount >= 60 && nonEmptyLines >= 3)
 }
 
 func renderTypst(ctx context.Context, doc string) ([]byte, error) {

@@ -560,15 +560,85 @@ func (c *Cortex) attachmentIntent(ctx context.Context, event *entity.SensoryEven
 	return result, nil
 }
 
+const textOnlyIntentPrompt = `判断用户本轮消息是否明确要求以纯文本/文字形式回复（不要发图/发卡片，方便复制文字）。只输出 JSON：{"text_only": true} 或 {"text_only": false}`
+
+type textOnlyIntentResult struct {
+	TextOnly bool `json:"text_only"`
+}
+
+func (c *Cortex) detectTextOnlyIntent(ctx context.Context, content string) (res bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = false
+		}
+	}()
+	if c == nil || c.llm == nil {
+		return false
+	}
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	intentCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	resp, err := c.llm.Chat(intentCtx, []core.ChatMessage{
+		{Role: core.RoleSystem, Content: textOnlyIntentPrompt},
+		{Role: core.RoleUser, Content: trimmed},
+	}, &core.ChatOptions{
+		Temperature: 0,
+		MaxTokens:   32,
+		ReadOnly:    true,
+	})
+	if err != nil {
+		return false
+	}
+	resp = strings.TrimSpace(resp)
+	var result textOnlyIntentResult
+	if err := json.Unmarshal([]byte(resp), &result); err != nil {
+		clean := strings.TrimPrefix(resp, "```json")
+		clean = strings.TrimPrefix(clean, "```")
+		clean = strings.TrimSuffix(clean, "```")
+		clean = strings.TrimSpace(clean)
+		if err2 := json.Unmarshal([]byte(clean), &result); err2 != nil {
+			return false
+		}
+	}
+	return result.TextOnly
+}
+
 // Think 对感知事件进行认知推理并一次性合成全息生命表达体 (Utterance)
 func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (out *entity.Utterance, thinkErr error) {
 	var mediaCaption string
 	var mediaInline bool
 	var mediaCommits []func(context.Context)
 	var mediaFailures []func(context.Context, error)
+
+	textOnlyChan := make(chan bool, 1)
+	if event != nil && strings.TrimSpace(event.Content) != "" && (event.Platform == "qq" || event.Platform == "telegram") && !event.GroupInterjection {
+		go func() {
+			textOnlyChan <- c.detectTextOnlyIntent(ctx, event.Content)
+		}()
+	} else {
+		textOnlyChan <- false
+	}
+
 	defer func() {
 		if out == nil || thinkErr != nil {
 			return
+		}
+		var textOnly bool
+		select {
+		case textOnly = <-textOnlyChan:
+		case <-ctx.Done():
+		case <-time.After(500 * time.Millisecond):
+		}
+		if textOnly {
+			out.FixedPresentation = true
+			slog.Info("cortex: 识别到用户要求纯文本表达，跳过卡片出图", "channel", event.ChannelID)
 		}
 		if mediaCaption != "" {
 			out.Text = strings.TrimSpace(mediaCaption + "\n\n" + out.Text)

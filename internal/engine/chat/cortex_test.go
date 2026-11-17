@@ -256,3 +256,45 @@ func TestQuoteCompletenessReflectsPromptTruncation(t *testing.T) {
 		t.Fatal("complete quote incorrectly marked partial")
 	}
 }
+
+type intentTestLLM struct {
+	textOnly bool
+}
+
+func (*intentTestLLM) Name() string { return "intent-test-llm" }
+func (m *intentTestLLM) Chat(context.Context, []core.ChatMessage, *core.ChatOptions) (string, error) {
+	if m.textOnly {
+		return `{"text_only": true}`, nil
+	}
+	return `{"text_only": false}`, nil
+}
+func (*intentTestLLM) ChatWithTools(context.Context, []core.ChatMessage, []core.ToolDefinition, *core.ChatOptions) (*core.ChatResponse, error) {
+	return &core.ChatResponse{Content: "这里是生成的回复内容"}, nil
+}
+
+func TestCortex_TextOnlyIntentSetsFixedPresentation(t *testing.T) {
+	for _, textOnly := range []bool{true, false} {
+		t.Run(map[bool]string{true: "text_requested", false: "normal_chat"}[textOnly], func(t *testing.T) {
+			c := NewCortex(CortexConfig{
+				LLM:     &intentTestLLM{textOnly: textOnly},
+				Persona: entity.NewDefaultPersona(),
+			})
+			event := &entity.SensoryEvent{
+				Platform:  "qq",
+				ChannelID: "test-channel",
+				SenderID:  "test-sender",
+				Content:   "版本2转为文字",
+			}
+			out, err := c.Think(context.Background(), event)
+			if err != nil {
+				t.Fatalf("Think failed: %v", err)
+			}
+			if out == nil {
+				t.Fatal("expected utterance")
+			}
+			if out.FixedPresentation != textOnly {
+				t.Fatalf("expected FixedPresentation=%v, got %v", textOnly, out.FixedPresentation)
+			}
+		})
+	}
+}

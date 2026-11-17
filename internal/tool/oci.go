@@ -23,8 +23,9 @@ import (
 	"daidai/internal/config"
 )
 
+var imdsBaseURL = "http://169.254.169.254/opc/v2"
+
 const (
-	imdsBaseURL          = "http://169.254.169.254/opc/v2"
 	signatureVersion     = "1"
 	defaultRegion        = "ap-singapore-1"
 	maxIMDSResponseBytes = 1 << 20
@@ -51,13 +52,15 @@ type imdsInstanceMeta struct {
 }
 
 type imdsVnicMeta struct {
-	VnicID    string `json:"vnicId"`
-	PrivateIP string `json:"privateIp"`
+	VnicID          string `json:"vnicId"`
+	PrivateIP       string `json:"privateIp"`
+	MacAddr         string `json:"macAddr"`
+	SubnetCidrBlock string `json:"subnetCidrBlock"`
 }
 
 // FetchIMDS 从 OCI 实例元数据服务 (IMDSv2) 获取元数据
 func FetchIMDS(ctx context.Context, path string, target any) error {
-	url := fmt.Sprintf("%s/%s", imdsBaseURL, strings.TrimPrefix(path, "/"))
+	url := fmt.Sprintf("%s/%s", strings.TrimRight(imdsBaseURL, "/"), strings.TrimPrefix(path, "/"))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
