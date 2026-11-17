@@ -4,7 +4,7 @@
 #let accents = (nixos: rgb("#2166b5"), hn: rgb("#ad4d0b"), github: rgb("#7053ad"), v2ex: rgb("#147568"))
 #let labels = (nixos: "❄️  NixOS 生态", hn: "🔥  Hacker News 精选", github: "💻  GitHub 开源发现", v2ex: "💬  V2EX 技术话题")
 
-#set page(width: 600pt, height: auto, margin: (x: 28pt, y: 24pt), fill: rgb("#f5f7fb"))
+#set page(width: 860pt, height: auto, margin: (x: 32pt, y: 24pt), fill: rgb("#f5f7fb"))
 #set text(font: ("Twitter Color Emoji", "Source Han Sans SC"), size: 22pt, fill: ink, lang: "zh")
 #set par(justify: false, leading: 0.48em, spacing: 0pt, linebreaks: "optimized")
 #set block(spacing: 0pt)

@@ -31,7 +31,7 @@ func TestBriefingRenderingKeepsItemsAndLiteralText(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg, err := png.DecodeConfig(bytes.NewReader(card))
-	if err != nil || cfg.Width != 1200 || cfg.Height < 3000 {
+	if err != nil || cfg.Width != 1720 || cfg.Height < 3000 {
 		t.Fatalf("invalid complete long image: %+v %v", cfg, err)
 	}
 	doc.Items = append(doc.Items, doc.Items[0])
