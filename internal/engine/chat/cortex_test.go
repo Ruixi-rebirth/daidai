@@ -258,15 +258,83 @@ func TestQuoteCompletenessReflectsPromptTruncation(t *testing.T) {
 }
 
 type intentTestLLM struct {
-	textOnly bool
+	textOnly    bool
+	response    string
+	intentCalls int
 }
 
 func (*intentTestLLM) Name() string { return "intent-test-llm" }
 func (m *intentTestLLM) Chat(context.Context, []core.ChatMessage, *core.ChatOptions) (string, error) {
+	m.intentCalls++
+	if m.response != "" {
+		return m.response, nil
+	}
 	if m.textOnly {
-		return `{"text_only": true}`, nil
+		return `{"text_only": true,"request":"转为文字"}`, nil
 	}
 	return `{"text_only": false}`, nil
+}
+
+func TestTextOnlyPreferenceRequiresExplicitOriginalRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name, content, response string
+		want                    bool
+		wantCalls               int
+	}{
+		{"ordinary Nix question", "nix的优点是什么", `{"text_only":true,"request":"nix的优点是什么"}`, false, 0},
+		{"explicit request", "只发文字，方便复制", `{"text_only":true,"request":"只发文字"}`, true, 1},
+		{"extract quoted card", "把刚才图里第二条用文字发给我", `{"text_only":true,"request":"第二条用文字发给我"}`, true, 1},
+		{"unsupported guess", "介绍图片压缩", `{"text_only":true}`, false, 1},
+		{"invented evidence", "介绍图片压缩", `{"text_only":true,"request":"请只发文字"}`, false, 1},
+		{"talking about pictures", "介绍图片压缩", `{"text_only":false,"request":""}`, false, 1},
+		{"image preference", "别发文字，请用图片", `{"text_only":false,"request":""}`, false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := &intentTestLLM{response: tc.response}
+			c := NewCortex(CortexConfig{LLM: model, Persona: entity.NewDefaultPersona()})
+			if got := c.detectTextOnlyIntent(context.Background(), tc.content); got != tc.want || model.intentCalls != tc.wantCalls {
+				t.Fatalf("got=%v calls=%d", got, model.intentCalls)
+			}
+		})
+	}
+}
+
+func TestTextPreferenceDoesNotPersistIntoNextReply(t *testing.T) {
+	model := &intentTestLLM{response: `{"text_only":true,"request":"第二条用文字发给我"}`}
+	c := NewCortex(CortexConfig{LLM: model, Persona: entity.NewDefaultPersona()})
+	for _, tc := range []struct {
+		content  string
+		textOnly bool
+	}{
+		{"把图里第二条用文字发给我", true},
+		{"nix的优点是什么", false},
+	} {
+		out, err := c.Think(context.Background(), &entity.SensoryEvent{
+			Platform: "qq", ChannelID: "group", SenderID: "member", Content: tc.content,
+			ReplyContext: &entity.SensoryEvent{Content: "第一条介绍\n第二条：可复制的正文", ContentKind: "text_card", ContentComplete: true},
+		})
+		if err != nil || out == nil || out.FixedPresentation != tc.textOnly {
+			t.Fatalf("content=%s out=%+v err=%v", tc.content, out, err)
+		}
+	}
+}
+
+func TestTextPreferenceUsesCardSourceAndKeepsRealImages(t *testing.T) {
+	for _, realImage := range []bool{false, true} {
+		source := "# 可复制的卡片正文"
+		if realImage {
+			source = ""
+		}
+		out := &entity.Utterance{Images: [][]byte{[]byte("image")}, ImageSources: []string{source}, Text: "补充链接", InlineImages: true}
+		useCardSourceText(out)
+		if realImage {
+			if len(out.Images) != 1 || out.Text != "补充链接" {
+				t.Fatal("real image was replaced by text")
+			}
+		} else if out.HasMedia() || out.InlineImages || !strings.Contains(out.Text, source) || !strings.Contains(out.Text, "补充链接") {
+			t.Fatalf("card source was not preserved: %+v", out)
+		}
+	}
 }
 func (*intentTestLLM) ChatWithTools(context.Context, []core.ChatMessage, []core.ToolDefinition, *core.ChatOptions) (*core.ChatResponse, error) {
 	return &core.ChatResponse{Content: "这里是生成的回复内容"}, nil

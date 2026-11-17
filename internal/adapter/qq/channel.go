@@ -1979,7 +1979,9 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 			replyWindow = 5 * time.Minute
 		}
 	}
-	if u.InlineImages {
+	// Mentions are Markdown markup. Keep the mention and image in the same
+	// Markdown message rather than dropping it on the rich-media branch.
+	if u.InlineImages || (u.IsGroup && len(u.MentionUserIDs) > 0 && len(images) > 0) {
 		return q.transmitInlineImages(ctx, u, images, content, partLimit, replyWindow)
 	}
 

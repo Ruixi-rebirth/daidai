@@ -23,6 +23,57 @@ type qqTestTransport func(*http.Request) (*http.Response, error)
 
 func (f qqTestTransport) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
+func TestQQGroupMemoryImageSharesMessageWithMention(t *testing.T) {
+	var pngData bytes.Buffer
+	if err := png.Encode(&pngData, image.NewRGBA(image.Rect(0, 0, 2, 2))); err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient("test", "test")
+	var sent []string
+	var metadata QuoteMetadata
+	client.SetOnMessageSent(func(_, _, _, _ string, q QuoteMetadata) { metadata = q })
+	client.httpClient.Transport = qqTestTransport(func(req *http.Request) (*http.Response, error) {
+		body := `{}`
+		switch {
+		case strings.HasSuffix(req.URL.Path, "/prepare"):
+			body = `{"upload_id":"upload","presigned_url":"https://upload.example.com/image"}`
+		case strings.HasSuffix(req.URL.Path, "/complete"):
+			body = `{"image_id":"material","url":"qqbot-media://image/v1/material"}`
+		case strings.HasSuffix(req.URL.Path, "/messages"):
+			var payload struct {
+				MsgType  int `json:"msg_type"`
+				Markdown struct{ Content string }
+			}
+			if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.MsgType != 2 {
+				t.Fatalf("mention must use Markdown, got %d", payload.MsgType)
+			}
+			sent = append(sent, payload.Markdown.Content)
+			body = `{"id":"sent-memory"}`
+		}
+		header := make(http.Header)
+		header.Set("ETag", "etag")
+		return &http.Response{StatusCode: 200, Header: header, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})
+	channel := &QQChannel{client: client}
+	err := channel.Transmit(context.Background(), &entity.Utterance{
+		ChannelID: "group", IsGroup: true, QuoteMsgID: "question",
+		Images: [][]byte{pngData.Bytes()}, ImageSources: []string{"记忆画像正文"},
+		FallbackText: "记忆画像正文", MentionUserIDs: []string{"member"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 1 || !strings.Contains(sent[0], `<qqbot-at-user id="member" />`) || strings.Count(sent[0], "qqbot-media://") != 1 {
+		t.Fatalf("mention and single card must share one message: %v", sent)
+	}
+	if metadata.Text != "记忆画像正文" || metadata.Kind != qqQuoteTextCard {
+		t.Fatalf("quote source corrupted: %+v", metadata)
+	}
+}
+
 func TestQQMediaQuoteCompletenessAfterLongReport(t *testing.T) {
 	for _, group := range []bool{false, true} {
 		for _, length := range []int{100, core.MaxUserMessageRunes + 100} {

@@ -187,13 +187,14 @@ func TestIPCheckUnboundRunsNonDisruptiveProbe(t *testing.T) {
 		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/candidate-1"):
 			var body map[string]string
 			_ = json.NewDecoder(r.Body).Decode(&body)
-			if body["privateIpId"] == "sec-priv-id" {
+			switch body["privateIpId"] {
+			case "sec-priv-id":
 				candidateState = "ASSIGNED"
 				candidatePrivateIP = "sec-priv-id"
-			} else if body["privateIpId"] == "" {
+			case "":
 				candidateState = "AVAILABLE"
 				candidatePrivateIP = ""
-			} else {
+			default:
 				t.Fatalf("unexpected privateIpId in PUT: %v", body)
 			}
 			return ipTestResponse(200, fmt.Sprintf(`{"id":"candidate-1","ipAddress":"8.8.8.8","lifecycleState":"%s","privateIpId":"%s"}`, candidateState, candidatePrivateIP)), nil

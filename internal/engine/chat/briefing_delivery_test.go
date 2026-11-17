@@ -11,7 +11,8 @@ import (
 
 type preparedViewModel struct {
 	core.LLMProvider
-	round int
+	round    int
+	toolName string
 }
 
 func (*preparedViewModel) Name() string { return "prepared-view" }
@@ -21,9 +22,39 @@ func (*preparedViewModel) Chat(context.Context, []core.ChatMessage, *core.ChatOp
 func (m *preparedViewModel) ChatWithTools(context.Context, []core.ChatMessage, []core.ToolDefinition, *core.ChatOptions) (*core.ChatResponse, error) {
 	m.round++
 	if m.round == 1 {
-		return &core.ChatResponse{ToolCalls: []core.ToolCall{{ID: "get1", Type: "function", Function: core.ToolCallFunction{Name: "get_geek_briefing", Arguments: `{}`}}}}, nil
+		name := m.toolName
+		if name == "" {
+			name = "get_geek_briefing"
+		}
+		return &core.ChatResponse{ToolCalls: []core.ToolCall{{ID: "get1", Type: "function", Function: core.ToolCallFunction{Name: name, Arguments: `{}`}}}}, nil
 	}
 	return &core.ChatResponse{}, nil
+}
+
+func TestPreparedMemoryCardDoesNotAskModelToRenderAgain(t *testing.T) {
+	model := &preparedViewModel{toolName: "manage_memory"}
+	commits := 0
+	hands := &preparedViewHands{result: &core.ToolResult{
+		Text: "# 记忆画像", FallbackText: "# 记忆画像", ImageData: []byte("memory-png"), ImageOnly: true,
+		OnDelivered: func(context.Context) { commits++ },
+	}}
+	c := NewCortex(CortexConfig{LLM: model, Hands: hands, Persona: entity.NewDefaultPersona()})
+	out, err := c.Think(context.Background(), &entity.SensoryEvent{
+		Platform: "qq", ChannelID: "group", IsGroup: true, SenderID: "member", Content: "呆呆你还记得我吗",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.round != 1 || len(out.Images) != 1 || out.Text != "" || out.FallbackText != "# 记忆画像" {
+		t.Fatalf("rounds=%d out=%+v", model.round, out)
+	}
+	if commits != 0 {
+		t.Fatal("view committed before delivery")
+	}
+	out.OnDelivered(context.Background())
+	if commits != 1 {
+		t.Fatal("view delivery callback lost")
+	}
 }
 
 type preparedViewHands struct {
@@ -32,7 +63,10 @@ type preparedViewHands struct {
 }
 
 func (*preparedViewHands) Definitions() []core.ToolDefinition {
-	return []core.ToolDefinition{{Type: "function", Function: core.ToolFunctionDetail{Name: "get_geek_briefing"}}}
+	return []core.ToolDefinition{
+		{Type: "function", Function: core.ToolFunctionDetail{Name: "get_geek_briefing"}},
+		{Type: "function", Function: core.ToolFunctionDetail{Name: "manage_memory"}},
+	}
 }
 func (h *preparedViewHands) Execute(context.Context, string, json.RawMessage) (*core.ToolResult, error) {
 	return h.result, nil

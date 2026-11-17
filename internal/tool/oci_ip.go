@@ -1094,7 +1094,7 @@ func (t *OCIIPTool) handleCheck(ctx context.Context, targetIP string, port int) 
 
 	rep := t.checkIPReputation(ctx, targetIP, 50, true)
 	ips, listErr := t.listReservedPublicIPs(ctx)
-	connectivity := "未检测：无法确认目标绑定状态"
+	var connectivity string
 	var targetItem *ociPublicIPItem
 	for i := range ips {
 		if ips[i].IPAddress == targetIP {
