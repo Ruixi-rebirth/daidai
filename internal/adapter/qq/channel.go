@@ -424,6 +424,7 @@ func (c *msgCache) hydrateInboundRecord(ctx context.Context, record db.QQQuoteRe
 
 // QQChannel 官方 QQ 开放平台全双工通道 (直接实现 entity.Channel，零前缀、单层架构)
 type QQChannel struct {
+	markdownImageMu  sync.Mutex
 	proactivePrivate atomic.Pointer[sendObservation]
 	proactiveGroup   atomic.Pointer[sendObservation]
 	cfg              Config
@@ -1985,7 +1986,14 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 		return q.transmitInlineImages(ctx, u, images, content, partLimit, replyWindow)
 	}
 
-	chunks := core.SplitMarkdownChunks(content, 1200)
+	chunkLimit := 1200
+	if u.IsGroup && len(u.MentionUserIDs) > 0 {
+		chunkLimit -= len([]rune(qqMentionMarkup(u.MentionUserIDs)))
+		if chunkLimit <= 0 {
+			return fmt.Errorf("QQ 群聊 @ 提及标记超过单条消息长度限制")
+		}
+	}
+	chunks := core.SplitMarkdownChunks(content, chunkLimit)
 	if len(chunks) == 0 {
 		chunks = []string{""}
 	}
@@ -2180,6 +2188,8 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 }
 
 func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utterance, images [][]byte, content string, partLimit int, replyWindow time.Duration) (sendErr error) {
+	q.markdownImageMu.Lock()
+	defer q.markdownImageMu.Unlock()
 	attempted := false
 	defer func() {
 		if sendErr != nil && !attempted {
@@ -2218,7 +2228,9 @@ func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utteranc
 				slog.Warn("qq_channel: failed to release temporary Markdown image material", "imageID", imageID, "err", err)
 			}
 		}
+		imageIDs = nil
 	}
+	defer cleanup()
 	firstImage := 0
 	flushImages := func(end int) {
 		source, _ := entity.ImageDeliveryText(imageSources[firstImage:end], end-firstImage)
@@ -2233,19 +2245,23 @@ func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utteranc
 			return fmt.Errorf("read inline image %d dimensions: %w", i+1, err)
 		}
 		imageID, imageURL, err := q.client.UploadMarkdownImage(ctx, data)
+		if err != nil && strings.Contains(err.Error(), "40035007") {
+			if reclaimErr := q.client.DeleteReplyMarkdownImages(ctx, imageIDs); reclaimErr != nil {
+				slog.Warn("qq_channel: unable to reclaim old reply image materials", "err", reclaimErr)
+			} else {
+				imageID, imageURL, err = q.client.UploadMarkdownImage(ctx, data)
+			}
+		}
 		if err != nil {
-			cleanup()
 			return fmt.Errorf("upload inline image %d: %w", i+1, err)
 		}
 		imageIDs = append(imageIDs, imageID)
 		markup := fmt.Sprintf("![第 %d 页 #%dpx #%dpx](%s)", i+1, dimensions.Width, dimensions.Height, imageURL)
 		if len(markup) > 4000 {
-			cleanup()
 			return fmt.Errorf("QQ image reference exceeds message length limit")
 		}
 		if markdown.Len()+2+len(markup) > 4000 {
 			if i == firstImage {
-				cleanup()
 				return fmt.Errorf("QQ image reference and mention exceed message length limit")
 			}
 			flushImages(i)
@@ -2268,21 +2284,17 @@ func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utteranc
 		}
 	}
 	if !u.Proactive && len(parts) > partLimit {
-		cleanup()
 		return fmt.Errorf("%w: QQ 图文与索引需要 %d 条消息，当前上限 %d 条", entity.ErrMessageTooLong, len(parts), partLimit)
 	}
 	budget, reservedCount, limitedByBudget, err := q.reservePassiveReplyBudget(u.QuoteMsgID, len(parts), partLimit, replyWindow)
 	if err != nil {
-		cleanup()
 		return err
 	}
 	defer func() { q.releasePassiveReplyReservations(budget, reservedCount) }()
 	if limitedByBudget && reservedCount < len(parts) {
-		cleanup()
 		return fmt.Errorf("QQ 被动回复额度已用完")
 	}
 	if err := ctx.Err(); err != nil {
-		cleanup()
 		return err
 	}
 	for index, part := range parts {
@@ -2326,7 +2338,7 @@ func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utteranc
 				UndeliveredText: strings.TrimSpace(pending + "\n\n" + strings.Join(pendingCaptions, "\n\n"))}
 		}
 	}
-	slog.Info("qq_channel: 多图 Markdown 消息已接受，保留素材供 QQ 客户端加载", "channelID", u.ChannelID, "pages", len(images), "messages", len(parts))
+	slog.Info("qq_channel: 多图 Markdown 消息已接受，已释放临时素材", "channelID", u.ChannelID, "pages", len(images), "messages", len(parts))
 	return nil
 }
 

@@ -386,8 +386,8 @@ func (c *Cortex) RenderCard(ctx context.Context, event *entity.SensoryEvent, con
 
 // RenderCardPages turns long replies into a small, ordered set of readable cards.
 func (c *Cortex) RenderCardPages(ctx context.Context, event *entity.SensoryEvent, content string, maxPages int) ([][]byte, error) {
-	if maxPages < 1 || maxPages > 4 {
-		return nil, fmt.Errorf("image page limit must be between 1 and 4")
+	if maxPages < 1 {
+		return nil, fmt.Errorf("image page limit must be positive")
 	}
 	pageRunes := 1400
 	chunks := core.SplitMarkdownChunks(content, pageRunes)

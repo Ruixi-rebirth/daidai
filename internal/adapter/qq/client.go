@@ -353,6 +353,74 @@ func (c *Client) DeleteMarkdownImage(ctx context.Context, imageID string) error 
 	return err
 }
 
+// DeleteReplyMarkdownImages reclaims only reply images created by this adapter.
+// QQ keeps Markdown image materials in a bot-wide 100-image library; sent
+// messages retain their copied image after the temporary material is deleted.
+func (c *Client) DeleteReplyMarkdownImages(ctx context.Context, preserveIDs []string) error {
+	cursor := ""
+	var failures []error
+	var candidates []string
+	preserve := make(map[string]struct{}, len(preserveIDs))
+	for _, id := range preserveIDs {
+		preserve[id] = struct{}{}
+	}
+	for {
+		listURL := apiBaseURL + "/v2/media-images?cursor=" + url.QueryEscape(cursor)
+		data, err := c.doJSON(ctx, http.MethodGet, listURL, nil)
+		if err != nil {
+			return errors.Join(append(failures, fmt.Errorf("list QQ Markdown images: %w", err))...)
+		}
+		var page struct {
+			Images []struct {
+				ID       string `json:"image_id"`
+				FileName string `json:"file_name"`
+			} `json:"images"`
+			NextCursor string `json:"next_cursor"`
+			Data       *struct {
+				Images []struct {
+					ID       string `json:"image_id"`
+					FileName string `json:"file_name"`
+				} `json:"images"`
+				NextCursor string `json:"next_cursor"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(data, &page); err != nil {
+			return errors.Join(append(failures, fmt.Errorf("decode QQ Markdown image list: %w", err))...)
+		}
+		images, nextCursor := page.Images, page.NextCursor
+		if page.Data != nil {
+			images, nextCursor = page.Data.Images, page.Data.NextCursor
+		}
+		for _, image := range images {
+			if !isReplyMarkdownImageName(image.FileName) || image.ID == "" {
+				continue
+			}
+			if _, keep := preserve[image.ID]; keep {
+				continue
+			}
+			candidates = append(candidates, image.ID)
+		}
+		if nextCursor == "" || nextCursor == cursor {
+			break
+		}
+		cursor = nextCursor
+	}
+	for _, id := range candidates {
+		if err := c.DeleteMarkdownImage(ctx, id); err != nil {
+			failures = append(failures, fmt.Errorf("delete Daidai reply image: %w", err))
+		}
+	}
+	return errors.Join(failures...)
+}
+
+func isReplyMarkdownImageName(name string) bool {
+	if len(name) != len("reply-")+16+len(".png") || !strings.HasPrefix(name, "reply-") || !strings.HasSuffix(name, ".png") {
+		return false
+	}
+	_, err := strconv.ParseUint(name[len("reply-"):len(name)-len(".png")], 16, 64)
+	return err == nil
+}
+
 // SendGroupMessage 发送 QQ 群聊 Markdown 消息。
 func (c *Client) SendGroupMessage(ctx context.Context, groupOpenID string, content string, msgID string) error {
 	return c.sendMessage(ctx, "groups", groupOpenID, content, msgID)

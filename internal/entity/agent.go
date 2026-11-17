@@ -600,7 +600,7 @@ func (a *SuperAgent) transmitUtterance(ctx context.Context, utterance *Utterance
 			fallbackText = utterance.FallbackText
 		}
 		if utterance.HasMedia() {
-			fallbackText = strings.TrimSpace(fallbackText + "\n[图文内容超出平台单次发送限制，已改为文字版]")
+			fallbackText = strings.TrimSpace(fallbackText)
 		}
 		if strings.TrimSpace(fallbackText) == "" {
 			fallbackText = "回复内容超过平台单次发送上限。"
@@ -620,11 +620,11 @@ func (a *SuperAgent) transmitUtterance(ctx context.Context, utterance *Utterance
 		slog.Warn("superagent: 图片消息发送失败，回退为文字", "channel", utterance.ChannelID, "err", err)
 		fallbackText := ""
 		if strings.TrimSpace(utterance.FallbackText) != "" {
-			fallbackText = strings.TrimSpace(utterance.FallbackText + "\n[图片无法发送，以下为文字版]")
+			fallbackText = strings.TrimSpace(utterance.FallbackText)
 		} else if strings.TrimSpace(utterance.Text) == "" {
-			fallbackText = "图片发送失败，请稍后重试。"
+			fallbackText = "图片暂时没发出去。"
 		} else {
-			fallbackText = strings.TrimSpace(utterance.Text + "\n[图片发送失败，以下改用文字回复]")
+			fallbackText = strings.TrimSpace(utterance.Text)
 		}
 		deliveredText, fallbackErr := a.transmitTextFallback(ctx, utterance, fallbackText, senderID)
 		if fallbackErr != nil {
@@ -1434,11 +1434,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 						replyContent = core.RedactSensitiveIPs(replyContent)
 					}
 					if renderer.ShouldAutoRenderReply(replyContent) {
-						maxInlineImages := 4
-						if event.Platform == "telegram" {
-							maxInlineImages = 10
-						}
-						images := make([][]byte, 0, maxInlineImages)
+						images := make([][]byte, 0, len(utterance.Images)+1)
 						for _, image := range utterance.Images {
 							if len(image) > 0 {
 								images = append(images, image)
@@ -1447,30 +1443,31 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 						if len(utterance.CardData) > 0 {
 							images = append(images, utterance.CardData)
 						}
-						availablePages := maxInlineImages - len(images)
-						if availablePages > 0 {
-							cardCtx, cancelCard := context.WithTimeout(thinkCtx, 45*time.Second)
-							pages, renderErr := renderer.RenderCardPages(cardCtx, event, replyContent, availablePages)
-							cancelCard()
-							if renderErr != nil || len(pages) == 0 {
-								slog.Warn("superagent: 长回复卡片渲染失败，回退为文字", "platform", event.Platform, "channel", event.ChannelID, "err", renderErr)
-							} else {
-								utterance.InlineNonTextImageCount = len(images)
-								for len(utterance.ImageSources) < len(images) {
-									utterance.ImageSources = append(utterance.ImageSources, "")
-								}
-								for range pages {
-									utterance.ImageSources = append(utterance.ImageSources, replyContent)
-								}
-								images = append(images, pages...)
-								fallbackParts := []string{strings.TrimSpace(utterance.FallbackText), replyContent}
-								utterance.FallbackText = strings.TrimSpace(strings.Join(nonEmptyStrings(fallbackParts), "\n\n"))
-								utterance.Text = ""
-								utterance.CardData = nil
-								utterance.Images = images
-								utterance.InlineImages = true
-								slog.Info("superagent: 长回复已分页渲染为图文消息", "platform", event.Platform, "channel", event.ChannelID, "pages", len(pages), "images", len(images), "textBytes", len(replyContent))
+						maxPages := len(core.SplitMarkdownChunks(replyContent, 1400))
+						if maxPages == 0 {
+							maxPages = 1
+						}
+						cardCtx, cancelCard := context.WithTimeout(thinkCtx, 45*time.Second)
+						pages, renderErr := renderer.RenderCardPages(cardCtx, event, replyContent, maxPages)
+						cancelCard()
+						if renderErr != nil || len(pages) == 0 {
+							slog.Warn("superagent: 长回复卡片渲染失败，回退为文字", "platform", event.Platform, "channel", event.ChannelID, "err", renderErr)
+						} else {
+							utterance.InlineNonTextImageCount = len(images)
+							for len(utterance.ImageSources) < len(images) {
+								utterance.ImageSources = append(utterance.ImageSources, "")
 							}
+							for range pages {
+								utterance.ImageSources = append(utterance.ImageSources, replyContent)
+							}
+							images = append(images, pages...)
+							fallbackParts := []string{strings.TrimSpace(utterance.FallbackText), replyContent}
+							utterance.FallbackText = strings.TrimSpace(strings.Join(nonEmptyStrings(fallbackParts), "\n\n"))
+							utterance.Text = ""
+							utterance.CardData = nil
+							utterance.Images = images
+							utterance.InlineImages = true
+							slog.Info("superagent: 长回复已分页渲染为图文消息", "platform", event.Platform, "channel", event.ChannelID, "pages", len(pages), "images", len(images), "textBytes", len(replyContent))
 						}
 					}
 				}
