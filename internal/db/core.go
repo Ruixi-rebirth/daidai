@@ -147,6 +147,20 @@ CREATE TABLE IF NOT EXISTS pending_notifications (
 );
 CREATE INDEX IF NOT EXISTS idx_pending_notifications_owner ON pending_notifications(platform, recipient_id, id);
 
+CREATE TABLE IF NOT EXISTS conversation_drafts (
+    id TEXT PRIMARY KEY,
+    platform TEXT NOT NULL,
+    chat_type TEXT NOT NULL CHECK (chat_type IN ('private','group')),
+    conv_id TEXT NOT NULL,
+    requester_id TEXT NOT NULL,
+    goal TEXT NOT NULL,
+    context_json TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE(platform, chat_type, conv_id, requester_id, id)
+);
+CREATE INDEX IF NOT EXISTS idx_conversation_drafts_owner
+    ON conversation_drafts(platform, chat_type, conv_id, requester_id, updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS agent_tickets (
     id              TEXT PRIMARY KEY,
     requester_id    TEXT NOT NULL,
@@ -218,6 +232,63 @@ type Manager struct {
 	baseDir string
 	mu      sync.RWMutex
 	conns   map[string]*sql.DB
+}
+
+type ConversationDraft struct {
+	ID, Platform, ChatType, ConversationID, RequesterID, Goal, ContextJSON string
+	UpdatedAt                                                              time.Time
+}
+
+func (m *Manager) SaveConversationDraft(ctx context.Context, draft ConversationDraft) error {
+	if strings.TrimSpace(draft.ID) == "" || strings.TrimSpace(draft.RequesterID) == "" || strings.TrimSpace(draft.ConversationID) == "" || len(draft.ContextJSON) > 1<<20 {
+		return fmt.Errorf("conversation draft identity or size is invalid")
+	}
+	conn, err := m.GetConn(draft.Platform)
+	if err != nil {
+		return err
+	}
+	_, err = conn.ExecContext(ctx, `INSERT INTO conversation_drafts
+		(id, platform, chat_type, conv_id, requester_id, goal, context_json, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET goal=excluded.goal, context_json=excluded.context_json, updated_at=excluded.updated_at
+		WHERE platform=excluded.platform AND chat_type=excluded.chat_type AND conv_id=excluded.conv_id AND requester_id=excluded.requester_id`,
+		draft.ID, NormPlatform(draft.Platform), draft.ChatType, draft.ConversationID, draft.RequesterID, draft.Goal, draft.ContextJSON, draft.UpdatedAt.UnixMilli())
+	return err
+}
+
+func (m *Manager) ListConversationDrafts(ctx context.Context, platform, chatType, convID, requesterID string) ([]ConversationDraft, error) {
+	conn, err := m.GetConn(platform)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := conn.QueryContext(ctx, `SELECT id, platform, chat_type, conv_id, requester_id, goal, context_json, updated_at
+		FROM conversation_drafts WHERE platform=? AND chat_type=? AND conv_id=? AND requester_id=? AND updated_at>?
+		ORDER BY updated_at DESC`, NormPlatform(platform), chatType, convID, requesterID, time.Now().Add(-7*24*time.Hour).UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var drafts []ConversationDraft
+	for rows.Next() {
+		var draft ConversationDraft
+		var updated int64
+		if err := rows.Scan(&draft.ID, &draft.Platform, &draft.ChatType, &draft.ConversationID, &draft.RequesterID, &draft.Goal, &draft.ContextJSON, &updated); err != nil {
+			return nil, err
+		}
+		draft.UpdatedAt = time.UnixMilli(updated)
+		drafts = append(drafts, draft)
+	}
+	return drafts, rows.Err()
+}
+
+func (m *Manager) DeleteConversationDraft(ctx context.Context, draft ConversationDraft) error {
+	conn, err := m.GetConn(draft.Platform)
+	if err != nil {
+		return err
+	}
+	_, err = conn.ExecContext(ctx, `DELETE FROM conversation_drafts WHERE id=? AND platform=? AND chat_type=? AND conv_id=? AND requester_id=?`,
+		draft.ID, NormPlatform(draft.Platform), draft.ChatType, draft.ConversationID, draft.RequesterID)
+	return err
 }
 
 var (

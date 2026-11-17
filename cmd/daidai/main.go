@@ -368,6 +368,7 @@ func run() int {
 		Inbox:            attachmentInbox,
 		WorkingLimit:     cfg.Memory.WorkingLimit,
 		GroupExpressions: groupExpressions,
+		Drafts:           database,
 	})
 
 	// 全双工通信管道 (实现 entity.Channel)

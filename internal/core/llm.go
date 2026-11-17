@@ -57,8 +57,9 @@ type ChatOptions struct {
 
 // ChatResponse 模型响应，支持纯文本与工具调用
 type ChatResponse struct {
-	Content   string
-	ToolCalls []ToolCall
+	Content      string
+	ToolCalls    []ToolCall
+	FinishReason string
 }
 
 // LLMProvider 大模型驱动接口 (统一 OpenAI / DeepSeek / Gemini / 本地模型)

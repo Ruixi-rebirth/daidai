@@ -1390,7 +1390,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			}
 			event.ProcessedAttachments = nil
 			slog.Error("superagent: 思考过程发生异常", "err", err)
-			errorReply := "这次处理没有完成（可能是模型调用超时）。要我重新处理并补上吗？"
+			errorReply := "这次处理没有完成。模型服务或任务运行发生错误；请看错误说明，必要时回复“继续”查看已保存的任务草稿。"
 			sendCtx, cancel := context.WithTimeout(thinkCtx, 15*time.Second)
 			defer cancel()
 			if sendErr := a.transmitReplyText(sendCtx, event, errorReply); sendErr != nil {

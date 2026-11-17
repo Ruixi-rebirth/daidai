@@ -308,14 +308,11 @@ func (p *OpenAIProvider) ChatWithTools(ctx context.Context, messages []core.Chat
 	}
 
 	choice := chatResp.Choices[0]
-	switch strings.ToLower(strings.TrimSpace(choice.FinishReason)) {
-	case "length", "max_tokens", "max_output_tokens":
-		return nil, fmt.Errorf("model response was truncated because it reached the output token limit")
-	}
 	firstChoice := choice.Message
 	return &core.ChatResponse{
-		Content:   firstChoice.Content,
-		ToolCalls: firstChoice.ToolCalls,
+		Content:      firstChoice.Content,
+		ToolCalls:    firstChoice.ToolCalls,
+		FinishReason: strings.ToLower(strings.TrimSpace(choice.FinishReason)),
 	}, nil
 }
 
