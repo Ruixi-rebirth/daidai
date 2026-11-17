@@ -367,7 +367,7 @@ func (s *Service) Present(ctx context.Context, e *Edition) ([][]byte, []string, 
 		}
 	}
 	doc.SourceNote = strings.Join(notes, "；")
-	for _, i := range e.Items {
+	for _, i := range e.OrderedItems() {
 		doc.Items = append(doc.Items, render.BriefingItem{Number: i.Number, Source: i.Source, Title: i.Title, Summary: i.Summary, Meta: i.Meta, EvidenceKind: i.EvidenceKind})
 	}
 	if len(e.Items) == 0 {

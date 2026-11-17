@@ -84,7 +84,7 @@ func TestEditorialEvidenceAndInvalidSelection(t *testing.T) {
 	chosen, leads, basic := edit(context.Background(), model, items)
 	e := &Edition{}
 	finalize(e, chosen, leads)
-	if basic || model.calls.Load() != 1 || len(e.Items) != 2 || e.Items[0].ID != "nixos:1" || e.Leads[0] != "01" || e.Items[1].Summary != "" || e.Items[1].URL != items[0].URL {
+	if basic || model.calls.Load() != 1 || len(e.Items) != 2 || e.Items[1].ID != "nixos:1" || e.Leads[0] != "02" || e.Items[0].Summary != "" || e.Items[0].URL != items[0].URL {
 		t.Fatalf("evidence or source identity lost: %+v", e)
 	}
 	model.reply = `{"items":[{"id":"invented"}],"lead_ids":[]}`
@@ -125,7 +125,7 @@ func TestEditorKeepsFivePerSectionAndStableNumbering(t *testing.T) {
 		}
 	}
 	index := e.Index()
-	if !strings.Contains(index, "中文标题") || !strings.Contains(index, "[20 · 中文标题](https://example.com/v2ex/4)") {
+	if !strings.Contains(index, "中文标题") || !strings.Contains(index, "[20 · 中文标题](https://example.com/nixos/4)") {
 		t.Fatal("clickable index must identify each story by number and title")
 	}
 }
@@ -233,7 +233,7 @@ func fixtureCollector(t *testing.T) *Collector {
 		case "/blog":
 			w.Header().Set("Content-Type", "application/rss+xml")
 			_, _ = fmt.Fprintf(w, `<rss><channel><item><title>新公告</title><link>https://example.com/nix</link><pubDate>%s</pubDate><description>公告正文提供具体内容</description></item></channel></rss>`, now.Format(http.TimeFormat))
-		case "/c/announcements/8.json", "/top.json":
+		case "/c/announcements/8.json", "/c/dev/14.json", "/c/howto/15.json":
 			_, _ = fmt.Fprint(w, `{"topic_list":{"topics":[]}}`)
 		case "/topstories.json":
 			_, _ = fmt.Fprint(w, `[1,2,3]`)

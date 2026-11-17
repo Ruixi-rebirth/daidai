@@ -73,13 +73,16 @@ func (c *Collector) Collect(ctx context.Context) ([]Item, []SourceState, time.Ti
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	results := make([]sourceResult, 4)
-	fetchers := []func(context.Context) ([]Item, error){c.nix, c.hackerNews, c.github, c.v2ex}
+	fetchers := []struct {
+		source string
+		fetch  func(context.Context) ([]Item, error)
+	}{{"nixos", c.nix}, {"hn", c.hackerNews}, {"github", c.github}, {"v2ex", c.v2ex}}
 	var wg sync.WaitGroup
-	for index, fetch := range fetchers {
+	for index, source := range fetchers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			items, err := fetch(ctx)
+			items, err := source.fetch(ctx)
 			status := "ok"
 			if err != nil {
 				status = "error"
@@ -87,7 +90,7 @@ func (c *Collector) Collect(ctx context.Context) ([]Item, []SourceState, time.Ti
 					status = "partial"
 				}
 			}
-			results[index] = sourceResult{items, SourceState{Source: sources[index], Status: status, Count: len(items), ObservedAt: time.Now()}}
+			results[index] = sourceResult{items, SourceState{Source: source.source, Status: status, Count: len(items), ObservedAt: time.Now()}}
 		}()
 	}
 	wg.Wait()

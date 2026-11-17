@@ -3,13 +3,14 @@ package briefing
 import (
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
 
 const maxItems = 20
 
-var sources = []string{"nixos", "hn", "github", "v2ex"}
+var sources = []string{"hn", "github", "v2ex", "nixos"}
 var limits = map[string]int{"nixos": 5, "hn": 5, "github": 5, "v2ex": 5}
 var candidateLimits = map[string]int{"nixos": 8, "hn": 8, "github": 8, "v2ex": 8}
 var labels = map[string]string{"nixos": "❄️ NixOS 生态", "hn": "🔥 Hacker News 精选", "github": "💻 GitHub 开源发现", "v2ex": "💬 V2EX 技术话题"}
@@ -104,6 +105,23 @@ func identity(i Item) string {
 	}
 	return canonical(i.URL)
 }
+
+// OrderedItems changes presentation without renumbering a published edition.
+// Quotes using an existing article number keep referring to the same article.
+func (e *Edition) OrderedItems() []Item {
+	items := append([]Item(nil), e.Items...)
+	position := func(source string) int {
+		for n, value := range sources {
+			if value == source {
+				return n
+			}
+		}
+		return len(sources)
+	}
+	sort.SliceStable(items, func(i, j int) bool { return position(items[i].Source) < position(items[j].Source) })
+	return items
+}
+
 func (e *Edition) Text() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# 极客早报 · %s\n\n截止 %s\n", e.ID, e.Cutoff)
@@ -111,7 +129,7 @@ func (e *Edition) Text() string {
 		b.WriteString("\n本期为基础速览，未生成完整 AI 编辑摘要。\n")
 	}
 	last := ""
-	for _, i := range e.Items {
+	for _, i := range e.OrderedItems() {
 		if i.Source != last {
 			fmt.Fprintf(&b, "\n## %s\n", labels[i.Source])
 			last = i.Source
@@ -133,7 +151,7 @@ func (e *Edition) Text() string {
 func (e *Edition) Index() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "极客早报 · %s\n", e.ID)
-	for _, i := range e.Items {
+	for _, i := range e.OrderedItems() {
 		fmt.Fprintf(&b, "\n[%s · %s](%s)", i.Number, escape(i.Title), i.URL)
 		if i.DiscussionURL != "" {
 			fmt.Fprintf(&b, " · [讨论](%s)", i.DiscussionURL)

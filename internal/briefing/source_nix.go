@@ -19,6 +19,7 @@ type nixTopic struct {
 	Likes       int       `json:"like_count"`
 	Posts       int       `json:"posts_count"`
 	Pinned      bool
+	section     string
 }
 type nixPost struct {
 	ID      int64
@@ -69,7 +70,7 @@ func (c *Collector) nix(ctx context.Context) ([]Item, error) {
 	}
 	seen := map[int64]bool{}
 	var topics []nixTopic
-	for _, path := range []string{"/c/announcements/8.json", "/top.json?period=daily"} {
+	for _, path := range []string{"/c/announcements/8.json", "/c/dev/14.json", "/c/howto/15.json"} {
 		var v struct {
 			List struct{ Topics []nixTopic } `json:"topic_list"`
 		}
@@ -79,19 +80,29 @@ func (c *Collector) nix(ctx context.Context) ([]Item, error) {
 		}
 		success = true
 		for _, t := range v.List.Topics {
-			if seen[t.ID] || t.Pinned {
+			if seen[t.ID] || (t.Pinned && path != "/c/announcements/8.json") {
 				continue
 			}
 			seen[t.ID] = true
-			if time.Since(t.Created) > 24*time.Hour && time.Since(t.Active) > 24*time.Hour {
+			// Only announcements may qualify through a substantive fresh reply.
+			// Old review queues and replies to old guides are not daily news.
+			if time.Since(t.Created) > 24*time.Hour && (path != "/c/announcements/8.json" || time.Since(t.Active) > 24*time.Hour) {
 				continue
+			}
+			switch path {
+			case "/c/announcements/8.json":
+				t.section = "社区公告"
+			case "/c/dev/14.json":
+				t.section = "开发讨论"
+			case "/c/howto/15.json":
+				t.section = "教程"
 			}
 			topics = append(topics, t)
 		}
 	}
 	jobs := make([]Item, len(topics))
 	for index, t := range topics {
-		jobs[index] = Item{ID: fmt.Sprintf("nixos:topic:%d", t.ID), Source: "nixos", Title: clipped(t.Title, 200), URL: fmt.Sprintf("https://discourse.nixos.org/t/%s/%d", url.PathEscape(t.Slug), t.ID), PublishedAt: t.Created, ActiveAt: t.Active, OldTopic: time.Since(t.Created) > 24*time.Hour, Score: t.Likes, Meta: fmt.Sprintf("社区首帖 · 累计 %d 个赞 · %d 条回复", t.Likes, max(0, t.Posts-1)), EvidenceKind: "title_only"}
+		jobs[index] = Item{ID: fmt.Sprintf("nixos:topic:%d", t.ID), Source: "nixos", Title: clipped(t.Title, 200), URL: fmt.Sprintf("https://discourse.nixos.org/t/%s/%d", url.PathEscape(t.Slug), t.ID), PublishedAt: t.Created, ActiveAt: t.Active, OldTopic: time.Since(t.Created) > 24*time.Hour, Score: t.Likes, Meta: fmt.Sprintf("%s首帖 · 累计 %d 个赞 · %d 条回复", t.section, t.Likes, max(0, t.Posts-1)), EvidenceKind: "title_only"}
 	}
 	jobs = rank(jobs, 8)
 	jobs = parallelItems(ctx, jobs, func(ctx context.Context, i Item) Item {
@@ -134,7 +145,10 @@ func (c *Collector) nix(ctx context.Context) ([]Item, error) {
 		if last.ID == 0 {
 			return Item{}
 		}
-		i.Evidence = clipped(updates.String(), 900) + " 首帖背景：" + clipped(i.Evidence, 450)
+		// Only fresh replies are evidence for an old topic's new development.
+		// Supplying the old first post lets the editor retell old announcements
+		// when today's reply is merely a greeting or acknowledgement.
+		i.Evidence = clipped(updates.String(), 1400)
 		i.EvidenceKind = "recent_replies"
 		i.ActiveAt = last.Created
 		i.URL += "/" + strconv.Itoa(last.Number)
