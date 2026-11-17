@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ type OCIIPTool struct {
 	client      *OCIClient
 	immune      *entity.ImmuneSystem
 	operationMu chan struct{}
+	qualityHTTP *http.Client
 }
 
 func NewOCIIPTool(client *OCIClient, immune *entity.ImmuneSystem) *OCIIPTool {
@@ -30,6 +32,7 @@ func NewOCIIPTool(client *OCIClient, immune *entity.ImmuneSystem) *OCIIPTool {
 		client:      client,
 		immune:      immune,
 		operationMu: make(chan struct{}, 1),
+		qualityHTTP: &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }},
 	}
 }
 
@@ -38,7 +41,7 @@ func (t *OCIIPTool) Name() string {
 }
 
 func (t *OCIIPTool) Description() string {
-	return "Oracle Cloud (OCI) 预留公网 IP 管理与换绑工具。支持查看当前公网与预留 IP 列表 (status)、一键释放/删除闲置预留 IP (cleanup)、按纯净度与欺诈分筛选刷取候选优质 IP (roll)、检测指定 IP 质量 (check) 以及将优质 IP 无损绑定至服务器 (bind)。当用户要求查看、刷取、换绑、释放或删除预留 IP 时，必须实际调用本工具执行，绝对禁止在未调用工具的情况下虚构回复已操作完成。"
+	return "OCI 预留公网 IP 管理：status 查询；roll 默认随机申请并保留一个未绑定候选，仅按用户明确要求设置筛选；check 查询第三方画像和独立连通诊断；bind 单独换绑，可能中断网络；cleanup 删除闲置资源。必须实际调用才能报告操作完成。画像未知不等于风险高；未绑定 IP 无法验证服务连通；不得将筛选或探针失败解释为地址池枯竭、污染或被墙，不承诺网段质量。"
 }
 
 func (t *OCIIPTool) Parameters() map[string]any {
@@ -47,7 +50,7 @@ func (t *OCIIPTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"action": map[string]any{
 				"type":        "string",
-				"description": "执行动作：status (状态查询), cleanup (清理未绑定闲置IP), roll (筛选刷取优质IP), check (质量与国内连通检测), bind (换绑目标IP)",
+				"description": "status 查询；cleanup 删除闲置 IP；roll 申请候选（不自动绑定）；check 画像与连通诊断；bind 换绑",
 				"enum":        []string{"status", "cleanup", "roll", "check", "bind"},
 			},
 			"ip": map[string]any{
@@ -65,12 +68,13 @@ func (t *OCIIPTool) Parameters() map[string]any {
 			},
 			"max_risk": map[string]any{
 				"type":        "integer",
-				"description": "刷取 (roll) 时允许的最大 Scamalytics 欺诈风险评分 (0-100，越低越纯净，如 25；省略时默认为 50)",
+				"description": "roll 可选风险分上限：默认 100 表示不筛选、不请求评分服务；0 只接受已知评分 0。仅用户明确要求时设置小于 100 的值；未知评分会停止筛选。",
 			},
 			"no_abuser": map[string]any{
 				"type":        "boolean",
-				"description": "刷取 (roll) 时是否自动淘汰被标记为公开代理/高危节点的 IP (默认 true)",
+				"description": "roll 是否排除第三方标记的公开代理，默认 false；仅用户明确要求时启用，无法确认标记会停止筛选。",
 			},
+			"port": map[string]any{"type": "integer", "description": "check 的 TCP 服务端口，默认 443；应使用目标实际监听且放行的端口", "minimum": 1, "maximum": 65535},
 		},
 		"required": []string{"action"},
 	}
@@ -83,10 +87,11 @@ type ociIPArgs struct {
 	Prefix    []string `json:"prefix"`
 	MaxRisk   *int     `json:"max_risk"`
 	NoAbuser  *bool    `json:"no_abuser"`
+	Port      *int     `json:"port"`
 }
 
-// IPQualityReport 单个 IP 评估质量报告
-type IPQualityReport struct {
+// ipReputationReport 单个 IP 评估质量报告
+type ipReputationReport struct {
 	IP         string
 	Passed     bool
 	Reasons    []string
@@ -94,9 +99,9 @@ type IPQualityReport struct {
 	City       string
 	ASN        string
 	IsProxy    bool
+	ProxyKnown bool
+	Incomplete bool
 	FraudScore int
-	GFWStatus  string
-	GFWLatency int
 }
 
 type globalpingMeasurement struct {
@@ -285,98 +290,81 @@ func (t *OCIIPTool) waitPublicIPLifecycle(ctx context.Context, publicIPID, expec
 	}
 }
 
-// CheckIPQuality 检测 IP 归属地、Scamalytics 评分与国内连通性
-func (t *OCIIPTool) CheckIPQuality(ctx context.Context, ip string, maxRisk int, noAbuser bool) *IPQualityReport {
-	rep := &IPQualityReport{
-		IP:         ip,
-		Passed:     true,
-		FraudScore: -1,
-		GFWStatus:  "未检测",
-	}
+// checkIPReputation evaluates only requested reputation filters, never connectivity.
+// A missing required observation stops rolling; it is not a rejected IP.
+func (t *OCIIPTool) checkIPReputation(ctx context.Context, ip string, maxRisk int, noAbuser bool) *ipReputationReport {
+	rep := &ipReputationReport{IP: ip, Passed: true, FraudScore: -1}
 	parsedIP := net.ParseIP(strings.TrimSpace(ip))
-	if parsedIP == nil || !parsedIP.IsGlobalUnicast() || parsedIP.IsPrivate() || parsedIP.IsLoopback() || parsedIP.IsLinkLocalUnicast() || parsedIP.IsUnspecified() {
-		rep.Passed = false
+	if parsedIP == nil || !parsedIP.IsGlobalUnicast() || parsedIP.IsPrivate() {
+		rep.Passed, rep.Incomplete = false, true
 		rep.Reasons = append(rep.Reasons, "目标不是有效的公网单播 IP 地址")
 		return rep
 	}
-	ip = parsedIP.String()
-	rep.IP = ip
-	var locationVerified bool
-
-	// 1. ip-api.com 查询属地与代理画像
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://ip-api.com/json/%s?fields=status,country,countryCode,city,as,proxy", ip), nil)
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-		// These fixed third-party API requests must not follow redirects to
-		// arbitrary hosts or local metadata services.
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	if resp, err := client.Do(req); err == nil {
-		defer func() { _ = resp.Body.Close() }()
+	rep.IP = parsedIP.String()
+	if noAbuser {
+		body, err := t.fetchIPObservation(ctx, "http://ip-api.com/json/"+rep.IP+"?fields=status,country,countryCode,city,as,proxy")
 		var data struct {
-			Status      string `json:"status"`
-			Country     string `json:"country"`
-			CountryCode string `json:"countryCode"`
-			City        string `json:"city"`
-			AS          string `json:"as"`
-			Proxy       *bool  `json:"proxy"`
+			Status      string
+			Country     string
+			CountryCode string
+			City        string
+			AS          string
+			Proxy       *bool
 		}
-		body, readErr := readLimitedBody(resp.Body, maxIPQualityResponseBytes)
-		if resp.StatusCode == http.StatusOK && readErr == nil && json.Unmarshal(body, &data) == nil && data.Status == "success" && data.Proxy != nil {
-			locationVerified = true
-			rep.Country = fmt.Sprintf("%s (%s)", data.Country, data.CountryCode)
-			rep.City = data.City
-			rep.ASN = data.AS
-			rep.IsProxy = *data.Proxy
-			if noAbuser && rep.IsProxy {
+		if err == nil {
+			if json.Unmarshal(body, &data) != nil || data.Status != "success" || data.Proxy == nil {
+				err = fmt.Errorf("响应缺少有效代理标记")
+			}
+		}
+		if err != nil {
+			rep.Passed, rep.Incomplete = false, true
+			rep.Reasons = append(rep.Reasons, "ip-api 代理画像不可用："+err.Error())
+		} else {
+			rep.ProxyKnown = true
+			rep.Country, rep.City, rep.ASN, rep.IsProxy = data.Country+" ("+data.CountryCode+")", data.City, data.AS, *data.Proxy
+			if rep.IsProxy {
 				rep.Passed = false
-				rep.Reasons = append(rep.Reasons, "被标记为公开代理/高风险节点 (proxy=true)")
+				rep.Reasons = append(rep.Reasons, "ip-api 标记 proxy=true，不满足排除公开代理的要求")
 			}
 		}
 	}
-	if noAbuser && !locationVerified {
-		rep.Passed = false
-		rep.Reasons = append(rep.Reasons, "无法确认 IP 是否为公开代理或高风险节点")
-	}
-
-	// 2. Scamalytics 欺诈分
-	scamReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("https://scamalytics.com/ip/%s", ip), nil)
-	scamReq.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64)")
-	if scamResp, err := client.Do(scamReq); err == nil {
-		defer func() { _ = scamResp.Body.Close() }()
-		if scamResp.StatusCode == http.StatusOK {
-			rawHTML, readErr := io.ReadAll(io.LimitReader(scamResp.Body, 1024*1024))
-			if readErr == nil {
-				if sc, ok := parseScamalyticsScore(rawHTML); ok {
-					rep.FraudScore = sc
-					if maxRisk >= 0 && sc > maxRisk {
-						rep.Passed = false
-						rep.Reasons = append(rep.Reasons, fmt.Sprintf("Scamalytics 欺诈分 %d > 阈值 %d", sc, maxRisk))
-					}
+	if maxRisk < 100 {
+		body, err := t.fetchIPObservation(ctx, "https://scamalytics.com/ip/"+rep.IP)
+		if err == nil {
+			score, ok := parseScamalyticsScore(body)
+			if !ok {
+				err = fmt.Errorf("响应中没有有效评分")
+			} else {
+				rep.FraudScore = score
+				if score > maxRisk {
+					rep.Passed = false
+					rep.Reasons = append(rep.Reasons, fmt.Sprintf("Scamalytics 欺诈分 %d > 上限 %d", score, maxRisk))
 				}
 			}
 		}
+		if err != nil {
+			rep.Passed, rep.Incomplete = false, true
+			rep.Reasons = append(rep.Reasons, "Scamalytics 评分不可用："+err.Error())
+		}
 	}
-	if maxRisk >= 0 && rep.FraudScore < 0 {
-		rep.Passed = false
-		rep.Reasons = append(rep.Reasons, "无法获取 Scamalytics 欺诈评分")
-	}
-
-	// 国内连通性应由国内探针直接判断，不能依赖运行本工具的主机能否连接目标。
-	status, latency, probeErr := checkGlobalpingTCP(ctx, client, ip)
-	rep.GFWStatus, rep.GFWLatency = status, latency
-	if probeErr != nil {
-		rep.Passed = false
-		rep.Reasons = append(rep.Reasons, probeErr.Error())
-	}
-
-	if len(rep.Reasons) == 0 {
-		rep.Reasons = append(rep.Reasons, "全部检测项正常通过")
-	}
-
 	return rep
+}
+
+func (t *OCIIPTool) fetchIPObservation(ctx context.Context, endpoint string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; daidai/oci-ip)")
+	resp, err := t.qualityHTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return readLimitedBody(resp.Body, maxIPQualityResponseBytes)
 }
 
 func parseScamalyticsScore(body []byte) (int, bool) {
@@ -427,7 +415,7 @@ func isJSONSpace(char byte) bool {
 	return char == ' ' || char == '\t' || char == '\r' || char == '\n'
 }
 
-func checkGlobalpingTCP(ctx context.Context, client *http.Client, ip string) (string, int, error) {
+func checkGlobalpingTCP(ctx context.Context, client *http.Client, ip string, port int) (string, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
@@ -437,7 +425,7 @@ func checkGlobalpingTCP(ctx context.Context, client *http.Client, ip string) (st
 		"locations": []map[string]any{{"country": "CN", "limit": 3}},
 		"measurementOptions": map[string]any{
 			"protocol": "TCP",
-			"port":     443,
+			"port":     port,
 			"packets":  2,
 		},
 	}
@@ -507,8 +495,7 @@ func checkGlobalpingTCP(ctx context.Context, client *http.Client, ip string) (st
 		for _, result := range measurement.Results {
 			stats := result.Result.Stats
 			if result.Result.Status != "finished" || stats == nil || stats.RCV == nil {
-				return fmt.Sprintf("国内探针结果不完整 (%d/%d 节点完成)", completed, len(measurement.Results)), 0,
-					fmt.Errorf("globalping 有探针未完成或缺少有效统计，不能据此判断国内连通性 (status=%q, failureSource=%q)", result.Result.Status, result.Result.FailureSource)
+				continue
 			}
 			completed++
 			if *stats.RCV > 0 {
@@ -519,9 +506,9 @@ func checkGlobalpingTCP(ctx context.Context, client *http.Client, ip string) (st
 			}
 		}
 		if reachable == 0 {
-			return "国内 TCP 阻断 (可能被墙)", 0, fmt.Errorf("国内探针 TCP 443 全部未连通")
+			return fmt.Sprintf("未观察到 TCP %d 连通（%d/%d 节点完成）", port, completed, len(measurement.Results)), 0, fmt.Errorf("不能区分未监听、防火墙、路由或探针问题，不足以判断被墙")
 		}
-		return fmt.Sprintf("正常 (%d/%d 节点连通)", reachable, len(measurement.Results)), int(totalLatency / float64(reachable)), nil
+		return fmt.Sprintf("TCP %d：%d/%d 节点连通，%d 节点结果不完整", port, reachable, len(measurement.Results), len(measurement.Results)-completed), int(totalLatency / float64(reachable)), nil
 	}
 	if err := ctx.Err(); err != nil {
 		return "国内连通探测已中断", 0, fmt.Errorf("国内连通探测已中断: %w", err)
@@ -573,17 +560,24 @@ func (t *OCIIPTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 		result, err := t.handleCleanup(ctx, strings.TrimSpace(args.IP))
 		return redactOCIIPResult(ctx, result), err
 	case "check":
-		result, err := t.handleCheck(ctx, strings.TrimSpace(args.IP))
+		port := 443
+		if args.Port != nil {
+			port = *args.Port
+		}
+		if port < 1 || port > 65535 {
+			return nil, fmt.Errorf("port 必须在 1 到 65535 之间")
+		}
+		result, err := t.handleCheck(ctx, strings.TrimSpace(args.IP), port)
 		return redactOCIIPResult(ctx, result), err
 	case "bind":
 		result, err := t.handleBind(ctx, strings.TrimSpace(args.IP), args.DeleteOld)
 		return redactOCIIPResult(ctx, result), err
 	case "roll":
-		noAbuser := true
+		noAbuser := false
 		if args.NoAbuser != nil {
 			noAbuser = *args.NoAbuser
 		}
-		maxRisk := 50
+		maxRisk := 100
 		if args.MaxRisk != nil {
 			if *args.MaxRisk < 0 || *args.MaxRisk > 100 {
 				return nil, fmt.Errorf("max_risk 必须在 0 到 100 之间")
@@ -712,7 +706,7 @@ func (t *OCIIPTool) handleCleanup(ctx context.Context, targetIP string) (*core.T
 	return &core.ToolResult{Text: text}, nil
 }
 
-func (t *OCIIPTool) handleCheck(ctx context.Context, targetIP string) (*core.ToolResult, error) {
+func (t *OCIIPTool) handleCheck(ctx context.Context, targetIP string, port int) (*core.ToolResult, error) {
 	if targetIP == "" {
 		privID, err := t.ResolvePrivateIPID(ctx)
 		if err != nil {
@@ -729,29 +723,60 @@ func (t *OCIIPTool) handleCheck(ctx context.Context, targetIP string) (*core.Too
 	if targetIP == "" {
 		return nil, fmt.Errorf("未指定检测 IP 且未能获取当前公网 IP")
 	}
+	parsed := net.ParseIP(targetIP)
+	if parsed == nil || !parsed.IsGlobalUnicast() || parsed.IsPrivate() {
+		return nil, fmt.Errorf("目标不是有效的公网单播 IP 地址")
+	}
+	targetIP = parsed.String()
 
-	rep := t.CheckIPQuality(ctx, targetIP, 50, true)
-	statusText := "优质通过"
+	rep := t.checkIPReputation(ctx, targetIP, 50, true)
+	ips, listErr := t.listReservedPublicIPs(ctx)
+	connectivity := "未检测：无法确认目标绑定状态"
+	unbound := false
+	for _, item := range ips {
+		if item.IPAddress == targetIP && item.PrivateIPID == "" {
+			unbound = true
+		}
+	}
+	if listErr != nil {
+		rep.Reasons = append(rep.Reasons, "OCI 绑定状态查询失败："+listErr.Error())
+	}
+	if unbound {
+		connectivity = "未绑定：不做服务连通探测"
+	} else if listErr == nil {
+		status, _, probeErr := checkGlobalpingTCP(ctx, t.qualityHTTP, rep.IP, port)
+		connectivity = status
+		if probeErr != nil {
+			rep.Reasons = append(rep.Reasons, probeErr.Error())
+		}
+	}
+	statusText := "满足画像参考条件（风险分≤50、非公开代理）"
 	if !rep.Passed {
-		statusText = "未通过"
+		statusText = "不满足画像参考条件"
 	}
 
 	fraudStr := "未知"
 	if rep.FraudScore >= 0 {
 		fraudStr = fmt.Sprintf("%d/100", rep.FraudScore)
 	}
-	proxyStr := "否"
+	if rep.Incomplete {
+		statusText = "画像未知或不完整"
+	}
+	proxyStr := "未知"
+	if rep.ProxyKnown {
+		proxyStr = "否"
+	}
 	if rep.IsProxy {
 		proxyStr = "是 (风险代理)"
 	}
 
 	lines := []string{
-		fmt.Sprintf("### OCI IP 质量画像: `%s` [%s]", rep.IP, statusText),
-		fmt.Sprintf("- **原生属地**: `%s %s`", rep.Country, rep.City),
+		fmt.Sprintf("### OCI IP 画像与独立连通诊断: `%s` [%s]", rep.IP, statusText),
+		fmt.Sprintf("- **第三方标记属地**: `%s %s`", rep.Country, rep.City),
 		fmt.Sprintf("- **ASN 运营商**: `%s`", rep.ASN),
 		fmt.Sprintf("- **公开代理标记**: `%s`", proxyStr),
 		fmt.Sprintf("- **Scamalytics 欺诈分**: `%s`", fraudStr),
-		fmt.Sprintf("- **国内 TCP (443)**: `%s`", rep.GFWStatus),
+		fmt.Sprintf("- **国内 TCP (%d)**: `%s`", port, connectivity),
 	}
 	if len(rep.Reasons) > 0 {
 		lines = append(lines, fmt.Sprintf("- **评估结论**: %s", strings.Join(rep.Reasons, "；")))
@@ -762,6 +787,22 @@ func (t *OCIIPTool) handleCheck(ctx context.Context, targetIP string) (*core.Too
 
 func (t *OCIIPTool) handleRoll(ctx context.Context, prefixes []string, maxRisk int, noAbuser bool) (*core.ToolResult, error) {
 	maxAttempts := 15
+	var rejected []string
+	for _, prefix := range prefixes {
+		if strings.TrimSpace(prefix) != prefix || prefix == "" {
+			return nil, fmt.Errorf("IP 前缀不能为空或包含首尾空白")
+		}
+		parts := strings.Split(strings.TrimSuffix(prefix, "."), ".")
+		if len(parts) > 4 {
+			return nil, fmt.Errorf("IP 前缀最多包含四段 IPv4 数字")
+		}
+		for _, part := range parts {
+			n, err := strconv.Atoi(part)
+			if err != nil || n < 0 || n > 255 || strconv.Itoa(n) != part {
+				return nil, fmt.Errorf("IP 前缀必须由 0 到 255 的 IPv4 数字段组成")
+			}
+		}
+	}
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -810,13 +851,29 @@ func (t *OCIIPTool) handleRoll(ctx context.Context, prefixes []string, maxRisk i
 			}
 			return nil, fmt.Errorf("OCI 创建预留 IP 成功但响应缺少资源 ID；回查未发现同名资源，无法确认其状态，请检查 OCI 控制台")
 		}
-		candidateIP := created.IPAddress
-		if candidateIP == "" {
-			if err := t.releaseRollCandidate(created.ID); err != nil {
-				return nil, fmt.Errorf("新建候选 IP 响应缺少地址，且资源 %s 清理失败: %w", created.ID, err)
+		if created.IPAddress == "" || !isPublicIPAvailable(&created) {
+			_, stateErr := t.waitPublicIPLifecycle(ctx, created.ID, "AVAILABLE", "")
+			if stateErr == nil {
+				var item *ociPublicIPItem
+				item, stateErr = t.getPublicIPByID(ctx, created.ID)
+				if item == nil && stateErr == nil {
+					stateErr = fmt.Errorf("资源已消失")
+				}
+				if item != nil {
+					created = *item
+				}
+				if stateErr == nil && (!isPublicIPAvailable(&created) || created.IPAddress == "") {
+					stateErr = fmt.Errorf("地址或可用状态未确认")
+				}
 			}
-			continue
+			if stateErr != nil || created.IPAddress == "" {
+				if cleanupErr := t.releaseRollCandidate(created.ID); cleanupErr != nil {
+					return nil, fmt.Errorf("候选分配状态无法确认（%v），资源 %s 清理失败: %w", stateErr, created.ID, cleanupErr)
+				}
+				return nil, fmt.Errorf("OCI 已接受创建，但地址分配未就绪；本轮候选已释放（%v）", stateErr)
+			}
 		}
+		candidateIP := created.IPAddress
 
 		// 检查前缀
 		matchedPrefix := len(prefixes) == 0
@@ -827,14 +884,17 @@ func (t *OCIIPTool) handleRoll(ctx context.Context, prefixes []string, maxRisk i
 			}
 		}
 
+		reason := "前缀不匹配"
+		incomplete := false
 		if matchedPrefix {
-			rep := t.CheckIPQuality(ctx, candidateIP, maxRisk, noAbuser)
+			rep := t.checkIPReputation(ctx, candidateIP, maxRisk, noAbuser)
 			if err := ctx.Err(); err != nil {
 				if cleanupErr := t.releaseRollCandidate(created.ID); cleanupErr != nil {
 					return nil, fmt.Errorf("刷取已中断，候选 IP %s 清理失败: %w", candidateIP, cleanupErr)
 				}
 				return nil, err
 			}
+			reason, incomplete = strings.Join(rep.Reasons, "；"), rep.Incomplete
 			if rep.Passed {
 				if err := ctx.Err(); err != nil {
 					if cleanupErr := t.releaseRollCandidate(created.ID); cleanupErr != nil {
@@ -842,10 +902,20 @@ func (t *OCIIPTool) handleRoll(ctx context.Context, prefixes []string, maxRisk i
 					}
 					return nil, err
 				}
-				return &core.ToolResult{
-					Text: fmt.Sprintf("### OCI 抽中优质候选预留 IP\n- **候选 IP**: `%s` (尝试 `%d` 次)\n- **属地**: `%s`\n- **欺诈分**: `%d/100`\n- **国内连通**: `%s`\n\n你可以说“把公网 IP 换成 %s”来换绑到主机。",
-						candidateIP, attempt, rep.Country, rep.FraudScore, rep.GFWStatus, candidateIP),
-				}, nil
+				fraud := "未筛选"
+				if rep.FraudScore >= 0 {
+					fraud = fmt.Sprintf("%d/100", rep.FraudScore)
+				}
+				proxy := "未筛选"
+				if rep.ProxyKnown {
+					proxy = "否"
+				}
+				history := "无"
+				if len(rejected) > 0 {
+					history = strings.Join(rejected, "；")
+				}
+				return &core.ToolResult{Text: fmt.Sprintf("### OCI 已申请并保留候选预留 IP\n- 候选：%s\n- OCI 创建成功：%d 次；已释放此前候选：%d 个\n- Scamalytics 评分：%s；公开代理标记：%s\n- 状态：未绑定；未做连通探测；当前绑定未改动。\n- 淘汰记录：%s\n画像仅供参考，不保证特定业务可用。需要换绑时请明确指定此 IP。",
+					candidateIP, attempt, len(rejected), fraud, proxy, history)}, nil
 			}
 		}
 
@@ -853,13 +923,20 @@ func (t *OCIIPTool) handleRoll(ctx context.Context, prefixes []string, maxRisk i
 		if err := t.releaseRollCandidate(created.ID); err != nil {
 			return nil, fmt.Errorf("候选 IP %s 未通过筛选且释放失败，可能继续产生费用: %w", candidateIP, err)
 		}
-		if err := waitContext(ctx, 2*time.Second); err != nil {
-			return nil, err
+		rejected = append(rejected, fmt.Sprintf("第 %d 个：%s", attempt, reason))
+		slog.Info("OCI 候选已释放", "attempt", attempt, "reason", reason, "observation_incomplete", incomplete)
+		if incomplete {
+			return &core.ToolResult{Text: fmt.Sprintf("OCI 创建成功 %d 次，本轮候选已全部释放，当前绑定未改动。因筛选数据不可用已停止，不继续消耗候选。记录：%s。不能据此推断地址池枯竭或候选风险高。", attempt, strings.Join(rejected, "；"))}, nil
+		}
+		if attempt < maxAttempts {
+			if err := waitContext(ctx, 2*time.Second); err != nil {
+				return nil, err
+			}
 		}
 	}
 
 	return &core.ToolResult{
-		Text: fmt.Sprintf("已尝试刷取 %d 次，暂未摇中完全满足前缀与欺诈分要求的预留 IP，未保留任何闲置资源。", maxAttempts),
+		Text: fmt.Sprintf("OCI 创建成功 %d 次，本轮候选已全部释放，未找到满足指定筛选条件的候选；当前绑定未改动。记录：%s。不代表地址池枯竭，也不保证再次申请会获得不同地址。", maxAttempts, strings.Join(rejected, "；")),
 	}, nil
 }
 
