@@ -171,10 +171,7 @@ func qqQuoteCacheKey(msgID, chatType, convID string) string {
 }
 
 func maxQQPassiveReplies(isGroup bool) int {
-	if isGroup {
-		return 5
-	}
-	return 4
+	return 5
 }
 
 func newMsgCache(max int, dbMgr *db.Manager) *msgCache {
