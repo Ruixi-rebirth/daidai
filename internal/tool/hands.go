@@ -12,6 +12,7 @@ import (
 	"daidai/internal/config"
 	"daidai/internal/core"
 	"daidai/internal/db"
+	"daidai/internal/engine/vision"
 	"daidai/internal/entity"
 	"daidai/internal/groupchat"
 	"daidai/internal/media"
@@ -40,6 +41,7 @@ type HandsConfig struct {
 	Briefing         *briefing.Service
 	BriefingOwners   map[string]string
 	GroupExpressions *groupchat.Store
+	Vision           *vision.Engine
 }
 
 // NewHandsWithConfig 按配置挂载原子双手
@@ -64,6 +66,9 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 	h.Register(NewWebSearchToolWithCommand(cfg.Router, cfg.AGYCommand))
 	h.Register(NewReadLinkToolWithCommand(cfg.Router, cfg.AGYCommand))
 	h.Register(NewScreenshotTool())
+	if cfg.Vision != nil {
+		h.Register(NewImageAnalysisTool(cfg.Vision))
+	}
 	h.Register(NewSingboxLinksTool(cfg.Immune))
 	if cfg.Workspaces != nil {
 		h.Register(NewWorkspaceTool(cfg.Workspaces, cfg.Immune, cfg.Delegates))

@@ -208,9 +208,6 @@ func run() int {
 	mediaSources := &media.Sources{}
 	visEngine := vision.NewEngine(vision.Config{
 		Sources:        mediaSources,
-		BaseURL:        cfg.LLM.Vision.BaseURL,
-		APIKey:         cfg.LLM.Vision.APIKey,
-		Model:          cfg.LLM.Vision.Model,
 		CLICommand:     agyCommand,
 		RequireAGYAuth: true,
 	})
@@ -355,6 +352,7 @@ func run() int {
 		Briefing:         briefingService,
 		BriefingOwners:   briefingOwners,
 		GroupExpressions: groupExpressions,
+		Vision:           visEngine,
 	})
 
 	// 具体认知大脑 (实现 entity.Cognition)

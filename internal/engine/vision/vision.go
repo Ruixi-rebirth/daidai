@@ -70,9 +70,6 @@ type Engine struct {
 
 // NewEngine 构建视觉中枢实例
 func NewEngine(cfg Config) *Engine {
-	if cfg.Timeout <= 0 {
-		cfg.Timeout = 30 * time.Second
-	}
 	return &Engine{
 		cfg:          cfg,
 		requestSlots: make(chan struct{}, maxConcurrentVisionRequests),
@@ -236,12 +233,9 @@ func (e *Engine) describeWithCLI(ctx context.Context, imageURLs []string, userTe
 		}
 	}
 
-	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
 	args := []string{"-p", prompt, "--output-format", "text", "--mode", "plan", "--sandbox", "--dangerously-skip-permissions"}
 
-	cmd := exec.CommandContext(callCtx, cliCmd, args...)
+	cmd := exec.CommandContext(ctx, cliCmd, args...)
 	cmd.Dir = tmpWorkDir
 	cmd.Env = os.Environ()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

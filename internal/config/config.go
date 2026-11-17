@@ -31,14 +31,9 @@ type Config struct {
 	} `yaml:"qq"`
 
 	LLM struct {
-		BaseURL string `yaml:"base_url"`
-		APIKey  string `yaml:"api_key"`
-		Model   string `yaml:"model"`
-		Vision  struct {
-			BaseURL string `yaml:"base_url"`
-			APIKey  string `yaml:"api_key"`
-			Model   string `yaml:"model"`
-		} `yaml:"vision"`
+		BaseURL   string `yaml:"base_url"`
+		APIKey    string `yaml:"api_key"`
+		Model     string `yaml:"model"`
 		Embedding struct {
 			BaseURL string `yaml:"base_url"`
 			APIKey  string `yaml:"api_key"`
