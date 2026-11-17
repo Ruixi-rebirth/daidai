@@ -73,3 +73,29 @@ func TestRenderCard_Compile(t *testing.T) {
 		t.Fatalf("expected PNG header magic, got: %v", pngBytes[:8])
 	}
 }
+
+func TestShouldRenderCard(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    string
+		expected bool
+	}{
+		{"empty string", "", false},
+		{"short casual chat", "好的，收到啦！马上帮你办。", false},
+		{"moderate chat below threshold", strings.Repeat("字", 120), false},
+		{"plain text over 180 runes", strings.Repeat("字", 185), true},
+		{"4 lines over 130 runes", strings.Repeat("这是一整行比较长且充实的分析与讨论文字内容，包含了较多要点。\n", 5), true},
+		{"short 3 lines under 130 runes", "第一行\n第二行\n第三行", false},
+		{"structured list over 5 lines", "- 方案 A：快速接入\n- 方案 B：稳定隔离\n- 方案 C：混合架构\n补充说明文字\n最后一条备注", true},
+		{"heading with 100+ runes", "# 模块状态概述\n" + strings.Repeat("系统运行平稳，各项指标正常。", 8), true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			actual := ShouldRenderCard(tc.input)
+			if actual != tc.expected {
+				t.Errorf("ShouldRenderCard(%q) = %v; want %v", tc.name, actual, tc.expected)
+			}
+		})
+	}
+}
