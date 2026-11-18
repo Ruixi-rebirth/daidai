@@ -44,7 +44,7 @@ func slashCommandRegistry(a *SuperAgent) []slashCommand {
 	}
 	return []slashCommand{
 		{section: "对话与会话", usage: "/help", help: "显示指令帮助卡", match: exact("/help"), handle: a.handleHelpCommand},
-		{section: "对话与会话", usage: "/continue [任务编号]", help: "续发未发送内容或按编号继续已保存的长任务草稿", match: prefix("/continue", "继续"), handle: a.handleContinueCommand},
+		{section: "对话与会话", usage: "/continue [任务编号]", help: "续发未发送内容或按编号继续已保存的长任务草稿", match: prefix("/continue"), handle: a.handleContinueCommand},
 		{section: "对话与会话", usage: "/stop [工单编号]", help: "中断当前思考、全部后台工单或指定工单", access: "仅核心搭档/协作者", match: prefix("/stop"), handle: a.handleStopCommand},
 		{section: "对话与会话", usage: "/reset · /new · /clear", help: "重开当前会话并清除近期历史", access: "仅核心搭档/协作者", match: exact("/reset", "/new", "/clear", "/ws clear", "/ws reset"), handle: a.handleResetCommand},
 		{section: "状态与模型", usage: "/status · /sysinfo", help: "查看运行状态、系统指标与活跃工单", match: exact("/status", "/sysinfo"), handle: a.handleStatusCommand},
@@ -129,9 +129,6 @@ func (a *SuperAgent) handleContinueCommand(ctx context.Context, event *SensoryEv
 		return
 	}
 	argument := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(event.Content), "/continue"))
-	if strings.HasPrefix(strings.TrimSpace(event.Content), "继续") {
-		argument = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(event.Content), "继续"))
-	}
 	if resumer, ok := a.Cognition.(interface {
 		ContinueDraft(context.Context, *SensoryEvent, string) (*Utterance, string, error)
 	}); ok {

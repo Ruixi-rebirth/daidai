@@ -674,7 +674,7 @@ func (a *SuperAgent) transmitTextFallbackWithContinuationContext(ctx, continuati
 	}
 
 	remaining := strings.Join(chunks[5:], "\n\n")
-	marker := "\n[已达到平台单次发送上限，后续内容未发送；发送“继续”可接着看。]"
+	marker := "\n[已达到平台单次发送上限，后续内容未发送；发送“/continue”可接着看。]"
 	page := append([]string(nil), chunks[:5]...)
 	page[len(page)-1] += marker
 	fallback.Text = strings.Join(page, "\n\n")
@@ -1390,7 +1390,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			}
 			event.ProcessedAttachments = nil
 			slog.Error("superagent: 思考过程发生异常", "err", err)
-			errorReply := "这次处理没有完成。模型服务或任务运行发生错误；请看错误说明，必要时回复“继续”查看已保存的任务草稿。"
+			errorReply := "这次处理没有完成。模型服务或任务运行发生错误；请看错误说明，必要时回复“/continue”查看已保存的任务草稿。"
 			sendCtx, cancel := context.WithTimeout(thinkCtx, 15*time.Second)
 			defer cancel()
 			if sendErr := a.transmitReplyText(sendCtx, event, errorReply); sendErr != nil {

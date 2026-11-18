@@ -91,7 +91,7 @@ func (c *Cortex) ContinueDraft(ctx context.Context, event *entity.SensoryEvent, 
 		for i, draft := range drafts {
 			fmt.Fprintf(&choices, "\n- %d. %s（任务 %s）", i+1, draft.Goal, draft.ID)
 		}
-		return nil, "你有多个未完成的任务，请回复“继续 <任务编号>”选择：" + choices.String(), nil
+		return nil, "你有多个未完成的任务，请回复“/continue <任务编号>”选择：" + choices.String(), nil
 	}
 	var saved savedDraftContext
 	if err := json.Unmarshal([]byte(selected.ContextJSON), &saved); err != nil {
@@ -119,7 +119,7 @@ func (c *Cortex) ContinueDraft(ctx context.Context, event *entity.SensoryEvent, 
 		if err := c.drafts.SaveConversationDraft(ctx, *selected); err != nil {
 			return nil, "", err
 		}
-		text += "\n\n[本段已保存，仍未完成。回复“继续 " + selected.ID + "”接着写。]"
+		text += "\n\n[本段已保存，仍未完成。回复“/continue " + selected.ID + "”接着写。]"
 	} else {
 		completedDraft := *selected
 		store := c.drafts
@@ -1253,7 +1253,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (out *en
 			if partial == "" {
 				partial = "模型在工具调用阶段达到输出上限；已保存任务上下文，可继续生成。"
 			}
-			return &entity.Utterance{Platform: event.Platform, IsGroup: event.IsGroup, ChannelID: event.ChannelID, QuoteMsgID: event.RawMessageID, Text: partial + "\n\n[内容未完成，已保存进度。回复“继续”接着写。]"}, nil
+			return &entity.Utterance{Platform: event.Platform, IsGroup: event.IsGroup, ChannelID: event.ChannelID, QuoteMsgID: event.RawMessageID, Text: partial + "\n\n[内容未完成，已保存进度。回复“/continue”接着写。]"}, nil
 		}
 
 		if len(resp.ToolCalls) > maxToolCallsPerThink {
@@ -1509,7 +1509,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (out *en
 			slog.Error("cortex: 最终回复截断且草稿保存失败", "err", saveErr)
 			finalText += "\n\n[内容未完成，草稿保存失败。]"
 		} else {
-			finalText += "\n\n[内容未完成，已保存进度。回复“继续”接着写。]"
+			finalText += "\n\n[内容未完成，已保存进度。回复“/continue”接着写。]"
 		}
 	}
 	if imageOnlyReply {
