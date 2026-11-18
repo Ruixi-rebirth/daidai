@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"fmt"
 	"image/png"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,8 +41,8 @@ func RenderCard(ctx context.Context, md string) ([]byte, error) {
 	doc := fmt.Sprintf(`#set page(
   width: 680pt,
   height: auto,
-  margin: (x: 14pt, top: 12pt, bottom: 14pt),
-  fill: rgb("#f6f8fa")
+  margin: 0pt,
+  fill: none
 )
 
 #set text(
@@ -82,9 +83,9 @@ func RenderCard(ctx context.Context, md string) ([]byte, error) {
 #block(
   width: 100%%,
   fill: rgb("#ffffff"),
-  inset: (x: 14pt, top: 12pt, bottom: 14pt),
-  radius: 12pt,
-  stroke: 0.8pt + rgb("#e1e4e8")
+  inset: (x: 22pt, top: 20pt, bottom: 22pt),
+  radius: 14pt,
+  stroke: 0.6pt + rgb("#e1e4e8")
 )[
 %s
 ]
@@ -106,8 +107,8 @@ func RenderMemoryProfileCard(ctx context.Context, md string) ([]byte, error) {
 	doc := fmt.Sprintf(`#set page(
   width: 680pt,
   height: auto,
-  margin: (x: 26pt, top: 22pt, bottom: 26pt),
-  fill: rgb("#f4e9e5")
+  margin: 0pt,
+  fill: none
 )
 
 #set text(
@@ -148,8 +149,8 @@ func RenderMemoryProfileCard(ctx context.Context, md string) ([]byte, error) {
 #block(
   width: 100%%,
   fill: rgb("#fffdf9"),
-  inset: (x: 26pt, top: 25pt, bottom: 27pt),
-  radius: 16pt,
+  inset: (x: 24pt, top: 22pt, bottom: 24pt),
+  radius: 14pt,
   stroke: 0.8pt + rgb("#e9d7d5")
 )[
 %s
@@ -191,10 +192,10 @@ func ShouldRenderCard(md string) bool {
 }
 
 func renderTypst(ctx context.Context, doc string) ([]byte, error) {
-	return renderTypstAssets(ctx, doc, nil)
+	return renderTypstAssets(ctx, doc, nil, true)
 }
 
-func renderTypstAssets(ctx context.Context, doc string, assets map[string][]byte) ([]byte, error) {
+func renderTypstAssets(ctx context.Context, doc string, assets map[string][]byte, withShadow bool) ([]byte, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("rendering requires a context")
 	}
@@ -256,6 +257,16 @@ func renderTypstAssets(ctx context.Context, doc string, assets map[string][]byte
 	if len(pngBytes) < 8 || !bytes.HasPrefix(pngBytes, []byte("\x89PNG\r\n\x1a\n")) {
 		return nil, fmt.Errorf("rendered output is not a valid PNG")
 	}
+
+	// 后处理：添加 3D 浮起投影阴影
+	if withShadow {
+		if shadowed, err := applyShadowEffect(ctx, tmpDir, pngPath); err == nil {
+			pngBytes = shadowed
+		} else {
+			slog.Warn("render: apply shadow effect failed, falling back to flat card", "err", err)
+		}
+	}
+
 	config, err := png.DecodeConfig(bytes.NewReader(pngBytes))
 	if err != nil {
 		return nil, fmt.Errorf("read rendered PNG dimensions: %w", err)
@@ -265,4 +276,60 @@ func renderTypstAssets(ctx context.Context, doc string, assets map[string][]byte
 	}
 
 	return pngBytes, nil
+}
+
+// applyShadowEffect 使用 ImageMagick 为透明背景圆角卡片添加 3D 浮起投影阴影。
+// 失败时返回错误并回退，保证基础卡片能够正常发送。
+func applyShadowEffect(ctx context.Context, tmpDir, srcPath string) ([]byte, error) {
+	bin := "magick"
+	if _, err := exec.LookPath("magick"); err != nil {
+		if _, err := exec.LookPath("convert"); err == nil {
+			bin = "convert"
+		} else {
+			return nil, fmt.Errorf("neither magick nor convert found in PATH")
+		}
+	}
+
+	outPath := filepath.Join(tmpDir, "card_shadow.png")
+
+	// -bordercolor none -border 30: 预留透明边缘供阴影扩散
+	// -shadow 65x18+14+16: 不透明度 65%, 模糊 18, 向右下偏移 (+14, +16)
+	// +swap -background transparent -layers merge +repage: 阴影置于底层合成，输出 3D 浮起卡片
+	cmd := exec.CommandContext(ctx, bin,
+		srcPath,
+		"-bordercolor", "none", "-border", "30",
+		"(", "+clone", "-background", "black", "-shadow", "65x18+14+16", ")",
+		"+swap", "-background", "transparent", "-layers", "merge", "+repage",
+		outPath,
+	)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil && cmd.Process.Pid > 0 {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+	cmd.WaitDelay = 10 * time.Second
+	errBuf := core.NewLimitedBuffer(16 << 10)
+	cmd.Stderr = errBuf
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("imagemagick shadow failed: %s (%w)", strings.TrimSpace(errBuf.String()), err)
+	}
+
+	outFile, err := os.Open(outPath)
+	if err != nil {
+		return nil, fmt.Errorf("open shadow png: %w", err)
+	}
+	out, readErr := core.ReadBounded(outFile, maxRenderPNGBytes)
+	closeErr := outFile.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if len(out) < 8 || !bytes.HasPrefix(out, []byte("\x89PNG\r\n\x1a\n")) {
+		return nil, fmt.Errorf("shadow output is not a valid PNG")
+	}
+	return out, nil
 }

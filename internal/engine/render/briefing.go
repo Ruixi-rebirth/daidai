@@ -40,5 +40,5 @@ func RenderBriefing(ctx context.Context, doc BriefingDocument) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return renderTypstAssets(ctx, briefingTemplate, map[string][]byte{"content.json": b})
+	return renderTypstAssets(ctx, briefingTemplate, map[string][]byte{"content.json": b}, false)
 }
