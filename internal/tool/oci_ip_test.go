@@ -337,7 +337,7 @@ func TestIPTCPDiagnosticPartialAndFailed(t *testing.T) {
 			if reachable && (err != nil || !strings.Contains(status, "1/2")) {
 				t.Fatalf("%s %v", status, err)
 			}
-			if !reachable && (err == nil || strings.Contains(status, "被墙")) {
+			if !reachable && (err == nil || !strings.Contains(status, "不能据此判断被墙")) {
 				t.Fatalf("%s %v", status, err)
 			}
 		})

@@ -1751,8 +1751,14 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 			}
 			q.msgCache.SetInboundTypedAsync(msgID, content, chatType, convID, contentKind, len([]rune(content)) <= core.MaxUserMessageRunes)
 		}
-		if q.inbox != nil && (!isGroup || botAddressed) && (len(files) > 0 || len(images) > 0) {
-			q.inbox.RememberPending(attachmentScope, append(append([]*core.Attachment(nil), files...), images...))
+		if q.inbox != nil {
+			if !isGroup || botAddressed {
+				if len(files) > 0 || len(images) > 0 {
+					q.inbox.RememberPending(attachmentScope, append(append([]*core.Attachment(nil), files...), images...))
+				}
+			} else if len(files) > 0 {
+				q.inbox.RememberPending(attachmentScope, files)
+			}
 		}
 		if isGroup && botAddressed {
 			trimmed := strings.TrimSpace(content)

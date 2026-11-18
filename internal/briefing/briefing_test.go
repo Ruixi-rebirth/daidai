@@ -492,6 +492,7 @@ func TestCollectorFailureAndResponseLimits(t *testing.T) {
 	c.HN = server.URL
 	c.GitHub = server.URL
 	c.V2EX = server.URL
+	c.Papers = server.URL
 	if _, _, _, err := c.Collect(context.Background()); err == nil {
 		t.Fatal("total source outage published empty edition")
 	}
@@ -531,5 +532,39 @@ func TestPassiveViewFailureUsesDurableLedger(t *testing.T) {
 	d, err := store.Delivery(ctx, e.ID, sub.Platform, sub.Recipient, sub.IsGroup)
 	if err != nil || d == nil || d.Status != "partial" || d.Delivered != "图卡正文" || d.Remaining != "原文索引" {
 		t.Fatalf("passive failure not durable: %+v %v", d, err)
+	}
+}
+
+func TestValidPaperID(t *testing.T) {
+	cases := []struct {
+		id   string
+		want bool
+	}{
+		// Modern arXiv IDs
+		{"2301.07041", true},
+		{"2411.12345v2", true},
+		{"0704.0001", true},
+		{"2312.12345", true},
+
+		// Legacy arXiv IDs
+		{"math/0309136", true},
+		{"cs.CV/0612001", true},
+		{"hep-th/9901001v1", true},
+
+		// Invalid IDs / Traversal attacks / Malformed
+		{"", false},
+		{"../2301.07041", false},
+		{"2301.07041/../../etc/passwd", false},
+		{"/abs/2301.07041", false},
+		{"2301.07041/", false},
+		{"not-a-paper", false},
+		{"12345", false},
+		{"a/b/c/d", false},
+	}
+
+	for _, tc := range cases {
+		if got := validPaperID(tc.id); got != tc.want {
+			t.Errorf("validPaperID(%q) = %v, want %v", tc.id, got, tc.want)
+		}
 	}
 }

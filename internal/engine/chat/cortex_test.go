@@ -1,13 +1,16 @@
 package chat
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"daidai/internal/core"
 	"daidai/internal/entity"
+	"daidai/internal/media"
 	"daidai/internal/provider/llm"
 	"daidai/internal/tool"
 )
@@ -365,4 +368,90 @@ func TestCortex_TextOnlyIntentSetsFixedPresentation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCortex_RenderFileContext(t *testing.T) {
+	inbox, err := media.NewInbox(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources := &media.Sources{}
+	sources.Register("test-proto", func(_ context.Context, u string, limit int64) ([]byte, error) {
+		if strings.Contains(u, "largetextfile") {
+			buf := bytes.Repeat([]byte("log line 1234567890\n"), 20000)
+			if int64(len(buf)) > limit {
+				buf = buf[:limit]
+			}
+			return buf, nil
+		}
+		if strings.Contains(u, "textfile") {
+			return []byte("Hello, this is a plain text file without standard extension!"), nil
+		}
+		if strings.Contains(u, "binaryfile") {
+			return []byte{0x7f, 'E', 'L', 'F', 0x00, 0x01, 0x02}, nil
+		}
+		return nil, fmt.Errorf("file not found")
+	})
+	inbox.Sources = sources
+
+	c := NewCortex(CortexConfig{
+		Inbox: inbox,
+	})
+
+	t.Run("inlines text file and records processed attachment", func(t *testing.T) {
+		event := &entity.SensoryEvent{Platform: "qq"}
+		textAttachment := &core.Attachment{
+			Kind:     core.AttachmentFile,
+			URL:      "test-proto:textfile",
+			Name:     "Dockerfile",
+			MimeType: "application/octet-stream",
+		}
+		result := c.renderFileContext(context.Background(), event, []*core.Attachment{textAttachment}, false, 0)
+		if !strings.Contains(result, "【文件附件内容】") {
+			t.Fatalf("expected inlined file header, got: %s", result)
+		}
+		if !strings.Contains(result, "Hello, this is a plain text file without standard extension!") {
+			t.Fatalf("expected text content inlined, got: %s", result)
+		}
+		if len(event.ProcessedAttachments) != 1 || event.ProcessedAttachments[0] != textAttachment {
+			t.Fatalf("expected attachment in ProcessedAttachments, got: %v", event.ProcessedAttachments)
+		}
+	})
+
+	t.Run("marks binary file without inlining data", func(t *testing.T) {
+		event := &entity.SensoryEvent{Platform: "qq"}
+		binAttachment := &core.Attachment{
+			Kind:     core.AttachmentFile,
+			URL:      "test-proto:binaryfile",
+			Name:     "app.bin",
+			MimeType: "application/octet-stream",
+		}
+		result := c.renderFileContext(context.Background(), event, []*core.Attachment{binAttachment}, false, 0)
+		if strings.Contains(result, "【文件附件内容】") {
+			t.Fatalf("binary file should not be rendered as text, got: %s", result)
+		}
+		if !strings.Contains(result, "二进制数据，无法直接作为纯文本阅读") {
+			t.Fatalf("expected binary notice, got: %s", result)
+		}
+		if len(event.ProcessedAttachments) != 0 {
+			t.Fatalf("binary file should not be in ProcessedAttachments, got: %v", event.ProcessedAttachments)
+		}
+	})
+
+	t.Run("large text file is truncated without allocating huge buffer", func(t *testing.T) {
+		event := &entity.SensoryEvent{Platform: "qq"}
+		largeAttachment := &core.Attachment{
+			Kind:     core.AttachmentFile,
+			URL:      "test-proto:largetextfile",
+			Name:     "access.log",
+			MimeType: "text/plain",
+		}
+		result := c.renderFileContext(context.Background(), event, []*core.Attachment{largeAttachment}, false, 0)
+		if !strings.Contains(result, "文件较大") || !strings.Contains(result, "已流式截取") {
+			t.Fatalf("expected large file truncation notice, got: %s", result)
+		}
+		if len(event.ProcessedAttachments) != 1 || event.ProcessedAttachments[0] != largeAttachment {
+			t.Fatalf("expected large attachment in ProcessedAttachments, got: %v", event.ProcessedAttachments)
+		}
+	})
 }

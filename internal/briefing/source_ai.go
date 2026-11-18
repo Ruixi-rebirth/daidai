@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -84,15 +85,10 @@ func (c *Collector) aiPapers(ctx context.Context) ([]Item, error) {
 	return rank(out, candidateLimits["ai"]), sourceErr
 }
 
+// arxivIDPattern matches canonical modern (e.g. "2301.07041", "2411.12345v2")
+// and legacy arXiv paper identifiers (e.g. "cs.CV/0612001", "math/0309136").
+var arxivIDPattern = regexp.MustCompile(`^(?:[0-9]{4}\.[0-9]{4,5}|[a-zA-Z\-]+(?:\.[a-zA-Z]{2})?/[0-9]{7})(?:v[0-9]+)?$`)
+
 func validPaperID(id string) bool {
-	if id == "" || len(id) > 40 || strings.Contains(id, "..") || strings.HasPrefix(id, "/") || strings.HasSuffix(id, "/") {
-		return false
-	}
-	for _, r := range id {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '/' || r == '-' {
-			continue
-		}
-		return false
-	}
-	return true
+	return arxivIDPattern.MatchString(id)
 }

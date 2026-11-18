@@ -303,11 +303,15 @@ func (c *Channel) handle(ctx context.Context, m *message, handler func(*entity.S
 			}
 		}
 	}
-	if c.Inbox != nil && addressed {
+	if c.Inbox != nil {
 		scope := media.AttachmentScope(event.Platform, group, chat, event.SenderID)
-		event.PendingImages, event.OmittedPendingImages = c.Inbox.PendingKind(scope, core.AttachmentImage)
-		event.PendingFiles, event.OmittedPendingFiles = c.Inbox.PendingKind(scope, core.AttachmentFile)
-		c.Inbox.RememberPending(scope, currentAttachments)
+		if addressed {
+			event.PendingImages, event.OmittedPendingImages = c.Inbox.PendingKind(scope, core.AttachmentImage)
+			event.PendingFiles, event.OmittedPendingFiles = c.Inbox.PendingKind(scope, core.AttachmentFile)
+			c.Inbox.RememberPending(scope, currentAttachments)
+		} else if len(event.Files) > 0 {
+			c.Inbox.RememberPending(scope, event.Files)
+		}
 	}
 	if body == "" && len(event.Images) == 0 && len(event.Files) == 0 {
 		return nil

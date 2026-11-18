@@ -1,6 +1,7 @@
 package media
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"daidai/internal/core"
 )
@@ -465,7 +467,11 @@ func (i *Inbox) Store(ctx context.Context, scope string, attachments []*core.Att
 		}
 		data, handled, err := i.Sources.Fetch(ctx, attachment.URL, core.MaxIncomingFileBytes)
 		if !handled {
-			data, err = fetchQQAttachment(ctx, attachment.URL)
+			var truncated bool
+			data, _, truncated, err = fetchAttachmentStream(ctx, attachment.URL, core.MaxIncomingFileBytes)
+			if err == nil && truncated {
+				err = fmt.Errorf("attachment exceeds %d byte limit", core.MaxIncomingFileBytes)
+			}
 		}
 		if err != nil {
 			return nil, "", fmt.Errorf("download attachment %q: %w", safeAttachmentName(attachment.Name), err)
@@ -754,6 +760,68 @@ func (i *Inbox) Deactivate(dir string) {
 	i.mu.Unlock()
 }
 
+// AttachmentContent 包含流式读取的附件内容与元数据
+type AttachmentContent struct {
+	Data      []byte // 读取到的前部内容（最大不超过 maxBytes）
+	TotalSize int64  // 远程声明的总大小（若未知则为 len(Data)）
+	Truncated bool   // 是否因超过读取预算而发生截断
+}
+
+// IsTextContent 判断数据是否为人类可读纯文本 (无 \x00 空字符，且有效 UTF-8)
+// 遵循标准 Unix 与 Git 内容嗅探哲学，绝不依赖任何文件扩展名白名单。
+// 针对流式截断场景，会自动容忍并剥离尾部因字节截断产生的不完整 UTF-8 字符。
+func IsTextContent(data []byte) bool {
+	if len(data) == 0 || bytes.IndexByte(data, 0) != -1 {
+		return false
+	}
+	clean := trimIncompleteUTF8(data)
+	return len(clean) > 0 && utf8.Valid(clean)
+}
+
+func trimIncompleteUTF8(data []byte) []byte {
+	for len(data) > 0 {
+		r, size := utf8.DecodeLastRune(data)
+		if r != utf8.RuneError || size > 1 {
+			break
+		}
+		data = data[:len(data)-1]
+	}
+	return data
+}
+
+// FetchContent 以内存安全的方式流式获取附件数据（最大不超过 maxBytes 字节），并感知真实文件大小与截断状态
+func (i *Inbox) FetchContent(ctx context.Context, attachment *core.Attachment, maxBytes int64) (*AttachmentContent, error) {
+	if attachment == nil || strings.TrimSpace(attachment.URL) == "" {
+		return nil, fmt.Errorf("invalid attachment")
+	}
+	if maxBytes <= 0 {
+		maxBytes = 256 * 1024
+	}
+	if i != nil && i.Sources != nil {
+		data, handled, err := i.Sources.Fetch(ctx, attachment.URL, maxBytes)
+		if handled {
+			if err != nil {
+				return nil, err
+			}
+			truncated := int64(len(data)) >= maxBytes
+			return &AttachmentContent{
+				Data:      data,
+				TotalSize: int64(len(data)),
+				Truncated: truncated,
+			}, nil
+		}
+	}
+	data, totalSize, truncated, err := fetchAttachmentStream(ctx, attachment.URL, maxBytes)
+	if err != nil {
+		return nil, err
+	}
+	return &AttachmentContent{
+		Data:      data,
+		TotalSize: totalSize,
+		Truncated: truncated,
+	}, nil
+}
+
 func (i *Inbox) removeStored(attachments []*core.Attachment) {
 	for _, attachment := range attachments {
 		if attachment != nil && attachment.Path != "" {
@@ -762,19 +830,22 @@ func (i *Inbox) removeStored(attachments []*core.Attachment) {
 	}
 }
 
-func fetchQQAttachment(ctx context.Context, rawURL string) ([]byte, error) {
+func fetchAttachmentStream(ctx context.Context, rawURL string, maxBytes int64) ([]byte, int64, bool, error) {
+	if maxBytes <= 0 {
+		maxBytes = 256 * 1024
+	}
 	if len(rawURL) > core.MaxAttachmentURLBytes {
-		return nil, fmt.Errorf("attachment URL exceeds %d byte limit", core.MaxAttachmentURLBytes)
+		return nil, 0, false, fmt.Errorf("attachment URL exceeds %d byte limit", core.MaxAttachmentURLBytes)
 	}
 	if err := core.ValidateTrustedMediaURL(rawURL); err != nil {
-		return nil, err
+		return nil, 0, false, err
 	}
 	if err := core.ValidateSafeExternalURL(ctx, rawURL); err != nil {
-		return nil, fmt.Errorf("unsafe attachment URL: %w", err)
+		return nil, 0, false, fmt.Errorf("unsafe attachment URL: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, false, err
 	}
 	client := core.NewProtectedHTTPClient(30 * time.Second)
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
@@ -792,23 +863,26 @@ func fetchQQAttachment(ctx context.Context, rawURL string) ([]byte, error) {
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, false, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("attachment download status: %d", resp.StatusCode)
+		return nil, 0, false, fmt.Errorf("attachment download status: %d", resp.StatusCode)
 	}
-	if resp.ContentLength > core.MaxIncomingFileBytes {
-		return nil, fmt.Errorf("attachment exceeds %d byte limit", core.MaxIncomingFileBytes)
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, core.MaxIncomingFileBytes+1))
+
+	totalSize := resp.ContentLength
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
-		return nil, err
+		return nil, 0, false, err
 	}
-	if int64(len(data)) > core.MaxIncomingFileBytes {
-		return nil, fmt.Errorf("attachment exceeds %d byte limit", core.MaxIncomingFileBytes)
+	truncated := false
+	if int64(len(data)) > maxBytes {
+		data = data[:maxBytes]
+		truncated = true
+	} else if totalSize > int64(len(data)) {
+		truncated = true
 	}
-	return data, nil
+	return data, totalSize, truncated, nil
 }
 
 func (i *Inbox) writeFromPath(dir, sourcePath, name string) (string, error) {
