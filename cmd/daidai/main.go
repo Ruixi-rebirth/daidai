@@ -349,6 +349,7 @@ func run() int {
 		EnableNixSearch:  cfg.Plugins.NixSearch.Enabled,
 		OCIConfig:        &cfg.OCI,
 		OCIClient:        ociClient,
+		CloudflareConfig: &cfg.Cloudflare,
 		Briefing:         briefingService,
 		BriefingOwners:   briefingOwners,
 		GroupExpressions: groupExpressions,

@@ -38,6 +38,7 @@ type HandsConfig struct {
 	EnableNixSearch  bool
 	OCIConfig        *config.OCIConfig
 	OCIClient        *OCIClient
+	CloudflareConfig *config.CloudflareConfig
 	Briefing         *briefing.Service
 	BriefingOwners   map[string]string
 	GroupExpressions *groupchat.Store
@@ -94,11 +95,11 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 			timezone = cfg.OCIConfig.Timezone
 		}
 		h.Register(NewOCIBillTool(cfg.OCIClient, timezone))
-		h.Register(NewOCIIPTool(cfg.OCIClient, cfg.Immune))
+		h.Register(NewOCIIPToolWithCloudflare(cfg.OCIClient, cfg.Immune, cfg.CloudflareConfig))
 	} else if cfg.OCIConfig != nil && cfg.OCIConfig.Enabled {
 		if ociClient, err := NewOCIClient(context.Background(), *cfg.OCIConfig); err == nil {
 			h.Register(NewOCIBillTool(ociClient, cfg.OCIConfig.Timezone))
-			h.Register(NewOCIIPTool(ociClient, cfg.Immune))
+			h.Register(NewOCIIPToolWithCloudflare(ociClient, cfg.Immune, cfg.CloudflareConfig))
 		} else {
 			slog.Warn("初始化 OCI 客户端失败，跳过 OCI 相关工具注册", "err", err)
 		}

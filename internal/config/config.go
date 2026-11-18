@@ -63,8 +63,9 @@ type Config struct {
 		} `yaml:"runners"`
 	} `yaml:"agent"`
 
-	OCI      OCIConfig      `yaml:"oci"`
-	Briefing BriefingConfig `yaml:"briefing"`
+	OCI        OCIConfig        `yaml:"oci"`
+	Briefing   BriefingConfig   `yaml:"briefing"`
+	Cloudflare CloudflareConfig `yaml:"cloudflare"`
 }
 
 type BriefingConfig struct {
@@ -72,6 +73,13 @@ type BriefingConfig struct {
 	Timezone    string `yaml:"timezone"`
 	Time        string `yaml:"time"`
 	GitHubToken string `yaml:"github_token"`
+}
+
+// CloudflareConfig Cloudflare DNS 自动化配置
+type CloudflareConfig struct {
+	APIToken   string `yaml:"api_token"`
+	Zone       string `yaml:"zone"`        // 区域域名，例如 "ruixi2fp.top"；为空时自动从 SyncRecord 推断
+	SyncRecord string `yaml:"sync_record"` // 需同步更新 A 记录的域名，例如 "vps.ruixi2fp.top"
 }
 
 // OCIConfig Oracle Cloud 账单、资源巡检与 IP 管理配置

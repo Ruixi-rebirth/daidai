@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"daidai/internal/config"
 	"daidai/internal/core"
 	"daidai/internal/entity"
 )
@@ -63,6 +64,7 @@ func sudoIP(ctx context.Context, args ...string) error {
 type OCIIPTool struct {
 	client      *OCIClient
 	immune      *entity.ImmuneSystem
+	cfConfig    *config.CloudflareConfig
 	operationMu chan struct{}
 	qualityHTTP *http.Client
 	hostIP      hostIPManager
@@ -70,9 +72,14 @@ type OCIIPTool struct {
 }
 
 func NewOCIIPTool(client *OCIClient, immune *entity.ImmuneSystem) *OCIIPTool {
+	return NewOCIIPToolWithCloudflare(client, immune, nil)
+}
+
+func NewOCIIPToolWithCloudflare(client *OCIClient, immune *entity.ImmuneSystem, cfConfig *config.CloudflareConfig) *OCIIPTool {
 	return &OCIIPTool{
 		client:      client,
 		immune:      immune,
+		cfConfig:    cfConfig,
 		operationMu: make(chan struct{}, 1),
 		qualityHTTP: &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }},
 		hostIP:      &defaultHostIPManager{},
@@ -85,7 +92,7 @@ func (t *OCIIPTool) Name() string {
 }
 
 func (t *OCIIPTool) Description() string {
-	return "OCI 预留公网 IP 管理：status 查询；roll 申请并保留未绑定候选；check 查询信誉画像、本机 TCP 监听和 UDP 绑定套接字，并从国内探针逐项检查适用的 TCP 监听端口。未绑定候选在检查期间临时绑定到辅助私网 IP，完成后确认解绑并清理辅助资源，但保留候选 IP；UDP 套接字仅作本机信息，不代表服务端口或公网可用；bind 单独换绑；cleanup 删除闲置资源。必须实际调用才能报告操作完成。画像未知不等于风险高；探针失败不等于 IP 不可用或被墙；不承诺网段质量。"
+	return "OCI 预留公网 IP 管理：status 查询；roll 申请并保留未绑定候选；check 查询信誉画像、本机 TCP 监听和 UDP 绑定套接字，并从国内探针逐项检查适用的 TCP 监听端口；bind 换绑；cleanup 删除闲置资源；sync_dns 手动同步或重试更新 Cloudflare DNS 的 A 记录（如换绑后 DNS 更新失败时重试）。必须实际调用才能报告操作完成。画像未知不等于风险高；探针失败不等于 IP 不可用或被墙；不承诺网段质量。"
 }
 
 func (t *OCIIPTool) Parameters() map[string]any {
@@ -94,8 +101,8 @@ func (t *OCIIPTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"action": map[string]any{
 				"type":        "string",
-				"description": "status 查询；cleanup 删除闲置 IP；roll 申请并保留候选（不自动绑定）；check 读取本机 TCP 监听和 UDP 绑定套接字，并从国内探针验证适用的 TCP 监听端口；bind 换绑",
-				"enum":        []string{"status", "cleanup", "roll", "check", "bind"},
+				"description": "status 查询；cleanup 删除闲置 IP；roll 申请并保留候选（不自动绑定）；check 读取本机 TCP 监听和 UDP 绑定套接字，并从国内探针验证适用的 TCP 监听端口；bind 换绑；sync_dns 手动同步或重试将 Cloudflare DNS 的 A 记录更新为目标公网 IP（默认当前主网卡 IP）",
+				"enum":        []string{"status", "cleanup", "roll", "check", "bind", "sync_dns"},
 			},
 			"ip": map[string]any{
 				"type":        "string",
@@ -943,6 +950,9 @@ func (t *OCIIPTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 	case "bind":
 		result, err := t.handleBind(ctx, strings.TrimSpace(args.IP), args.DeleteOld)
 		return redactOCIIPResult(ctx, result), err
+	case "sync_dns":
+		result, err := t.handleSyncDNS(ctx, strings.TrimSpace(args.IP))
+		return redactOCIIPResult(ctx, result), err
 	case "roll":
 		noAbuser := false
 		if args.NoAbuser != nil {
@@ -1569,7 +1579,31 @@ func (t *OCIIPTool) handleBind(ctx context.Context, targetIP string, deleteOld b
 		bindMsg += fmt.Sprintf("\n- **旧 IP 清理状态**: 新 IP 已绑定成功，但旧 IP 释放失败：%s", deleteOldError)
 	}
 
-	// 若系统部署了 singbox-links，换绑成功后自动生成并附带新节点的代理配置
+	// 1. 同步更新 Cloudflare DNS 记录
+	if t.cfConfig != nil && strings.TrimSpace(t.cfConfig.APIToken) != "" {
+		targetRecord := strings.TrimSpace(t.cfConfig.SyncRecord)
+		if targetRecord == "" {
+			bindMsg += "\n- **Cloudflare DNS 未同步**: 警告：配置项 cloudflare.sync_record 未设置"
+			slog.Warn("oci_ip_tool: cloudflare.sync_record 未设置，跳过 DNS 自动同步")
+		} else if err := t.updateCloudflareDNS(ctx, targetObj.IPAddress); err != nil {
+			bindMsg += fmt.Sprintf("\n- **Cloudflare DNS 同步失败**: %v（可随时对我说「重试同步 DNS」再次尝试更新）", err)
+			slog.Error("oci_ip_tool: Cloudflare DNS 更新失败", "record", targetRecord, "ip", targetObj.IPAddress, "err", err)
+		} else {
+			bindMsg += fmt.Sprintf("\n- **Cloudflare DNS 同步**: 已自动将 `%s` 更新为新 IP `%s` (保持灰云/仅 DNS 模式，TTL 60s)", targetRecord, targetObj.IPAddress)
+		}
+	}
+
+	// 2. 刷新本地静态订阅文件
+	if _, lookErr := exec.LookPath("singbox-links"); lookErr == nil {
+		exportCmd := exec.CommandContext(ctx, "/run/wrappers/bin/sudo", "singbox-links", "--export", targetObj.IPAddress)
+		if exportOut, exportErr := exportCmd.CombinedOutput(); exportErr != nil {
+			slog.Warn("oci_ip_tool: 刷新本地订阅文件失败", "err", exportErr, "out", string(exportOut))
+		} else {
+			bindMsg += "\n- **本地订阅文件**: 已自动刷新并生成包含新 IP 的最新节点配置"
+		}
+	}
+
+	// 3. 若系统部署了 singbox-links，换绑成功后自动生成并附带新节点的代理配置
 	if _, lookErr := exec.LookPath("singbox-links"); lookErr == nil {
 		if linkOutput, err := runSingboxLinks(ctx, targetObj.IPAddress); err == nil && linkOutput != "" {
 			bindMsg += "\n\n" + FormatSingboxLinks(linkOutput)
@@ -1741,4 +1775,195 @@ func waitContext(ctx context.Context, duration time.Duration) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (t *OCIIPTool) updateCloudflareDNS(ctx context.Context, newIP string) error {
+	if t.cfConfig == nil {
+		return fmt.Errorf("未在配置文件中启用或配置 cloudflare 模块")
+	}
+	apiToken := strings.TrimSpace(t.cfConfig.APIToken)
+	if apiToken == "" {
+		return fmt.Errorf("配置项 cloudflare.api_token 不能为空")
+	}
+	syncRecord := strings.TrimSpace(t.cfConfig.SyncRecord)
+	if syncRecord == "" {
+		return fmt.Errorf("配置项 cloudflare.sync_record 不能为空 (未指定需同步的 DNS 域名)")
+	}
+	zoneName := strings.TrimSpace(t.cfConfig.Zone)
+	if zoneName == "" {
+		return fmt.Errorf("配置项 cloudflare.zone 不能为空 (未指定域名区域)")
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	// 1. 获取 Zone ID
+	zoneID := zoneName
+	if len(zoneID) != 32 || strings.Contains(zoneID, ".") {
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, "https://api.cloudflare.com/client/v4/zones?name="+url.QueryEscape(zoneName), nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+apiToken)
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return fmt.Errorf("查询 Cloudflare Zone 失败: %w", err)
+		}
+		defer resp.Body.Close()
+
+		var zoneResp struct {
+			Success bool `json:"success"`
+			Errors  []struct {
+				Message string `json:"message"`
+			} `json:"errors"`
+			Result []struct {
+				ID string `json:"id"`
+			} `json:"result"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&zoneResp); err != nil {
+			return fmt.Errorf("解析 Zone 响应失败: %w", err)
+		}
+		if !zoneResp.Success || len(zoneResp.Result) == 0 {
+			errMsg := "未找到匹配的 Zone"
+			if len(zoneResp.Errors) > 0 {
+				errMsg = zoneResp.Errors[0].Message
+			}
+			return fmt.Errorf("获取 Zone ID 失败: %s", errMsg)
+		}
+		zoneID = zoneResp.Result[0].ID
+	}
+
+	// 2. 查询 DNS 记录 ID (必须限定 type=A，绝对不影响 AAAA 记录)
+	queryURL := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records?name=%s&type=A", zoneID, url.QueryEscape(syncRecord))
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, queryURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("查询 DNS 记录失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var recordResp struct {
+		Success bool `json:"success"`
+		Errors  []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+		Result []struct {
+			ID      string `json:"id"`
+			Content string `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&recordResp); err != nil {
+		return fmt.Errorf("解析 DNS 记录响应失败: %w", err)
+	}
+	if !recordResp.Success || len(recordResp.Result) == 0 {
+		errMsg := fmt.Sprintf("未在 Zone %s 中找到名为 %s 的 A 记录", zoneName, syncRecord)
+		if len(recordResp.Errors) > 0 {
+			errMsg = recordResp.Errors[0].Message
+		}
+		return fmt.Errorf("获取 DNS 记录失败: %s", errMsg)
+	}
+	recordID := recordResp.Result[0].ID
+
+	// 3. 更新 DNS 记录为新公网 IP (保持 proxied: false 灰云，TTL 60s)
+	updateURL := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records/%s", zoneID, recordID)
+	payload := map[string]any{
+		"type":    "A",
+		"name":    syncRecord,
+		"content": newIP,
+		"ttl":     60,
+		"proxied": false,
+	}
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err = http.NewRequestWithContext(reqCtx, http.MethodPatch, updateURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err = client.Do(req)
+	if err != nil {
+		return fmt.Errorf("请求更新 DNS 记录失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var updateResp struct {
+		Success bool `json:"success"`
+		Errors  []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&updateResp); err != nil {
+		return fmt.Errorf("解析 DNS 更新响应失败: %w", err)
+	}
+	if !updateResp.Success {
+		errMsg := "DNS 更新失败"
+		if len(updateResp.Errors) > 0 {
+			errMsg = updateResp.Errors[0].Message
+		}
+		return fmt.Errorf("Cloudflare API 报错: %s", errMsg)
+	}
+
+	return nil
+}
+
+func (t *OCIIPTool) handleSyncDNS(ctx context.Context, targetIP string) (*core.ToolResult, error) {
+	if t.cfConfig == nil {
+		return &core.ToolResult{Text: "未在配置文件中配置 cloudflare 模块。请在配置文件中配置 cloudflare.api_token、sync_record 和 zone。"}, nil
+	}
+	if strings.TrimSpace(t.cfConfig.APIToken) == "" {
+		return &core.ToolResult{Text: "配置项 cloudflare.api_token 为空，请先配置 Cloudflare API Token。"}, nil
+	}
+	if strings.TrimSpace(t.cfConfig.SyncRecord) == "" {
+		return &core.ToolResult{Text: "配置项 cloudflare.sync_record 为空，请指定需同步的 DNS 域名。"}, nil
+	}
+	if strings.TrimSpace(t.cfConfig.Zone) == "" {
+		return &core.ToolResult{Text: "配置项 cloudflare.zone 为空，请指定域名区域。"}, nil
+	}
+
+	ip := strings.TrimSpace(targetIP)
+	if ip == "" {
+		privID, err := t.ResolvePrivateIPID(ctx)
+		if err == nil && privID != "" {
+			if curItem, err := t.getPublicIPByPrivateIP(ctx, privID); err == nil && curItem != nil {
+				ip = curItem.IPAddress
+			}
+		}
+		if ip == "" {
+			return nil, fmt.Errorf("未指定目标 IP，且无法从 OCI 主网卡自动获取当前公网 IP；请显式指定 ip 参数")
+		}
+	}
+
+	if err := t.updateCloudflareDNS(ctx, ip); err != nil {
+		return &core.ToolResult{
+			Text: fmt.Sprintf("### Cloudflare DNS 同步失败 ❌\n- **目标域名**: `%s`\n- **目标 IP**: `%s`\n- **错误原因**: %v\n\n您可以随时再次让我重试同步。", t.cfConfig.SyncRecord, ip, err),
+		}, nil
+	}
+
+	subMsg := ""
+	if _, lookErr := exec.LookPath("singbox-links"); lookErr == nil {
+		exportCmd := exec.CommandContext(ctx, "/run/wrappers/bin/sudo", "singbox-links", "--export", ip)
+		if exportOut, exportErr := exportCmd.CombinedOutput(); exportErr != nil {
+			subMsg = fmt.Sprintf("\n- **本地订阅文件**: 刷新失败 (%v: %s)", exportErr, string(exportOut))
+		} else {
+			subMsg = "\n- **本地订阅文件**: 已自动刷新并生成包含新 IP 的最新配置"
+		}
+	}
+
+	return &core.ToolResult{
+		Text: fmt.Sprintf("### Cloudflare DNS 同步成功 ✅\n- **目标域名**: `%s`\n- **A 记录已更新为**: `%s` (保持灰云/仅 DNS 模式，TTL 60s)%s", t.cfConfig.SyncRecord, ip, subMsg),
+	}, nil
 }

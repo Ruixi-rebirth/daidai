@@ -159,18 +159,23 @@ func formatSingboxJSON(export SingboxExport) string {
 	sb.WriteString("> 复制下方链接粘贴到客户端（Sing-box / Clash Verge / Shadowrocket / Box4HP 等）即可自动拉取全部最新节点：\n\n")
 
 	if len(export.SubscriptionURLs) > 0 {
+		if pub, ok := export.SubscriptionURLs["public"]; ok && strings.TrimSpace(pub) != "" {
+			sb.WriteString("- **通用 HTTPS 订阅 (推荐)**：\n```text\n")
+			sb.WriteString(strings.TrimSpace(pub))
+			sb.WriteString("\n```\n")
+		}
 		if ipv4, ok := export.SubscriptionURLs["ipv4"]; ok && strings.TrimSpace(ipv4) != "" {
-			sb.WriteString("- **IPv4 订阅**：\n```text\n")
+			sb.WriteString("- **IPv4 直连订阅**：\n```text\n")
 			sb.WriteString(strings.TrimSpace(ipv4))
 			sb.WriteString("\n```\n")
 		}
 		if ipv6, ok := export.SubscriptionURLs["ipv6"]; ok && strings.TrimSpace(ipv6) != "" {
-			sb.WriteString("- **IPv6 订阅**：\n```text\n")
+			sb.WriteString("- **IPv6 直连订阅**：\n```text\n")
 			sb.WriteString(strings.TrimSpace(ipv6))
 			sb.WriteString("\n```\n")
 		}
 		for k, v := range export.SubscriptionURLs {
-			if k != "ipv4" && k != "ipv6" && strings.TrimSpace(v) != "" {
+			if k != "public" && k != "ipv4" && k != "ipv6" && strings.TrimSpace(v) != "" {
 				sb.WriteString(fmt.Sprintf("- **%s 订阅**：\n```text\n%s\n```\n", strings.ToUpper(k), strings.TrimSpace(v)))
 			}
 		}

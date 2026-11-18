@@ -343,3 +343,33 @@ func TestIPTCPDiagnosticPartialAndFailed(t *testing.T) {
 		})
 	}
 }
+
+func TestOCIIPTool_SyncDNS_MissingConfig(t *testing.T) {
+	tool := newIPTestTool(t)
+	// 1. Nil cfConfig
+	res, err := tool.handleSyncDNS(context.Background(), "1.2.3.4")
+	if err != nil || !strings.Contains(res.Text, "未在配置文件中配置 cloudflare 模块") {
+		t.Fatalf("expected missing config notice, got %v, res=%+v", err, res)
+	}
+
+	// 2. Missing APIToken
+	tool.cfConfig = &config.CloudflareConfig{SyncRecord: "vps.example.com", Zone: "example.com"}
+	res, err = tool.handleSyncDNS(context.Background(), "1.2.3.4")
+	if err != nil || !strings.Contains(res.Text, "api_token 为空") {
+		t.Fatalf("expected empty token notice, got %v, res=%+v", err, res)
+	}
+
+	// 3. Missing SyncRecord
+	tool.cfConfig = &config.CloudflareConfig{APIToken: "token", Zone: "example.com"}
+	res, err = tool.handleSyncDNS(context.Background(), "1.2.3.4")
+	if err != nil || !strings.Contains(res.Text, "sync_record 为空") {
+		t.Fatalf("expected empty sync_record notice, got %v, res=%+v", err, res)
+	}
+
+	// 4. Missing Zone
+	tool.cfConfig = &config.CloudflareConfig{APIToken: "token", SyncRecord: "vps.example.com"}
+	res, err = tool.handleSyncDNS(context.Background(), "1.2.3.4")
+	if err != nil || !strings.Contains(res.Text, "zone 为空") {
+		t.Fatalf("expected empty zone notice, got %v, res=%+v", err, res)
+	}
+}

@@ -58,3 +58,8 @@ oci:
   daily_report_minute: 30
   cost_alert_delta: 1.0
   timezone: "Asia/Singapore"
+
+cloudflare:
+  api_token: "" # Cloudflare API Token（需具备区域 DNS 编辑权限）
+  zone: "ruixi2fp.top" # 域名区域，留空则自动从 sync_record 推断
+  sync_record: "vps.ruixi2fp.top" # OCI 换绑 IP 后自动同步更新的 A 记录域名
