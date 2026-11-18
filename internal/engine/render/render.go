@@ -83,14 +83,14 @@ func RenderCard(ctx context.Context, md string) ([]byte, error) {
 #block(
   width: 100%%,
   fill: rgb("#ffffff"),
-  inset: (x: 22pt, top: 20pt, bottom: 22pt),
-  radius: 14pt,
-  stroke: 0.6pt + rgb("#e1e4e8")
+  inset: (x: 16pt, top: 14pt, bottom: 16pt),
+  radius: 10pt,
+  stroke: 0.5pt + rgb("#e1e4e8")
 )[
 %s
 ]
 `, typstBody)
-	return renderTypst(ctx, doc)
+	return renderTypst(ctx, doc, "#f4f5f8")
 }
 
 // RenderMemoryProfileCard uses a warmer palette and wider spacing for a
@@ -149,14 +149,14 @@ func RenderMemoryProfileCard(ctx context.Context, md string) ([]byte, error) {
 #block(
   width: 100%%,
   fill: rgb("#fffdf9"),
-  inset: (x: 24pt, top: 22pt, bottom: 24pt),
-  radius: 14pt,
-  stroke: 0.8pt + rgb("#e9d7d5")
+  inset: (x: 16pt, top: 14pt, bottom: 16pt),
+  radius: 10pt,
+  stroke: 0.6pt + rgb("#e9d7d5")
 )[
 %s
 ]
 `, typstBody)
-	return renderTypst(ctx, doc)
+	return renderTypst(ctx, doc, "#f8f0ed")
 }
 
 // ShouldRenderCard decides from the content's size and structure whether an
@@ -191,11 +191,11 @@ func ShouldRenderCard(md string) bool {
 	return runeCount >= 80 || (runeCount >= 60 && nonEmptyLines >= 3)
 }
 
-func renderTypst(ctx context.Context, doc string) ([]byte, error) {
-	return renderTypstAssets(ctx, doc, nil, true)
+func renderTypst(ctx context.Context, doc string, canvasColor string) ([]byte, error) {
+	return renderTypstAssets(ctx, doc, nil, canvasColor)
 }
 
-func renderTypstAssets(ctx context.Context, doc string, assets map[string][]byte, withShadow bool) ([]byte, error) {
+func renderTypstAssets(ctx context.Context, doc string, assets map[string][]byte, canvasColor string) ([]byte, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("rendering requires a context")
 	}
@@ -258,9 +258,9 @@ func renderTypstAssets(ctx context.Context, doc string, assets map[string][]byte
 		return nil, fmt.Errorf("rendered output is not a valid PNG")
 	}
 
-	// 后处理：添加 3D 浮起投影阴影
-	if withShadow {
-		if shadowed, err := applyShadowEffect(ctx, tmpDir, pngPath); err == nil {
+	// 后处理：添加极简衬底画板 (Studio Canvas) + 3D 浮起投影阴影
+	if canvasColor != "" {
+		if shadowed, err := applyShadowEffect(ctx, tmpDir, pngPath, canvasColor); err == nil {
 			pngBytes = shadowed
 		} else {
 			slog.Warn("render: apply shadow effect failed, falling back to flat card", "err", err)
@@ -278,9 +278,9 @@ func renderTypstAssets(ctx context.Context, doc string, assets map[string][]byte
 	return pngBytes, nil
 }
 
-// applyShadowEffect 使用 ImageMagick 为透明背景圆角卡片添加 3D 浮起投影阴影。
+// applyShadowEffect 使用 ImageMagick 为透明背景圆角卡片添加紧凑画板与 3D 浮起投影阴影。
 // 失败时返回错误并回退，保证基础卡片能够正常发送。
-func applyShadowEffect(ctx context.Context, tmpDir, srcPath string) ([]byte, error) {
+func applyShadowEffect(ctx context.Context, tmpDir, srcPath, canvasColor string) ([]byte, error) {
 	bin := "magick"
 	if _, err := exec.LookPath("magick"); err != nil {
 		if _, err := exec.LookPath("convert"); err == nil {
@@ -292,14 +292,12 @@ func applyShadowEffect(ctx context.Context, tmpDir, srcPath string) ([]byte, err
 
 	outPath := filepath.Join(tmpDir, "card_shadow.png")
 
-	// -bordercolor none -border 30: 预留透明边缘供阴影扩散
-	// -shadow 65x18+14+16: 不透明度 65%, 模糊 18, 向右下偏移 (+14, +16)
-	// +swap -background transparent -layers merge +repage: 阴影置于底层合成，输出 3D 浮起卡片
+	// 极简画板衬底 (16px)，紧凑节约空间，阴影柔和自然，在 QQ 全屏黑底看图时完整呈现 3D 悬浮感
 	cmd := exec.CommandContext(ctx, bin,
 		srcPath,
-		"-bordercolor", "none", "-border", "30",
-		"(", "+clone", "-background", "black", "-shadow", "65x18+14+16", ")",
-		"+swap", "-background", "transparent", "-layers", "merge", "+repage",
+		"-bordercolor", canvasColor, "-border", "16",
+		"(", "+clone", "-background", "#0f172a", "-shadow", "55x12+6+8", ")",
+		"+swap", "-background", canvasColor, "-layers", "merge", "+repage",
 		outPath,
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
