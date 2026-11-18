@@ -40,7 +40,7 @@ func RenderCard(ctx context.Context, md string) ([]byte, error) {
 	doc := fmt.Sprintf(`#set page(
   width: 680pt,
   height: auto,
-  margin: (x: 28pt, top: 24pt, bottom: 28pt),
+  margin: (x: 14pt, top: 12pt, bottom: 14pt),
   fill: rgb("#f6f8fa")
 )
 
@@ -82,7 +82,7 @@ func RenderCard(ctx context.Context, md string) ([]byte, error) {
 #block(
   width: 100%%,
   fill: rgb("#ffffff"),
-  inset: (x: 24pt, top: 22pt, bottom: 24pt),
+  inset: (x: 14pt, top: 12pt, bottom: 14pt),
   radius: 12pt,
   stroke: 0.8pt + rgb("#e1e4e8")
 )[
