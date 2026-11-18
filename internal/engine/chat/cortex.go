@@ -1376,7 +1376,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (out *en
 				return nil, err
 			}
 			if tErr != nil {
-				failureText := safeTruncateOutput(fmt.Sprintf("工具 %s 执行失败：%v", tc.Function.Name, tErr), 4000)
+				failureText := truncateToolOutput(tc.Function.Name, fmt.Sprintf("工具 %s 执行失败：%v", tc.Function.Name, tErr))
 				lastToolText = failureText
 				messages = append(messages, core.ChatMessage{
 					Role:       core.RoleTool,
@@ -1448,7 +1448,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (out *en
 			if outText == "" {
 				outText = "执行成功"
 			}
-			safeOut := safeTruncateOutput(outText, 4000)
+			safeOut := truncateToolOutput(tc.Function.Name, outText)
 			lastToolText = safeOut
 			if len(resp.ToolCalls) == 1 && tc.Function.Name == "delegate_ticket" && strings.Contains(safeOut, "已排入后台队列") {
 				queuedTicketAck = safeOut
@@ -1619,10 +1619,35 @@ func sanitizeAssistantSpoken(text string) string {
 	return s
 }
 
-// safeTruncateOutput 安全按 Unicode 字符 (rune) 截断超长工具或工单输出，严防切断 UTF-8 多字节中文字符导致乱码或 JSON 序列化失败
+// truncateToolOutput 根据工具性质智能按 Unicode 字符 (rune) 截断，严防切断 UTF-8 多字节中文字符
+func truncateToolOutput(toolName, text string) string {
+	runes := []rune(text)
+	// 网页阅读类工具：基于 DeepSeek 64k token 预算（预留 50k token），允许最大输入 85,000 字符。
+	// 严格保持连续正文阅读，绝不中间挖空折叠
+	if toolName == "read_link" || toolName == "web_search" {
+		const maxWebRunes = 85000
+		if len(runes) <= maxWebRunes {
+			return text
+		}
+		return fmt.Sprintf("%s\n\n[... 网页正文篇幅极大（共 %d 字符），已截取前 %d 字符核心正文供分析 ...]", string(runes[:maxWebRunes]), len(runes), maxWebRunes)
+	}
+
+	// 其它工具（命令行执行、日志、工单等）：默认 8,000 字符，保留头尾关键报错与状态
+	const maxDefaultRunes = 8000
+	if len(runes) <= maxDefaultRunes {
+		return text
+	}
+	headLen := maxDefaultRunes * 3 / 4
+	tailLen := maxDefaultRunes / 4
+	head := string(runes[:headLen])
+	tail := string(runes[len(runes)-tailLen:])
+	return fmt.Sprintf("%s\n\n[... 中间约 %d 字符日志已省略 ...]\n\n%s", head, len(runes)-maxDefaultRunes, tail)
+}
+
+// safeTruncateOutput 安全按 Unicode 字符 (rune) 截断超长输出，严防切断 UTF-8 多字节中文字符导致乱码或 JSON 序列化失败
 func safeTruncateOutput(text string, maxRunes int) string {
 	if maxRunes <= 0 {
-		maxRunes = 4000
+		maxRunes = 8000
 	}
 	runes := []rune(text)
 	if len(runes) <= maxRunes {

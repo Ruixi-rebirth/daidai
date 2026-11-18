@@ -35,12 +35,17 @@ func (t *ReadLinkTool) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
 		"url":  map[string]any{"type": "string", "description": "用户提供的完整 HTTP/HTTPS 网页链接"},
 		"task": map[string]any{"type": "string", "description": "结合用户整句话填写要对网页做的事，例如总结并回答某个问题"},
+		"offset": map[string]any{
+			"type":        "integer",
+			"description": "可选正文起始字符偏移量。用于超长长文翻页续读（例如上一段读到了 80000 字符，下一轮传 80000 即可接续读取）。默认为 0",
+		},
 	}, "required": []string{"url", "task"}}
 }
 func (t *ReadLinkTool) Execute(ctx context.Context, raw json.RawMessage) (*core.ToolResult, error) {
 	var args struct {
-		URL  string `json:"url"`
-		Task string `json:"task"`
+		URL    string `json:"url"`
+		Task   string `json:"task"`
+		Offset int    `json:"offset"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return nil, fmt.Errorf("invalid read_link args: %w", err)
@@ -62,9 +67,47 @@ func (t *ReadLinkTool) Execute(ctx context.Context, raw json.RawMessage) (*core.
 	content, fetchErr := fetchDirectWebPage(directCtx, target)
 	cancel()
 	if fetchErr == nil && strings.TrimSpace(content) != "" {
-		slog.Info("read_link: 原生直接抓取成功", "url", target, "runes", utf8.RuneCountInString(content))
+		runes := []rune(content)
+		totalRunes := len(runes)
+		slog.Info("read_link: 原生直接抓取成功", "url", target, "runes", totalRunes, "offset", args.Offset)
+
+		start := args.Offset
+		if start < 0 {
+			start = 0
+		}
+		if start >= totalRunes && totalRunes > 0 {
+			return &core.ToolResult{
+				Text: fmt.Sprintf("【网页正文已全部读取完毕】（URL: %s，全文共 %d 字符，所请求起始位置 %d 已在文章末尾之后）。", target, totalRunes, start),
+			}, nil
+		}
+
+		sliced := runes[start:]
+		const maxChunkRunes = 80000
+		hasMore := false
+		remaining := 0
+		if len(sliced) > maxChunkRunes {
+			hasMore = true
+			remaining = len(sliced) - maxChunkRunes
+			sliced = sliced[:maxChunkRunes]
+		}
+
+		var sb strings.Builder
+		if start > 0 {
+			sb.WriteString(fmt.Sprintf("【已直接读取网页续读正文（URL: %s，从第 %d 字符起，任务要求：%s）】：\n", target, start+1, task))
+		} else {
+			sb.WriteString(fmt.Sprintf("【已直接读取网页正文（URL: %s，任务要求：%s）】：\n", target, task))
+		}
+		sb.WriteString(string(sliced))
+
+		if hasMore {
+			nextOffset := start + maxChunkRunes
+			sb.WriteString(fmt.Sprintf("\n\n[... 网页正文尚未结束：当前已展示至第 %d 字符，全文共 %d 字符（剩余约 %d 字符）。若需继续了解后续章节，可随时告诉我“继续”或“解读后半部分”，下一轮传 offset: %d 即可接续读取 ...]", nextOffset, totalRunes, remaining, nextOffset))
+		} else if start > 0 {
+			sb.WriteString(fmt.Sprintf("\n\n[... 已读完网页正文剩余全部内容（全文共 %d 字符） ...]", totalRunes))
+		}
+
 		return &core.ToolResult{
-			Text: fmt.Sprintf("【已直接读取网页正文（URL: %s，任务要求：%s）】：\n%s", target, task, content),
+			Text: sb.String(),
 		}, nil
 	}
 	if fetchErr != nil {
@@ -121,28 +164,20 @@ func fetchDirectWebPage(ctx context.Context, targetURL string) (string, error) {
 		return "", fmt.Errorf("HTTP status %d", resp.StatusCode)
 	}
 
-	// 限制最大读取 512KB，防止超大文件耗尽内存
-	lr := io.LimitReader(resp.Body, 512<<10)
+	// 限制最大读取 4MB，防止超大文件耗尽内存
+	lr := io.LimitReader(resp.Body, 4<<20)
 	body, err := io.ReadAll(lr)
 	if err != nil {
 		return "", err
 	}
 
 	if isGitHubCommit {
-		text := string(body)
-		if utf8.RuneCountInString(text) > 20000 {
-			text = string([]rune(text)[:20000]) + "\n\n...[Git Diff 内容过长，已截断]"
-		}
-		return text, nil
+		return string(body), nil
 	}
 
 	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
 	if strings.Contains(contentType, "text/plain") || strings.Contains(contentType, "application/json") || strings.Contains(contentType, "text/markdown") {
-		text := string(body)
-		if utf8.RuneCountInString(text) > 20000 {
-			text = string([]rune(text)[:20000]) + "\n\n...[文本内容过长，已截断]"
-		}
-		return text, nil
+		return string(body), nil
 	}
 
 	return extractHTMLContent(body)
@@ -195,7 +230,7 @@ func extractHTMLContent(raw []byte) (string, error) {
 
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
-		if sb.Len() > 25000 {
+		if sb.Len() > 300000 {
 			return
 		}
 		if n.Type == html.ElementNode {
