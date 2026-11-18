@@ -146,6 +146,7 @@ func (t *WebSearchTool) run(ctx context.Context, request webRequest) (*core.Tool
 		"--output-format", "json",
 		"--mode", "plan",
 		"--sandbox",
+		"--dangerously-skip-permissions",
 	}
 
 	if t.router != nil {
