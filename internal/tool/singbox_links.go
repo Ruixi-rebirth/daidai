@@ -87,7 +87,10 @@ func (t *SingboxLinksTool) Execute(ctx context.Context, rawArgs json.RawMessage)
 
 	output, err := runSingboxLinks(ctx, strings.TrimSpace(args.IP))
 	if err != nil {
-		return &core.ToolResult{Text: fmt.Sprintf("获取 Sing-box 节点失败：%v", err)}, nil
+		return &core.ToolResult{
+			Text:              fmt.Sprintf("获取 Sing-box 节点失败：%v", err),
+			FixedPresentation: true,
+		}, nil
 	}
 
 	return &core.ToolResult{
@@ -119,6 +122,10 @@ func runSingboxLinks(ctx context.Context, targetIP string) (string, error) {
 	cmd.Stdout = output
 	cmd.Stderr = output
 	if err := cmd.Run(); err != nil {
+		outStr := strings.TrimSpace(output.String())
+		if outStr != "" {
+			return "", fmt.Errorf("command failed (%w): %s", err, outStr)
+		}
 		return "", fmt.Errorf("command failed: %w", err)
 	}
 	if output.Truncated() {
