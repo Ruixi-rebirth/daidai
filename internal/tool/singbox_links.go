@@ -13,6 +13,24 @@ import (
 	"daidai/internal/entity"
 )
 
+// SingboxExport 对应 singbox-links --json 输出的结构化数据
+type SingboxExport struct {
+	UUID             string            `json:"uuid"`
+	SubscriptionURLs map[string]string `json:"subscription_urls"`
+	NodeCount        int               `json:"node_count"`
+	Nodes            []SingboxNode     `json:"nodes"`
+}
+
+// SingboxNode 单个 Sing-box 出站节点信息
+type SingboxNode struct {
+	Tag      string `json:"tag"`
+	Type     string `json:"type"`
+	Protocol string `json:"protocol"`
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	URL      string `json:"url"`
+}
+
 // SingboxLinksTool 获取当前 Sing-box 代理节点链接 (VLESS Reality 与 Hysteria 2)
 type SingboxLinksTool struct {
 	immune *entity.ImmuneSystem
@@ -84,7 +102,7 @@ func runSingboxLinks(ctx context.Context, targetIP string) (string, error) {
 	}
 	commandCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	args := []string{}
+	args := []string{"--json"}
 	if targetIP != "" {
 		args = append(args, targetIP)
 	}
@@ -113,11 +131,76 @@ func runSingboxLinks(ctx context.Context, targetIP string) (string, error) {
 	return result, nil
 }
 
-// FormatSingboxLinks 将 singbox-links 命令行原始输出格式化为优雅的 Markdown 代码块
+// FormatSingboxLinks 将 singbox-links 输出格式化为优雅的 Markdown
+// 优先解析 --json 结构化输出，提供置顶订阅与可一键复制的代码块；向下兼容旧版纯文本
 func FormatSingboxLinks(raw string) string {
+	rawTrimmed := strings.TrimSpace(raw)
+	if rawTrimmed == "" {
+		return "未获取到 Sing-box 节点配置。"
+	}
+
+	// 1. 尝试解析结构化 JSON
+	var export SingboxExport
+	if err := json.Unmarshal([]byte(rawTrimmed), &export); err == nil && (len(export.SubscriptionURLs) > 0 || len(export.Nodes) > 0) {
+		return formatSingboxJSON(export)
+	}
+
+	// 2. 兼容回退：非 JSON 纯文本格式
+	return formatSingboxPlain(rawTrimmed)
+}
+
+func formatSingboxJSON(export SingboxExport) string {
+	var sb strings.Builder
+	sb.WriteString("### 📱 Sing-box 客户端一键订阅\n")
+	sb.WriteString("> 复制下方链接粘贴到客户端（Sing-box / Clash Verge / Shadowrocket / Box4HP 等）即可自动拉取全部最新节点：\n\n")
+
+	if len(export.SubscriptionURLs) > 0 {
+		if ipv4, ok := export.SubscriptionURLs["ipv4"]; ok && strings.TrimSpace(ipv4) != "" {
+			sb.WriteString("- **IPv4 订阅**：\n```text\n")
+			sb.WriteString(strings.TrimSpace(ipv4))
+			sb.WriteString("\n```\n")
+		}
+		if ipv6, ok := export.SubscriptionURLs["ipv6"]; ok && strings.TrimSpace(ipv6) != "" {
+			sb.WriteString("- **IPv6 订阅**：\n```text\n")
+			sb.WriteString(strings.TrimSpace(ipv6))
+			sb.WriteString("\n```\n")
+		}
+		for k, v := range export.SubscriptionURLs {
+			if k != "ipv4" && k != "ipv6" && strings.TrimSpace(v) != "" {
+				sb.WriteString(fmt.Sprintf("- **%s 订阅**：\n```text\n%s\n```\n", strings.ToUpper(k), strings.TrimSpace(v)))
+			}
+		}
+	} else {
+		sb.WriteString("暂无可用订阅链接。\n")
+	}
+
+	if len(export.Nodes) > 0 {
+		sb.WriteString(fmt.Sprintf("\n---\n### 🌐 独立代理节点（共 %d 个）\n", len(export.Nodes)))
+		sb.WriteString("> 点击下方代码块可一键长按复制单节点链接：\n\n")
+
+		for _, node := range export.Nodes {
+			tag := node.Tag
+			if tag == "" {
+				tag = fmt.Sprintf("%s-%d", node.Type, node.Port)
+			}
+			protoInfo := node.Type
+			if node.Protocol != "" && !strings.EqualFold(node.Protocol, node.Type) {
+				protoInfo = fmt.Sprintf("%s / %s", node.Type, strings.ToUpper(node.Protocol))
+			}
+			if node.Port > 0 {
+				protoInfo = fmt.Sprintf("%s %d", protoInfo, node.Port)
+			}
+			sb.WriteString(fmt.Sprintf("**%s** (%s)\n```text\n%s\n```\n\n", tag, protoInfo, strings.TrimSpace(node.URL)))
+		}
+	}
+
+	return strings.TrimSpace(sb.String())
+}
+
+func formatSingboxPlain(raw string) string {
 	var lines []string
 	lines = append(lines, "### Sing-box 代理节点配置")
-	for _, rawLine := range strings.Split(strings.TrimSpace(raw), "\n") {
+	for _, rawLine := range strings.Split(raw, "\n") {
 		line := strings.TrimSpace(rawLine)
 		if line == "" {
 			continue
