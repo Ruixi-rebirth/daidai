@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,7 +14,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"daidai/internal/core"
@@ -66,6 +66,7 @@ type OCIIPTool struct {
 	operationMu chan struct{}
 	qualityHTTP *http.Client
 	hostIP      hostIPManager
+	portLister  portLister
 }
 
 func NewOCIIPTool(client *OCIClient, immune *entity.ImmuneSystem) *OCIIPTool {
@@ -75,6 +76,7 @@ func NewOCIIPTool(client *OCIClient, immune *entity.ImmuneSystem) *OCIIPTool {
 		operationMu: make(chan struct{}, 1),
 		qualityHTTP: &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }},
 		hostIP:      &defaultHostIPManager{},
+		portLister:  systemListeningPorts,
 	}
 }
 
@@ -83,7 +85,7 @@ func (t *OCIIPTool) Name() string {
 }
 
 func (t *OCIIPTool) Description() string {
-	return "OCI 预留公网 IP 管理：status 查询；roll 申请候选（支持 check_china 预检国内连通性，不自动绑定）；check 查询画像并对未绑定候选通过辅助私网进行零中断连通诊断（ICMP与端口）；bind 单独换绑，可能中断网络；cleanup 删除闲置资源。必须实际调用才能报告操作完成。画像未知不等于风险高；不得将筛选或探针失败解释为地址池枯竭、污染或被墙，不承诺网段质量。"
+	return "OCI 预留公网 IP 管理：status 查询；roll 申请并保留未绑定候选；check 查询信誉画像、本机 TCP 监听和 UDP 绑定套接字，并从国内探针逐项检查适用的 TCP 监听端口。未绑定候选在检查期间临时绑定到辅助私网 IP，完成后确认解绑并清理辅助资源，但保留候选 IP；UDP 套接字仅作本机信息，不代表服务端口或公网可用；bind 单独换绑；cleanup 删除闲置资源。必须实际调用才能报告操作完成。画像未知不等于风险高；探针失败不等于 IP 不可用或被墙；不承诺网段质量。"
 }
 
 func (t *OCIIPTool) Parameters() map[string]any {
@@ -92,7 +94,7 @@ func (t *OCIIPTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"action": map[string]any{
 				"type":        "string",
-				"description": "status 查询；cleanup 删除闲置 IP；roll 申请候选（不自动绑定）；check 画像与连通诊断；bind 换绑",
+				"description": "status 查询；cleanup 删除闲置 IP；roll 申请并保留候选（不自动绑定）；check 读取本机 TCP 监听和 UDP 绑定套接字，并从国内探针验证适用的 TCP 监听端口；bind 换绑",
 				"enum":        []string{"status", "cleanup", "roll", "check", "bind"},
 			},
 			"ip": map[string]any{
@@ -116,25 +118,20 @@ func (t *OCIIPTool) Parameters() map[string]any {
 				"type":        "boolean",
 				"description": "roll 是否排除第三方标记的公开代理，默认 false；仅用户明确要求时启用，无法确认标记会停止筛选。",
 			},
-			"port": map[string]any{"type": "integer", "description": "check 的 TCP 服务端口，默认 443；应使用目标实际监听且放行的端口", "minimum": 1, "maximum": 65535},
-			"check_china": map[string]any{
-				"type":        "boolean",
-				"description": "roll 刷取时是否预先检测国内连通性（零中断测试 ICMP Ping），自动淘汰被国内完全丢包阻断的候选 IP (默认 false)",
-			},
+			"port": map[string]any{"type": "integer", "description": "check 可选的单个 TCP 端口；不指定时检查服务器当前监听且适用于目标私网 IP 的全部 TCP 端口，并列出 UDP 监听端口", "minimum": 1, "maximum": 65535},
 		},
 		"required": []string{"action"},
 	}
 }
 
 type ociIPArgs struct {
-	Action     string   `json:"action"`
-	IP         string   `json:"ip"`
-	DeleteOld  bool     `json:"delete_old"`
-	Prefix     []string `json:"prefix"`
-	MaxRisk    *int     `json:"max_risk"`
-	NoAbuser   *bool    `json:"no_abuser"`
-	Port       *int     `json:"port"`
-	CheckChina *bool    `json:"check_china"`
+	Action    string   `json:"action"`
+	IP        string   `json:"ip"`
+	DeleteOld bool     `json:"delete_old"`
+	Prefix    []string `json:"prefix"`
+	MaxRisk   *int     `json:"max_risk"`
+	NoAbuser  *bool    `json:"no_abuser"`
+	Port      *int     `json:"port"`
 }
 
 // ipReputationReport 单个 IP 评估质量报告
@@ -166,7 +163,7 @@ type globalpingMeasurement struct {
 }
 
 const (
-	globalpingPollInterval    = 500 * time.Millisecond
+	globalpingPollInterval    = time.Second
 	globalpingMaxPolls        = 20
 	maxIPQualityResponseBytes = 1 << 20
 	publicIPPollInterval      = 2 * time.Second
@@ -336,6 +333,28 @@ func (t *OCIIPTool) getPublicIPByID(ctx context.Context, publicIPID string) (*oc
 	}
 	if item.ID == "" {
 		return nil, fmt.Errorf("预留 IP %s 响应缺少资源 ID", publicIPID)
+	}
+	return &item, nil
+}
+
+func (t *OCIIPTool) getPrivateIPByID(ctx context.Context, privateIPID string) (*ociPrivateIPItem, error) {
+	endpoint := fmt.Sprintf("https://iaas.%s.oraclecloud.com/20160918/privateIps/%s", t.client.region, url.PathEscape(privateIPID))
+	resp, body, err := t.client.Do(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("查询私网 IP %s 失败: %w", privateIPID, err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("查询私网 IP %s 返回 HTTP %d: %s", privateIPID, resp.StatusCode, summarizeOCIResponse(body))
+	}
+	var item ociPrivateIPItem
+	if err := json.Unmarshal(body, &item); err != nil {
+		return nil, fmt.Errorf("解析私网 IP %s 响应失败: %w", privateIPID, err)
+	}
+	if item.ID == "" || item.IPAddress == "" {
+		return nil, fmt.Errorf("私网 IP %s 响应缺少资源 ID 或地址", privateIPID)
 	}
 	return &item, nil
 }
@@ -536,34 +555,19 @@ type probeResult struct {
 	Port         int
 	Summary      string
 	Reachable    int
+	Completed    int
 	Total        int
 	AvgLatencyMs int
 	Err          error
 }
 
-func checkGlobalpingProbe(ctx context.Context, client *http.Client, ip string, protocol string, port int) probeResult {
-	protocol = strings.ToUpper(strings.TrimSpace(protocol))
-	if protocol == "" {
-		protocol = "ICMP"
-	}
-	res := probeResult{Protocol: protocol, Port: port}
+func checkGlobalpingTCPProbe(ctx context.Context, client *http.Client, ip string, port int) probeResult {
+	res := probeResult{Protocol: "TCP", Port: port}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
-	protoLabel := "ICMP Ping"
-	if res.Protocol == "TCP" {
-		protoLabel = fmt.Sprintf("TCP %d", port)
-	}
-
-	measurementOptions := map[string]any{
-		"packets": 2,
-	}
-	if res.Protocol == "TCP" {
-		measurementOptions["protocol"] = "TCP"
-		measurementOptions["port"] = port
-	} else {
-		measurementOptions["protocol"] = "ICMP"
-	}
+	protoLabel := fmt.Sprintf("TCP %d", port)
+	measurementOptions := map[string]any{"packets": 2, "protocol": "TCP", "port": port}
 
 	requestBody := map[string]any{
 		"type":               "ping",
@@ -672,24 +676,30 @@ func checkGlobalpingProbe(ctx context.Context, client *http.Client, ip string, p
 			}
 		}
 		res.Reachable = reachable
+		res.Completed = completed
 		res.Total = len(measurement.Results)
 		if reachable > 0 {
 			res.AvgLatencyMs = int(totalLatency / float64(reachable))
 		}
 
 		if reachable == 0 {
-			res.Summary = fmt.Sprintf("未观察到 %s 连通（%d/%d 节点完成，丢包 100%%）", protoLabel, completed, len(measurement.Results))
-			if res.Protocol == "TCP" {
-				res.Err = fmt.Errorf("不能区分未监听、防火墙、路由或探针问题，不足以判断被墙")
-			} else {
-				res.Err = fmt.Errorf("国内 ICMP 丢包 100%%，疑似受阻断或未正确路由")
+			if completed == 0 {
+				res.Summary = fmt.Sprintf("%s：探针未提供有效回包统计（有效节点 0/%d），结果不确定", protoLabel, len(measurement.Results))
+				res.Err = fmt.Errorf("探针没有返回有效测量统计")
+				return res
 			}
+			res.Summary = fmt.Sprintf("未观察到 %s 响应（有效节点 %d/%d）；可能是端口未监听、规则过滤、路由或探针问题，不能据此判断被墙", protoLabel, completed, len(measurement.Results))
+			res.Err = fmt.Errorf("探测节点未收到响应；不能区分端口未监听、过滤、路由或探针问题")
 			return res
 		}
+		probeCount := fmt.Sprintf("%d/%d 有效节点响应", reachable, completed)
+		if completed != len(measurement.Results) {
+			probeCount += fmt.Sprintf("（仅 %d/%d 个探针完成）", completed, len(measurement.Results))
+		}
 		if res.AvgLatencyMs > 0 {
-			res.Summary = fmt.Sprintf("%s：%d/%d 节点连通 (均延 %dms)", protoLabel, reachable, len(measurement.Results), res.AvgLatencyMs)
+			res.Summary = fmt.Sprintf("%s：%s (均延 %dms)", protoLabel, probeCount, res.AvgLatencyMs)
 		} else {
-			res.Summary = fmt.Sprintf("%s：%d/%d 节点连通", protoLabel, reachable, len(measurement.Results))
+			res.Summary = fmt.Sprintf("%s：%s", protoLabel, probeCount)
 		}
 		return res
 	}
@@ -704,23 +714,8 @@ func checkGlobalpingProbe(ctx context.Context, client *http.Client, ip string, p
 }
 
 func checkGlobalpingTCP(ctx context.Context, client *http.Client, ip string, port int) (string, int, error) {
-	res := checkGlobalpingProbe(ctx, client, ip, "TCP", port)
+	res := checkGlobalpingTCPProbe(ctx, client, ip, port)
 	return res.Summary, res.AvgLatencyMs, res.Err
-}
-
-func probeDomesticConnectivity(ctx context.Context, client *http.Client, ip string, port int) (icmpRes probeResult, tcpRes probeResult) {
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		icmpRes = checkGlobalpingProbe(ctx, client, ip, "ICMP", 0)
-	}()
-	go func() {
-		defer wg.Done()
-		tcpRes = checkGlobalpingProbe(ctx, client, ip, "TCP", port)
-	}()
-	wg.Wait()
-	return icmpRes, tcpRes
 }
 
 type ociPrivateIPItem struct {
@@ -809,7 +804,7 @@ func (t *OCIIPTool) unbindPublicIP(ctx context.Context, publicIPID string) error
 	return nil
 }
 
-func (t *OCIIPTool) probeCandidateConnectivity(ctx context.Context, candidateItem *ociPublicIPItem, port int) (string, error) {
+func (t *OCIIPTool) probeCandidateConnectivity(ctx context.Context, candidateItem *ociPublicIPItem, requestedPort *int) (details string, resultErr error) {
 	vnicInfo, err := t.resolveVNICInfo(ctx)
 	if err != nil {
 		return "", fmt.Errorf("获取主网卡信息失败: %w", err)
@@ -834,15 +829,34 @@ func (t *OCIIPTool) probeCandidateConnectivity(ctx context.Context, candidateIte
 	secPrivID := secPriv.ID
 	secPrivIP := secPriv.IPAddress
 
-	// 退出时确保清理所有临时资源
+	// Check must leave the reserved candidate intact. Only the temporary
+	// public-to-private association and secondary private IP are cleaned up.
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), publicIPPollTimeout+15*time.Second)
 		defer cancel()
-		_ = t.unbindPublicIP(cleanupCtx, candidateItem.ID)
-		_, _ = t.waitPublicIPLifecycle(cleanupCtx, candidateItem.ID, "AVAILABLE", "")
-		_ = t.deleteSecondaryPrivateIP(cleanupCtx, secPrivID)
+
+		if unbindErr := t.unbindPublicIP(cleanupCtx, candidateItem.ID); unbindErr != nil {
+			slog.Warn("oci_ip_tool: 临时探测 IP 解绑请求失败，继续核对 OCI 最终状态", "errorType", fmt.Sprintf("%T", unbindErr))
+		}
+		if _, waitErr := t.waitPublicIPLifecycle(cleanupCtx, candidateItem.ID, "AVAILABLE", ""); waitErr != nil {
+			cleanupErr := fmt.Errorf("确认候选公网 IP 已从辅助私网解绑失败；为避免破坏仍在使用的映射，保留辅助私网 IP %s 与本机地址 %s: %w", secPrivID, secPrivIP, waitErr)
+			resultErr = errors.Join(resultErr, cleanupErr)
+			details += "\n临时绑定清理未能确认，候选及辅助私网映射均保留，请先执行 status 核对；未删除候选 IP。"
+			return
+		}
+
+		var cleanupErrs []error
+		if err := t.deleteSecondaryPrivateIP(cleanupCtx, secPrivID); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("删除辅助私网 IP %s 失败: %w", secPrivID, err))
+		}
 		if t.hostIP != nil {
-			_ = t.hostIP.DelIP(cleanupCtx, secPrivIP, vnicInfo.maskBits, vnicInfo.ifaceName)
+			if err := t.hostIP.DelIP(cleanupCtx, secPrivIP, vnicInfo.maskBits, vnicInfo.ifaceName); err != nil {
+				cleanupErrs = append(cleanupErrs, fmt.Errorf("从网卡 %s 删除临时地址 %s 失败: %w", vnicInfo.ifaceName, secPrivIP, err))
+			}
+		}
+		if cleanupErr := errors.Join(cleanupErrs...); cleanupErr != nil {
+			resultErr = errors.Join(resultErr, cleanupErr)
+			details += "\n临时绑定已确认解除，但辅助资源清理不完整；候选公网 IP 仍保留，请检查 OCI 状态。"
 		}
 	}()
 
@@ -868,11 +882,13 @@ func (t *OCIIPTool) probeCandidateConnectivity(ctx context.Context, candidateIte
 		return "", err
 	}
 
-	// 4. 发起国内连通测试 (ICMP Ping 与指定 TCP 端口)
-	icmpRes, tcpRes := probeDomesticConnectivity(ctx, t.qualityHTTP, candidateItem.IPAddress, port)
-
-	probeDetails := fmt.Sprintf("临时辅助私网测试（主 IP 活跃零中断，已自动清理解绑）\n  • %s\n  • %s", icmpRes.Summary, tcpRes.Summary)
-	return probeDetails, nil
+	// 4. 读取本机实际监听端口，并从国内探针逐个验证适用的 TCP 端口。
+	portReport, reportErr := t.probeListeningPorts(ctx, candidateItem.IPAddress, secPrivIP, requestedPort)
+	if reportErr != nil {
+		return "", reportErr
+	}
+	details = "临时辅助私网测试（候选 IP 已绑定到网卡；主 IP 保持不变）\n" + portReport
+	return details, nil
 }
 
 func (t *OCIIPTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.ToolResult, error) {
@@ -919,14 +935,10 @@ func (t *OCIIPTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 		result, err := t.handleCleanup(ctx, strings.TrimSpace(args.IP))
 		return redactOCIIPResult(ctx, result), err
 	case "check":
-		port := 443
-		if args.Port != nil {
-			port = *args.Port
-		}
-		if port < 1 || port > 65535 {
+		if args.Port != nil && (*args.Port < 1 || *args.Port > 65535) {
 			return nil, fmt.Errorf("port 必须在 1 到 65535 之间")
 		}
-		result, err := t.handleCheck(ctx, strings.TrimSpace(args.IP), port)
+		result, err := t.handleCheck(ctx, strings.TrimSpace(args.IP), args.Port)
 		return redactOCIIPResult(ctx, result), err
 	case "bind":
 		result, err := t.handleBind(ctx, strings.TrimSpace(args.IP), args.DeleteOld)
@@ -943,11 +955,7 @@ func (t *OCIIPTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 			}
 			maxRisk = *args.MaxRisk
 		}
-		checkChina := false
-		if args.CheckChina != nil {
-			checkChina = *args.CheckChina
-		}
-		result, err := t.handleRoll(ctx, args.Prefix, maxRisk, noAbuser, checkChina)
+		result, err := t.handleRoll(ctx, args.Prefix, maxRisk, noAbuser)
 		return redactOCIIPResult(ctx, result), err
 	default:
 		return nil, fmt.Errorf("unknown action: %s", action)
@@ -1069,7 +1077,7 @@ func (t *OCIIPTool) handleCleanup(ctx context.Context, targetIP string) (*core.T
 	return &core.ToolResult{Text: text}, nil
 }
 
-func (t *OCIIPTool) handleCheck(ctx context.Context, targetIP string, port int) (*core.ToolResult, error) {
+func (t *OCIIPTool) handleCheck(ctx context.Context, targetIP string, requestedPort *int) (*core.ToolResult, error) {
 	if targetIP == "" {
 		privID, err := t.ResolvePrivateIPID(ctx)
 		if err != nil {
@@ -1091,7 +1099,22 @@ func (t *OCIIPTool) handleCheck(ctx context.Context, targetIP string, port int) 
 		return nil, fmt.Errorf("目标不是有效的公网单播 IP 地址")
 	}
 	targetIP = parsed.String()
-
+	if requestedPort == nil {
+		ips, err := t.listReservedPublicIPs(ctx)
+		if err != nil {
+			return nil, err
+		}
+		owned := false
+		for i := range ips {
+			if ips[i].IPAddress == targetIP {
+				owned = true
+				break
+			}
+		}
+		if !owned {
+			return nil, fmt.Errorf("目标 IP 不是当前 OCI 配置区域内的预留 IP；扫描外部 IP 时必须指定 port")
+		}
+	}
 	rep := t.checkIPReputation(ctx, targetIP, 50, true)
 	ips, listErr := t.listReservedPublicIPs(ctx)
 	var connectivity string
@@ -1109,31 +1132,56 @@ func (t *OCIIPTool) handleCheck(ctx context.Context, targetIP string, port int) 
 	event := entity.SensoryEventFromContext(ctx)
 	if targetItem != nil && (targetItem.PrivateIPID == "" || targetItem.LifecycleState == "AVAILABLE" || targetItem.LifecycleState == "UNASSIGNED") {
 		// 目标是未绑定的候选预留 IP：权限校验并触发零中断辅助私网测试
-		if t.immune != nil && event != nil {
-			if permErr := t.immune.VerifyDelegationPerm(event.Role); permErr != nil {
-				return &core.ToolResult{Text: "权限拦截：探测未绑定候选 IP 需临时创建辅助私网，仅限搭档或协作者发起"}, nil
-			}
+		if t.immune == nil || event == nil {
+			return &core.ToolResult{Text: "权限校验不可用，拒绝临时绑定候选 IP 进行探测"}, nil
 		}
-		probeText, probeErr := t.probeCandidateConnectivity(ctx, targetItem, port)
+		if permErr := t.immune.VerifyDelegationPerm(event.Role); permErr != nil {
+			return &core.ToolResult{Text: "权限拦截：探测未绑定候选 IP 需临时创建辅助私网，仅限搭档或协作者发起"}, nil
+		}
+		probeText, probeErr := t.probeCandidateConnectivity(ctx, targetItem, requestedPort)
 		if probeErr != nil {
-			connectivity = fmt.Sprintf("临时辅助私网测试失败: %v", probeErr)
+			connectivity = probeText
+			if connectivity == "" {
+				connectivity = fmt.Sprintf("临时辅助私网测试失败: %v", probeErr)
+			} else {
+				connectivity += "\n临时辅助私网测试未完整成功：" + probeErr.Error()
+			}
 			rep.Reasons = append(rep.Reasons, "连通诊断异常: "+probeErr.Error())
 		} else {
 			connectivity = probeText
 		}
 	} else {
-		// 目标为已绑定本机或其他地址：直接发起国内探针
-		icmpRes, tcpRes := probeDomesticConnectivity(ctx, t.qualityHTTP, rep.IP, port)
+		// 对已绑定的 OCI IP，按 OCI 私网地址筛选本机监听端口；外部 IP 仅允许指定端口诊断。
 		bindDesc := "外部目标直接探测"
+		privateIP := ""
 		if targetItem != nil && targetItem.PrivateIPID != "" {
 			bindDesc = "当前绑定实例"
+			privateItem, privateErr := t.getPrivateIPByID(ctx, targetItem.PrivateIPID)
+			if privateErr != nil {
+				connectivity = "读取 OCI 私网地址失败：" + privateErr.Error()
+				rep.Reasons = append(rep.Reasons, "连通诊断异常: "+privateErr.Error())
+			} else if privateItem == nil {
+				connectivity = "OCI 未找到该私网 IP；不能将本机监听端口对应到目标公网 IP"
+			} else {
+				vnicInfo, vnicErr := t.resolveVNICInfo(ctx)
+				if vnicErr != nil {
+					connectivity = "无法确认目标私网 IP 是否属于本机网卡：" + vnicErr.Error()
+					rep.Reasons = append(rep.Reasons, "连通诊断异常: "+vnicErr.Error())
+				} else if privateItem.VnicID == vnicInfo.vnicID {
+					privateIP = privateItem.IPAddress
+				} else if requestedPort == nil {
+					connectivity = "该预留 IP 绑定到其他 VNIC；本机监听端口不适用于它，请指定实际服务端口"
+				}
+			}
 		}
-		connectivity = fmt.Sprintf("%s\n  • %s\n  • %s", bindDesc, icmpRes.Summary, tcpRes.Summary)
-		if icmpRes.Err != nil {
-			rep.Reasons = append(rep.Reasons, icmpRes.Err.Error())
-		}
-		if tcpRes.Err != nil {
-			rep.Reasons = append(rep.Reasons, tcpRes.Err.Error())
+		if connectivity == "" {
+			portReport, probeErr := t.probeListeningPorts(ctx, rep.IP, privateIP, requestedPort)
+			if probeErr != nil {
+				connectivity = probeErr.Error()
+				rep.Reasons = append(rep.Reasons, "连通诊断异常: "+probeErr.Error())
+			} else {
+				connectivity = bindDesc + "\n" + portReport
+			}
 		}
 	}
 
@@ -1163,7 +1211,7 @@ func (t *OCIIPTool) handleCheck(ctx context.Context, targetIP string, port int) 
 		fmt.Sprintf("- **ASN 运营商**: `%s`", rep.ASN),
 		fmt.Sprintf("- **公开代理标记**: `%s`", proxyStr),
 		fmt.Sprintf("- **Scamalytics 欺诈分**: `%s`", fraudStr),
-		fmt.Sprintf("- **国内连通诊断 (ICMP & TCP %d)**: %s", port, connectivity),
+		fmt.Sprintf("- **国内端口诊断**: %s", connectivity),
 	}
 	if len(rep.Reasons) > 0 {
 		lines = append(lines, fmt.Sprintf("- **评估结论**: %s", strings.Join(rep.Reasons, "；")))
@@ -1172,7 +1220,7 @@ func (t *OCIIPTool) handleCheck(ctx context.Context, targetIP string, port int) 
 	return &core.ToolResult{Text: strings.Join(lines, "\n")}, nil
 }
 
-func (t *OCIIPTool) handleRoll(ctx context.Context, prefixes []string, maxRisk int, noAbuser bool, checkChina bool) (*core.ToolResult, error) {
+func (t *OCIIPTool) handleRoll(ctx context.Context, prefixes []string, maxRisk int, noAbuser bool) (*core.ToolResult, error) {
 	maxAttempts := 15
 	var rejected []string
 	for _, prefix := range prefixes {
@@ -1290,38 +1338,6 @@ func (t *OCIIPTool) handleRoll(ctx context.Context, prefixes []string, maxRisk i
 					return nil, err
 				}
 
-				var probeSummary string
-				if checkChina {
-					probeText, probeErr := t.probeCandidateConnectivity(ctx, &created, 443)
-					if probeErr != nil {
-						reason = "国内连通探测失败: " + probeErr.Error()
-						incomplete = true
-					} else {
-						if strings.Contains(probeText, "丢包 100%") && strings.Contains(probeText, "ICMP") {
-							reason = "国内 ICMP 丢包 100%（疑似受阻断）"
-						} else {
-							probeSummary = probeText
-						}
-					}
-				}
-
-				if checkChina && probeSummary == "" {
-					if err := t.releaseRollCandidate(created.ID); err != nil {
-						return nil, fmt.Errorf("候选 IP %s 未通过国内连通检测且释放失败: %w", candidateIP, err)
-					}
-					rejected = append(rejected, fmt.Sprintf("第 %d 个 (%s)：%s", attempt, candidateIP, reason))
-					slog.Info("OCI 候选未通过连通测试已释放", "attempt", attempt, "ip", candidateIP, "reason", reason)
-					if incomplete {
-						return &core.ToolResult{Text: fmt.Sprintf("OCI 创建成功 %d 次，本轮候选已全部释放，当前绑定未改动。因国内探针不可用已停止，不继续消耗候选。记录：%s", attempt, strings.Join(rejected, "；"))}, nil
-					}
-					if attempt < maxAttempts {
-						if err := waitContext(ctx, 2*time.Second); err != nil {
-							return nil, err
-						}
-					}
-					continue
-				}
-
 				fraud := "未筛选"
 				if rep.FraudScore >= 0 {
 					fraud = fmt.Sprintf("%d/100", rep.FraudScore)
@@ -1334,10 +1350,7 @@ func (t *OCIIPTool) handleRoll(ctx context.Context, prefixes []string, maxRisk i
 				if len(rejected) > 0 {
 					history = strings.Join(rejected, "；")
 				}
-				statusLine := "- 状态：未绑定；未做连通探测；当前绑定未改动。"
-				if checkChina && probeSummary != "" {
-					statusLine = fmt.Sprintf("- 国内连通诊断：\n  %s\n- 状态：未绑定；当前绑定未改动。", strings.ReplaceAll(probeSummary, "\n", "\n  "))
-				}
+				statusLine := "- 状态：未绑定；尚未做连通探测；当前绑定未改动。"
 				return &core.ToolResult{Text: fmt.Sprintf("### OCI 已申请并保留候选预留 IP\n- 候选：%s\n- OCI 创建成功：%d 次；已释放此前候选：%d 个\n- Scamalytics 评分：%s；公开代理标记：%s\n%s\n- 淘汰记录：%s\n画像与连通诊断仅供参考，不保证特定业务长期可用。需要换绑时请明确指定此 IP。",
 					candidateIP, attempt, len(rejected), fraud, proxy, statusLine, history)}, nil
 			}

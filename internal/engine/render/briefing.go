@@ -30,8 +30,8 @@ type BriefingDocument struct {
 }
 
 func RenderBriefing(ctx context.Context, doc BriefingDocument) ([]byte, error) {
-	if len(doc.Items) == 0 || len(doc.Items) > 20 {
-		return nil, fmt.Errorf("briefing requires 1–20 items")
+	if len(doc.Items) == 0 || len(doc.Items) > 25 {
+		return nil, fmt.Errorf("briefing requires 1–25 items")
 	}
 	if doc.Leads == nil {
 		doc.Leads = []string{}

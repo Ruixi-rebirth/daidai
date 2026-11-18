@@ -8,12 +8,12 @@ import (
 	"time"
 )
 
-const maxItems = 20
+const maxItems = 25
 
-var sources = []string{"hn", "github", "v2ex", "nixos"}
-var limits = map[string]int{"nixos": 5, "hn": 5, "github": 5, "v2ex": 5}
-var candidateLimits = map[string]int{"nixos": 8, "hn": 8, "github": 8, "v2ex": 8}
-var labels = map[string]string{"nixos": "❄️ NixOS 生态", "hn": "🔥 Hacker News 精选", "github": "💻 GitHub 开源发现", "v2ex": "💬 V2EX 技术话题"}
+var sources = []string{"hn", "ai", "github", "v2ex", "nixos"}
+var limits = map[string]int{"nixos": 5, "hn": 5, "ai": 5, "github": 5, "v2ex": 5}
+var candidateLimits = map[string]int{"nixos": 8, "hn": 8, "ai": 12, "github": 8, "v2ex": 8}
+var labels = map[string]string{"nixos": "❄️ NixOS 生态", "hn": "🔥 Hacker News 精选", "ai": "🤖 AI 研究精选", "github": "💻 GitHub 开源发现", "v2ex": "💬 V2EX 技术话题"}
 
 type Item struct {
 	ID            string    `json:"id"`

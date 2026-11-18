@@ -1,8 +1,8 @@
 #let data = json("content.json")
 #let ink = rgb("#182333")
 #let muted = rgb("#566578")
-#let accents = (nixos: rgb("#2166b5"), hn: rgb("#ad4d0b"), github: rgb("#7053ad"), v2ex: rgb("#147568"))
-#let labels = (nixos: "❄️  NixOS 生态", hn: "🔥  Hacker News 精选", github: "💻  GitHub 开源发现", v2ex: "💬  V2EX 技术话题")
+#let accents = (nixos: rgb("#2166b5"), hn: rgb("#ad4d0b"), ai: rgb("#a23d79"), github: rgb("#7053ad"), v2ex: rgb("#147568"))
+#let labels = (nixos: "❄️  NixOS 生态", hn: "🔥  Hacker News 精选", ai: "🤖  AI 研究精选", github: "💻  GitHub 开源发现", v2ex: "💬  V2EX 技术话题")
 
 #set page(width: 860pt, height: auto, margin: (x: 32pt, y: 24pt), fill: rgb("#f5f7fb"))
 #set text(font: ("Twitter Color Emoji", "Source Han Sans SC"), size: 16pt, fill: ink, lang: "zh")

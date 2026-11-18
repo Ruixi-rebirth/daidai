@@ -31,6 +31,7 @@
               typst
               ffmpeg
               chromium
+              iproute2
               wgcf
               wireproxy
               maple-mono.CN
@@ -57,7 +58,7 @@
             nativeBuildInputs = [ pkgs.makeWrapper ];
             postInstall = ''
               wrapProgram $out/bin/daidai \
-                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.typst pkgs.ffmpeg pkgs.chromium pkgs.wgcf pkgs.wireproxy ]} \
+                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.typst pkgs.ffmpeg pkgs.chromium pkgs.iproute2 pkgs.wgcf pkgs.wireproxy ]} \
                 --set-default FONTCONFIG_FILE ${fontConfig} \
                 --set-default TYPST_FONT_PATHS "${pkgs.twemoji-color-font}/share/fonts/truetype:${pkgs.maple-mono.CN}/share/fonts/truetype:${pkgs.source-han-sans}/share/fonts/truetype"
             '';

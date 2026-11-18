@@ -17,14 +17,14 @@ import (
 )
 
 type Collector struct {
-	Client                              *http.Client
-	GitHubToken                         string
-	NixBlog, NixForum, HN, GitHub, V2EX string
-	slots                               chan struct{}
+	Client                                      *http.Client
+	GitHubToken                                 string
+	NixBlog, NixForum, HN, GitHub, V2EX, Papers string
+	slots                                       chan struct{}
 }
 
 func NewCollector(token string) *Collector {
-	return &Collector{Client: core.NewProtectedHTTPClient(12 * time.Second), GitHubToken: token, NixBlog: "https://nixos.org/blog/announcements-rss.xml", NixForum: "https://discourse.nixos.org", HN: "https://hacker-news.firebaseio.com/v0", GitHub: "https://api.github.com", V2EX: "https://www.v2ex.com/api", slots: make(chan struct{}, 6)}
+	return &Collector{Client: core.NewProtectedHTTPClient(12 * time.Second), GitHubToken: token, NixBlog: "https://nixos.org/blog/announcements-rss.xml", NixForum: "https://discourse.nixos.org", HN: "https://hacker-news.firebaseio.com/v0", GitHub: "https://api.github.com", V2EX: "https://www.v2ex.com/api", Papers: "https://huggingface.co", slots: make(chan struct{}, 6)}
 }
 func (c *Collector) get(ctx context.Context, raw string) ([]byte, string, error) {
 	if canonical(raw) == "" {
@@ -72,11 +72,11 @@ type sourceResult struct {
 func (c *Collector) Collect(ctx context.Context) ([]Item, []SourceState, time.Time, error) {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	results := make([]sourceResult, 4)
+	results := make([]sourceResult, 5)
 	fetchers := []struct {
 		source string
 		fetch  func(context.Context) ([]Item, error)
-	}{{"nixos", c.nix}, {"hn", c.hackerNews}, {"github", c.github}, {"v2ex", c.v2ex}}
+	}{{"nixos", c.nix}, {"hn", c.hackerNews}, {"ai", c.aiPapers}, {"github", c.github}, {"v2ex", c.v2ex}}
 	var wg sync.WaitGroup
 	for index, source := range fetchers {
 		wg.Add(1)

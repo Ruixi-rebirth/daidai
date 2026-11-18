@@ -116,7 +116,7 @@ func TestEditorKeepsFivePerSectionAndStableNumbering(t *testing.T) {
 	chosen, leads, basic := edit(context.Background(), model, items)
 	e := &Edition{}
 	finalize(e, chosen, leads)
-	if basic || len(e.Items) != 20 || model.calls.Load() != 1 {
+	if basic || len(e.Items) != 25 || model.calls.Load() != 1 {
 		t.Fatalf("unexpected editorial result: items=%d basic=%v", len(e.Items), basic)
 	}
 	for n, item := range e.Items {
@@ -125,7 +125,7 @@ func TestEditorKeepsFivePerSectionAndStableNumbering(t *testing.T) {
 		}
 	}
 	index := e.Index()
-	if !strings.Contains(index, "中文标题") || !strings.Contains(index, "[20 · 中文标题](https://example.com/nixos/4)") {
+	if !strings.Contains(index, "中文标题") || !strings.Contains(index, "[25 · 中文标题](https://example.com/nixos/4)") {
 		t.Fatal("clickable index must identify each story by number and title")
 	}
 }
@@ -247,6 +247,8 @@ func fixtureCollector(t *testing.T) *Collector {
 			_, _ = fmt.Fprintf(w, `{"items":[{"id":10,"full_name":"owner/repo","html_url":"https://github.com/owner/repo","description":"a small tool","language":"Go","stargazers_count":80,"created_at":%q,"pushed_at":%q}]}`, now.Format(time.RFC3339), now.Format(time.RFC3339))
 		case "/topics/hot.json", "/topics/latest.json":
 			_, _ = fmt.Fprintf(w, `[{"id":4,"title":"备份经验","created":%d,"content":"这是首帖正文，不能当作评论结论。","replies":12,"node":{"name":"linux","title":"Linux"}}]`, now.Unix())
+		case "/api/daily_papers":
+			_, _ = w.Write([]byte(`[]`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -259,6 +261,7 @@ func fixtureCollector(t *testing.T) *Collector {
 	c.HN = server.URL
 	c.GitHub = server.URL
 	c.V2EX = server.URL
+	c.Papers = server.URL
 	return c
 }
 func TestCollectorUsesActualFieldsAndFilters(t *testing.T) {
@@ -267,7 +270,7 @@ func TestCollectorUsesActualFieldsAndFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 4 || len(states) != 4 || cutoff.IsZero() {
+	if len(items) != 4 || len(states) != 5 || cutoff.IsZero() {
 		t.Fatalf("unexpected collection: %+v %+v", items, states)
 	}
 	for _, i := range items {

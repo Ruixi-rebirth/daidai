@@ -4,6 +4,7 @@
 
 | 来源 | 实测与用途 | 本轮决定 |
 | --- | --- | --- |
+| [Hugging Face Daily Papers API](https://huggingface.co/docs/huggingface_hub/en/package_reference/hf_api) | 2026-11-18 实测可返回论文 ID、标题、摘要、进入日选时间和社区票数；以 `submittedOnDailyAt` 过滤过去 24 小时，论文原文链接指向 arXiv | 用作 AI 研究精选的单一研究来源；票数只作热度参考，不接入多家模型厂商的重复发布流 |
 | [NixOS 官方公告 RSS](https://nixos.org/blog/announcements-rss.xml) | 可读取，最新 pubDate 为 2026-07-10；权威但低频 | 保留，过去 24 小时无更新时允许为空；给新官方公告保留候选机会 |
 | [Discourse 公告](https://discourse.nixos.org/c/announcements/8) | 版本、项目发布与社区公告，亦有非技术内容 | 保留，模型按技术价值筛选；旧公告仅依据 24 小时内可读新回复 |
 | [Discourse Development](https://discourse.nixos.org/c/dev/14) | 活跃，兼有具体开发设计和长期 PR 催审队列 | 仅选过去 24 小时新发主题，排除旧队列，不把最后回复时间当发布时间 |
@@ -16,6 +17,6 @@
 | [Tweag Nix RSS](https://www.tweag.io/rss-nix.xml) | 此地址返回 404，主博客仍可读 | 不接入失效地址；不据此判断整个博客停更 |
 | [NixOS/nix GitHub Releases](https://github.com/NixOS/nix/releases) | releases API 返回空列表，网页亦没有发布条目 | 不把不存在的 release 流设为每日主源 |
 
-当前保留四大栏目，NixOS 排最后。HN 偏全球技术讨论，GitHub 栏目明确是开源发现，V2EX 保留经过节点和内容过滤的国内技术话题。来源时效、全文可读性、重复度和有效条目数应分别评估，不能仅按热度或接口是否成功挑选。
+当前保留五大栏目，依次为 HN、AI 研究、GitHub、V2EX、NixOS，NixOS 排最后。AI 研究使用 Hugging Face Daily Papers 官方 API；它补足研究论文和摘要来源，论文票数只作热度信号。模型厂商官方源不逐家叠加，避免栏目被重复发布公告占满。HN 偏全球技术讨论，GitHub 栏目明确是开源发现，V2EX 保留经过节点和内容过滤的国内技术话题。来源时效、全文可读性、重复度和有效条目数应分别评估，不能仅按热度或接口是否成功挑选。
 
 每栏最多五条是容量上限；NixOS 小领域的真正新动态不保证每天五条。缺少合格材料时少发，不借助生活热榜、求助报错、过期周报或陈旧教程补足。新增来源应先验证真实响应、发布时间字段与材料类型，再纳入一次批量编辑流程。
