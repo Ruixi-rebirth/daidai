@@ -28,6 +28,9 @@
               sqlite
               curl
               jq
+              git
+              ripgrep
+              python3
               typst
               ffmpeg
               chromium
@@ -59,7 +62,21 @@
             nativeBuildInputs = [ pkgs.makeWrapper ];
             postInstall = ''
               wrapProgram $out/bin/daidai \
-                --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.typst pkgs.ffmpeg pkgs.chromium pkgs.iproute2 pkgs.wgcf pkgs.wireproxy pkgs.imagemagick ]} \
+                --prefix PATH : ${pkgs.lib.makeBinPath [
+                  pkgs.typst
+                  pkgs.ffmpeg
+                  pkgs.chromium
+                  pkgs.iproute2
+                  pkgs.wgcf
+                  pkgs.wireproxy
+                  pkgs.imagemagick
+                  pkgs.curl
+                  pkgs.jq
+                  pkgs.python3
+                  pkgs.git
+                  pkgs.ripgrep
+                  pkgs.sqlite
+                ]} \
                 --set-default FONTCONFIG_FILE ${fontConfig} \
                 --set-default TYPST_FONT_PATHS "${pkgs.twemoji-color-font}/share/fonts/truetype:${pkgs.maple-mono.CN}/share/fonts/truetype:${pkgs.source-han-sans}/share/fonts/truetype"
             '';

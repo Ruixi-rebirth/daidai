@@ -3,6 +3,7 @@ package core
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 	"time"
@@ -195,4 +196,16 @@ func (e *SensoryEvent) LastHistoryRecordID() int64 {
 		}
 	}
 	return 0
+}
+
+// IsNixOS 判断当前运行宿主机是否为 NixOS 或具备可用 Nix 工具链
+func IsNixOS() bool {
+	if _, err := os.Stat("/etc/NIXOS"); err == nil {
+		return true
+	}
+	if data, err := os.ReadFile("/etc/os-release"); err == nil && strings.Contains(string(data), "ID=nixos") {
+		return true
+	}
+	_, err := exec.LookPath("nix")
+	return err == nil
 }
