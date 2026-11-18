@@ -131,22 +131,19 @@ func runSingboxLinks(ctx context.Context, targetIP string) (string, error) {
 	return result, nil
 }
 
-// FormatSingboxLinks 将 singbox-links 输出格式化为优雅的 Markdown
-// 优先解析 --json 结构化输出，提供置顶订阅与可一键复制的代码块；向下兼容旧版纯文本
+// FormatSingboxLinks 将 singbox-links --json 输出解析格式化为优雅的 Markdown
 func FormatSingboxLinks(raw string) string {
 	rawTrimmed := strings.TrimSpace(raw)
 	if rawTrimmed == "" {
 		return "未获取到 Sing-box 节点配置。"
 	}
 
-	// 1. 尝试解析结构化 JSON
 	var export SingboxExport
-	if err := json.Unmarshal([]byte(rawTrimmed), &export); err == nil && (len(export.SubscriptionURLs) > 0 || len(export.Nodes) > 0) {
-		return formatSingboxJSON(export)
+	if err := json.Unmarshal([]byte(rawTrimmed), &export); err != nil {
+		return fmt.Sprintf("解析 Sing-box 节点数据失败：%v", err)
 	}
 
-	// 2. 兼容回退：非 JSON 纯文本格式
-	return formatSingboxPlain(rawTrimmed)
+	return formatSingboxJSON(export)
 }
 
 func formatSingboxJSON(export SingboxExport) string {
@@ -195,21 +192,4 @@ func formatSingboxJSON(export SingboxExport) string {
 	}
 
 	return strings.TrimSpace(sb.String())
-}
-
-func formatSingboxPlain(raw string) string {
-	var lines []string
-	lines = append(lines, "### Sing-box 代理节点配置")
-	for _, rawLine := range strings.Split(raw, "\n") {
-		line := strings.TrimSpace(rawLine)
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, "#") {
-			lines = append(lines, fmt.Sprintf("\n**%s**", strings.TrimSpace(strings.TrimPrefix(line, "#"))))
-		} else {
-			lines = append(lines, fmt.Sprintf("```text\n%s\n```", line))
-		}
-	}
-	return strings.Join(lines, "\n")
 }
