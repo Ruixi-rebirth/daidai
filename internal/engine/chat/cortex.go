@@ -822,6 +822,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (out *en
 	var mediaInline bool
 	var mediaCommits []func(context.Context)
 	var mediaFailures []func(context.Context, error)
+	var toolFixedPresentation bool
 
 	textOnlyChan := make(chan bool, 1)
 	if event != nil && strings.TrimSpace(event.Content) != "" && (event.Platform == "qq" || event.Platform == "telegram") && !event.GroupInterjection {
@@ -842,9 +843,13 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (out *en
 		case <-ctx.Done():
 		case <-time.After(500 * time.Millisecond):
 		}
-		if textOnly {
+		if textOnly || toolFixedPresentation {
 			out.FixedPresentation = true
-			slog.Info("cortex: 识别到用户要求纯文本表达，跳过卡片出图", "channel", event.ChannelID)
+			if textOnly {
+				slog.Info("cortex: 识别到用户要求纯文本表达，跳过卡片出图", "channel", event.ChannelID)
+			} else if toolFixedPresentation {
+				slog.Info("cortex: 工具结果指定纯文本展示，跳过卡片出图", "channel", event.ChannelID)
+			}
 		}
 		if mediaCaption != "" {
 			out.Text = strings.TrimSpace(mediaCaption + "\n\n" + out.Text)
@@ -1434,6 +1439,9 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (out *en
 			}
 			if toolRes.OnDeliveryFailed != nil {
 				mediaFailures = append(mediaFailures, toolRes.OnDeliveryFailed)
+			}
+			if toolRes.FixedPresentation {
+				toolFixedPresentation = true
 			}
 
 			outText := toolRes.Text

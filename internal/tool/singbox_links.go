@@ -73,7 +73,8 @@ func (t *SingboxLinksTool) Execute(ctx context.Context, rawArgs json.RawMessage)
 	}
 
 	return &core.ToolResult{
-		Text: FormatSingboxLinks(output),
+		Text:              FormatSingboxLinks(output),
+		FixedPresentation: true,
 	}, nil
 }
 

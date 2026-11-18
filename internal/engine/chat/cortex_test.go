@@ -3,6 +3,7 @@ package chat
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -454,4 +455,76 @@ func TestCortex_RenderFileContext(t *testing.T) {
 			t.Fatalf("expected large attachment in ProcessedAttachments, got: %v", event.ProcessedAttachments)
 		}
 	})
+}
+
+type mockFixedToolLLM struct {
+	round int
+}
+
+func (m *mockFixedToolLLM) Name() string { return "mock_fixed_tool_llm" }
+func (m *mockFixedToolLLM) Chat(ctx context.Context, messages []core.ChatMessage, opts *core.ChatOptions) (string, error) {
+	return "mock", nil
+}
+func (m *mockFixedToolLLM) ChatWithTools(ctx context.Context, messages []core.ChatMessage, tools []core.ToolDefinition, opts *core.ChatOptions) (*core.ChatResponse, error) {
+	m.round++
+	if m.round == 1 {
+		return &core.ChatResponse{
+			Content: "",
+			ToolCalls: []core.ToolCall{
+				{
+					ID:   "call_fixed_1",
+					Type: "function",
+					Function: core.ToolCallFunction{
+						Name:      "fixed_tool",
+						Arguments: "{}",
+					},
+				},
+			},
+		}, nil
+	}
+	return &core.ChatResponse{
+		Content: "这里是节点链接：\n```text\nvless://...\n```",
+	}, nil
+}
+
+type mockFixedTool struct{}
+
+func (t *mockFixedTool) Name() string                                                { return "fixed_tool" }
+func (t *mockFixedTool) Description() string                                         { return "fixed presentation tool" }
+func (t *mockFixedTool) Parameters() map[string]any                                  { return map[string]any{"type": "object"} }
+func (t *mockFixedTool) Execute(ctx context.Context, args json.RawMessage) (*core.ToolResult, error) {
+	return &core.ToolResult{
+		Text:              "vless://uuid@1.2.3.4:443",
+		FixedPresentation: true,
+	}, nil
+}
+
+func TestCortex_ToolFixedPresentationPropagatesToUtterance(t *testing.T) {
+	model := &mockFixedToolLLM{}
+	hands := tool.NewHandsWithConfig(tool.HandsConfig{})
+	hands.Register(&mockFixedTool{})
+	c := NewCortex(CortexConfig{
+		LLM:     model,
+		Hands:   hands,
+		Persona: entity.NewDefaultPersona(),
+	})
+
+	event := &entity.SensoryEvent{
+		Platform:  "qq",
+		ChannelID: "test-channel",
+		SenderID:  "test-sender",
+		Role:      entity.RolePartner,
+		Content:   "查看singbox节点",
+	}
+
+	out, err := c.Think(context.Background(), event)
+	if err != nil {
+		t.Fatalf("Think failed: %v", err)
+	}
+	if out == nil {
+		t.Fatal("expected utterance")
+	}
+	if !out.FixedPresentation {
+		t.Fatalf("expected FixedPresentation=true when tool requested it, got false")
+	}
 }

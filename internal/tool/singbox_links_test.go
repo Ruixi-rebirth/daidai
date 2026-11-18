@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"daidai/internal/core"
 	"daidai/internal/entity"
 )
 
@@ -21,6 +22,13 @@ hysteria2://pwd@1.2.3.4:443/?sni=bing.com#hy2
 	}
 	if !strings.Contains(formatted, "```text\nvless://uuid@1.2.3.4:443") {
 		t.Fatalf("missing code block: %s", formatted)
+	}
+	result := &core.ToolResult{
+		Text:              formatted,
+		FixedPresentation: true,
+	}
+	if !result.FixedPresentation {
+		t.Fatal("expected FixedPresentation=true for node links")
 	}
 }
 
