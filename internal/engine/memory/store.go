@@ -771,7 +771,11 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
    - 若用户明确否定或废除当前可修改范围内的旧事实，输出 DELETE 并填写对应 fact_id；
    - 若是全新的个人事实且列表中未包含，输出 ADD；
    - 若本轮对话无任何值得沉淀的长期事实，返回空数组 {"mutations": []}。
-4. 每条 fact 陈述必须简明扼要（不超过 40 字），只输出合法 JSON 对象，格式如下：
+4. 【事实陈述规范】：
+   - 每条 fact 必须采用客观、精炼、无主语的陈述短语（直接记录属性、习惯、偏好、经历或状态，例如“主力系统为 NixOS”、“养了一只布偶猫”、“每天发送极客早报”）；
+   - 严禁带有“用户”、“用户XXX”、“该用户”、“Ta”、“他/她”等冗余主语前缀或人称代词（事实本身已归属于该用户，无需声明主体）；
+   - 每条 fact 陈述必须简明扼要（不超过 40 字）。
+5. 只输出合法 JSON 对象，格式如下：
 {"mutations": [{"action": "ADD|UPDATE|DELETE", "fact_id": 0, "fact": "..."}]}`, config.BotName(), config.BotName())
 
 	userPrompt := fmt.Sprintf("【用户已知事实列表】：\n%s\n\n【本轮对话】：\n%s", existingBlock, turnBuilder.String())
