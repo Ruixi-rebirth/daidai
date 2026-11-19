@@ -79,6 +79,7 @@ func run() int {
 		if !explicitConfig && errors.Is(err, os.ErrNotExist) {
 			slog.Warn("默认配置文件不存在，将使用不启用 QQ 的默认配置运行", "path", cfgPath)
 			cfg = config.DefaultConfig()
+			config.SetGlobalBotName(cfg.GetBotName())
 		} else {
 			slog.Error("配置文件无效，停止启动", "path", cfgPath, "err", err)
 			return 1
@@ -88,7 +89,7 @@ func run() int {
 	// 提前抢占端口监听，防止重复启动多个进程导致 QQ WebSocket 脑裂互踩
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Server.Port))
 	if err != nil {
-		slog.Error("端口已被占用，系统中已有另一个呆呆生命体实例在运行，请勿重复启动以免导致状态冲突", "port", cfg.Server.Port, "err", err)
+		slog.Error(fmt.Sprintf("端口已被占用，系统中已有另一个%s生命体实例在运行，请勿重复启动以免导致状态冲突", config.BotName()), "port", cfg.Server.Port, "err", err)
 		return 1
 	}
 	defer func() { _ = listener.Close() }()
@@ -629,7 +630,7 @@ func run() int {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("HTTP 服务关闭异常", "err", err)
 	}
-	slog.Info("呆呆超级数字生命体已安全休眠")
+	slog.Info(fmt.Sprintf("%s超级数字生命体已安全休眠", config.BotName()))
 	if serveFailure != nil {
 		slog.Error("健康检查服务停止，进程将以失败状态退出", "err", serveFailure)
 		return 1

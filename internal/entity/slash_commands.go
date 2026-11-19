@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"daidai/internal/config"
 	"daidai/internal/core"
 	"daidai/internal/db"
 )
@@ -109,7 +110,8 @@ func (a *SuperAgent) handleHelpCommand(ctx context.Context, event *SensoryEvent,
 		sections = append(sections, accessSection)
 	}
 
-	helpText := fmt.Sprintf("# %s · 使用帮助\n\n%s\n\n想切换模型时，直接说“切换到 <模型名称>”，例如“切换到 Gemini 3.8 Flash”。未标注权限的指令可直接使用；标注“仅核心搭档/协作者”的指令需要系统配置授权。群聊中的 slash 指令请先 @ 呆呆；普通对话中 @ 呆呆或直接称呼“呆呆”都可以。AGY 认证指令只能在私聊中使用。", a.Persona.Name, strings.Join(sections, "\n\n"))
+	name := config.BotName()
+	helpText := fmt.Sprintf("# %s · 使用帮助\n\n%s\n\n想切换模型时，直接说“切换到 <模型名称>”，例如“切换到 Gemini 3.8 Flash”。未标注权限的指令可直接使用；标注“仅核心搭档/协作者”的指令需要系统配置授权。群聊中的 slash 指令请先 @ %s；普通对话中 @ %s或直接称呼“%s”都可以。AGY 认证指令只能在私聊中使用。", name, strings.Join(sections, "\n\n"), name, name, name)
 	if err := a.transmitInfoCard(ctx, event, "📖 指令速查", helpText); err != nil {
 		slog.Warn("superagent: 发送指令帮助失败", "platform", event.Platform, "channel", event.ChannelID, "err", err)
 	}
@@ -356,7 +358,7 @@ func (a *SuperAgent) handleTasksCommand(ctx context.Context, event *SensoryEvent
 
 func (a *SuperAgent) handleStatusCommand(ctx context.Context, event *SensoryEvent, _ string) {
 	var sections []string
-	sections = append(sections, "### 呆呆生命体当前机能状态")
+	sections = append(sections, fmt.Sprintf("### %s生命体当前机能状态", config.BotName()))
 	if a.Channels != nil {
 		sections = append(sections, a.Channels.FormatStatus())
 	}
@@ -649,7 +651,7 @@ func (a *SuperAgent) handleWorkspaceCleanCommand(ctx context.Context, event *Sen
 
 func (a *SuperAgent) handleAGYLoginCommand(ctx context.Context, event *SensoryEvent, content string) {
 	if event.IsGroup {
-		a.replyText(ctx, event, "AGY 认证链接包含账号授权信息，请在与呆呆的私聊中发起登录。")
+		a.replyText(ctx, event, fmt.Sprintf("AGY 认证链接包含账号授权信息，请在与%s的私聊中发起登录。", config.BotName()))
 		return
 	}
 	if err := a.delegationPermissionError(event.Role); err != nil {
@@ -684,7 +686,7 @@ func (a *SuperAgent) handleAGYLoginCommand(ctx context.Context, event *SensoryEv
 
 func (a *SuperAgent) handleAGYCodeCommand(ctx context.Context, event *SensoryEvent, content string) {
 	if event.IsGroup {
-		a.replyText(ctx, event, "授权码属于私人凭据，请勿在群聊中发送。请在与呆呆的私聊中提交授权码。")
+		a.replyText(ctx, event, fmt.Sprintf("授权码属于私人凭据，请勿在群聊中发送。请在与%s的私聊中提交授权码。", config.BotName()))
 		return
 	}
 	if err := a.delegationPermissionError(event.Role); err != nil {
@@ -715,7 +717,7 @@ func (a *SuperAgent) handleAGYCodeCommand(ctx context.Context, event *SensoryEve
 
 func (a *SuperAgent) handleAGYStatusCommand(ctx context.Context, event *SensoryEvent, _ string) {
 	if event.IsGroup {
-		a.replyText(ctx, event, "AGY 账号状态包含私人信息，请在与呆呆的私聊中查询。")
+		a.replyText(ctx, event, fmt.Sprintf("AGY 账号状态包含私人信息，请在与%s的私聊中查询。", config.BotName()))
 		return
 	}
 	if err := a.delegationPermissionError(event.Role); err != nil {
@@ -740,7 +742,7 @@ func (a *SuperAgent) handleAGYStatusCommand(ctx context.Context, event *SensoryE
 
 func (a *SuperAgent) handleAGYLogoutCommand(ctx context.Context, event *SensoryEvent, _ string) {
 	if event.IsGroup {
-		a.replyText(ctx, event, "账号注销操作请在与呆呆的私聊中进行。")
+		a.replyText(ctx, event, fmt.Sprintf("账号注销操作请在与%s的私聊中进行。", config.BotName()))
 		return
 	}
 	if err := a.delegationPermissionError(event.Role); err != nil {

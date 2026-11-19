@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -99,6 +100,27 @@ type OCIConfig struct {
 	DailyReportMinute *int    `yaml:"daily_report_minute"`
 	CostAlertDelta    float64 `yaml:"cost_alert_delta"`
 	Timezone          string  `yaml:"timezone"` // Local timezone used to format on-demand OCI bill reports.
+}
+
+var (
+	globalBotNameMu sync.RWMutex
+	globalBotName   = "呆呆"
+)
+
+// SetGlobalBotName 设置全局生效的机器人名称（来自配置）。
+func SetGlobalBotName(name string) {
+	if strings.TrimSpace(name) != "" {
+		globalBotNameMu.Lock()
+		globalBotName = strings.TrimSpace(name)
+		globalBotNameMu.Unlock()
+	}
+}
+
+// BotName 返回当前全局配置的机器人名称，单一事实来源，未配置时默认为 "呆呆"。
+func BotName() string {
+	globalBotNameMu.RLock()
+	defer globalBotNameMu.RUnlock()
+	return globalBotName
 }
 
 // DefaultConfig 返回未启用外部通道的默认配置。
@@ -273,7 +295,9 @@ func LoadConfig(path string) (*Config, error) {
 			}
 		}
 	}
-	return &cfg, nil
+	loaded := &cfg
+	SetGlobalBotName(loaded.GetBotName())
+	return loaded, nil
 }
 
 func runnerPassesGoal(args []string) bool {

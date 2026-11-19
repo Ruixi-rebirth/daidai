@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"daidai/internal/config"
 	"daidai/internal/core"
 	"daidai/internal/entity"
 	"daidai/internal/provider/llm"
@@ -137,7 +138,7 @@ func (t *ImageTool) Name() string {
 }
 
 func (t *ImageTool) Description() string {
-	return "根据画面描述绘制通用图片或插画（用于绘制呆呆本人以外的其他事物、动物或场景，如画一只猫、画风景等）。"
+	return fmt.Sprintf("根据画面描述绘制通用图片或插画（用于绘制%s本人以外的其他事物、动物或场景，如画一只猫、画风景等）。", config.BotName())
 }
 
 func (t *ImageTool) Parameters() map[string]any {

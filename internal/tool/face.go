@@ -11,6 +11,7 @@ import (
 	"unicode"
 
 	"daidai/assets"
+	"daidai/internal/config"
 	"daidai/internal/core"
 	"daidai/internal/entity"
 	"daidai/internal/provider/llm"
@@ -57,7 +58,7 @@ func (t *FaceTool) Name() string {
 }
 
 func (t *FaceTool) Description() string {
-	return "发送呆呆本人的照片、自拍或表情贴纸（支持任意拍摄角度、动作或表情，如：正脸、侧脸、半身、全身、开心、害羞、得意、比心、委屈等；本地已有则直接发送，尚无则自动按呆呆本人设定现拍生成并缓存）。"
+	return fmt.Sprintf("发送%s本人的照片、自拍或表情贴纸（支持任意拍摄角度、动作或表情，如：正脸、侧脸、半身、全身、开心、害羞、得意、比心、委屈等；本地已有则直接发送，尚无则自动按%s本人设定现拍生成并缓存）。", config.BotName(), config.BotName())
 }
 
 func (t *FaceTool) Parameters() map[string]any {
@@ -66,7 +67,7 @@ func (t *FaceTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"emotion": map[string]any{
 				"type":        "string",
-				"description": "呆呆的照片角度、动作或表情名称，例如：'正脸'、'侧脸'、'全身'、'开心'、'害羞'、'得意'、'比心'、'卖萌'、'委屈'、'思考'等",
+				"description": fmt.Sprintf("%s的照片角度、动作或表情名称，例如：'正脸'、'侧脸'、'全身'、'开心'、'害羞'、'得意'、'比心'、'卖萌'、'委屈'、'思考'等", config.BotName()),
 			},
 		},
 		"required": []string{"emotion"},
@@ -187,7 +188,7 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 	// 1. 检查本地缓存是否存在该形象或表情
 	if data, ok := t.readCachedFace(ctx, emotion); ok {
 		return &core.ToolResult{
-			Text:      fmt.Sprintf("已发送呆呆的【%s】图片", emotion),
+			Text:      fmt.Sprintf("已发送%s的【%s】图片", config.BotName(), emotion),
 			ImageData: data,
 		}, nil
 	}
@@ -203,7 +204,7 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 		for _, fallback := range []string{"开心", "正脸"} {
 			if data, ok := t.readCachedFace(ctx, fallback); ok {
 				return &core.ToolResult{
-					Text:      fmt.Sprintf("已发送呆呆的【%s】图片", fallback),
+					Text:      fmt.Sprintf("已发送%s的【%s】图片", config.BotName(), fallback),
 					ImageData: data,
 				}, nil
 			}
@@ -252,9 +253,9 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 		return &core.ToolResult{Text: fmt.Sprintf("准备形象参考图失败：%v", err)}, nil
 	}
 	defer cleanupRef()
-	goal := fmt.Sprintf("请调用 image-generator 子智能体生成一张呆呆本人的二次元插画照片（主题/角度/神态：%s），请先读取参考基准图 %s 以保持同一人物的五官、发色（黑茶色微卷中长发）、白色小兔发夹、蓝灰眼眸与画风一致。将最终图片保存到指定路径 %s；必须确认该文件实际存在且非空后才能结束任务，文件内容必须是实际 PNG 格式（不能只修改扩展名）。", emotion, refPath, absTmpPath)
+	goal := fmt.Sprintf("请调用 image-generator 子智能体生成一张%s本人的二次元插画照片（主题/角度/神态：%s），请先读取参考基准图 %s 以保持同一人物的五官、发色（黑茶色微卷中长发）、白色小兔发夹、蓝灰眼眸与画风一致。将最终图片保存到指定路径 %s；必须确认该文件实际存在且非空后才能结束任务，文件内容必须是实际 PNG 格式（不能只修改扩展名）。", config.BotName(), emotion, refPath, absTmpPath)
 
-	slog.Info("face_tool: 触发无状态后台动态生成呆呆新图片", "emotion", emotion)
+	slog.Info("face_tool: 触发无状态后台动态生成新图片", "bot", config.BotName(), "emotion", emotion)
 	agyResult, execErr := runStatelessImageGen(ctx, t.command, goal, workDir)
 	if execErr != nil {
 		slog.Warn("face_tool: 动态生成图片失败", "emotion", emotion, "err", execErr)
@@ -307,7 +308,7 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 		return &core.ToolResult{Text: fmt.Sprintf("已生成【%s】图片，但暂时无法保存到形象缓存；请重试。", emotion)}, nil
 	}
 	return &core.ToolResult{
-		Text:      fmt.Sprintf("已生成并发送呆呆的【%s】图片", emotion),
+		Text:      fmt.Sprintf("已生成并发送%s的【%s】图片", config.BotName(), emotion),
 		ImageData: normalized,
 	}, nil
 }

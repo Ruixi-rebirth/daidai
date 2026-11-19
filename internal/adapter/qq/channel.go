@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"daidai/internal/config"
 	"daidai/internal/core"
 	"daidai/internal/db"
 	"daidai/internal/engine/render"
@@ -1033,13 +1034,6 @@ func (q *QQChannel) Name() string {
 	return "qq"
 }
 
-func (q *QQChannel) botName() string {
-	if q != nil && strings.TrimSpace(q.cfg.BotName) != "" {
-		return strings.TrimSpace(q.cfg.BotName)
-	}
-	return "呆呆"
-}
-
 // Ready reports whether the QQ gateway has completed READY or RESUMED.
 func (q *QQChannel) Ready() bool {
 	return q.wsReady.Load()
@@ -1744,7 +1738,7 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 			}
 			return true
 		}
-		botAddressed := botMentioned || quotedBot || (fullGroupEvent && !strings.HasPrefix(strings.TrimSpace(content), "/") && strings.Contains(content, q.botName()))
+		botAddressed := botMentioned || quotedBot || (fullGroupEvent && !strings.HasPrefix(strings.TrimSpace(content), "/") && strings.Contains(content, config.BotName()))
 		trimmedContent := strings.TrimSpace(content)
 		hasIncomingImages := len(images)+omittedImages > 0
 		hasIncomingFiles := len(files)+omittedFiles > 0

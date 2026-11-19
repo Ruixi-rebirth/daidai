@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"daidai/internal/config"
 	"daidai/internal/core"
 	"daidai/internal/db"
 	"daidai/internal/entity"
@@ -413,7 +414,7 @@ func (m *MemoryEngine) recallPreviousSessionDigest(ctx context.Context, event *e
 	for _, h := range older {
 		speaker := "用户"
 		if h.IsBot {
-			speaker = "呆呆"
+			speaker = config.BotName()
 		} else if h.Name != "" {
 			speaker = h.Name
 		}
@@ -535,7 +536,7 @@ func (m *MemoryEngine) Commit(ctx context.Context, event *entity.SensoryEvent, r
 		var err error
 		historyText := replyText
 		if event.IsGroup && event.GroupExpression == groupchat.Dream {
-			historyText = "[呆呆的梦境联想：虚构故事，不是群成员的真实经历]\n" + replyText
+			historyText = fmt.Sprintf("[%s的梦境联想：虚构故事，不是群成员的真实经历]\n%s", config.BotName(), replyText)
 		}
 		botMsgID, err = dbMgr.LogBotReply(ctx, event.Platform, chatType, event.ChannelID, historyText, event.SenderID, userMsgID)
 		if err != nil {
@@ -723,7 +724,7 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 		if len(r) > 240 {
 			r = r[:240]
 		}
-		turnBuilder.WriteString("\n呆呆回应(仅作语境参考): " + string(r))
+		turnBuilder.WriteString(fmt.Sprintf("\n%s回应(仅作语境参考): %s", config.BotName(), string(r)))
 	}
 
 	chatType := "private"
@@ -754,7 +755,7 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 		turnBuilder.WriteString("\n\n【近期上下文语境】（帮助判断发言讨论的真正主体是外部话题/他人还是当前用户）：\n" + historyBuilder.String())
 	}
 
-	sysPrompt := `你是呆呆的长期记忆提炼与冲突消解引擎。
+	sysPrompt := fmt.Sprintf(`你是%s的长期记忆提炼与冲突消解引擎。
 请根据【用户已知事实列表】、【本轮对话】与【近期上下文语境】，深入结合语境判断是否有关于当前发言用户的长期个人特征、身份背景、技术栈、生活偏好、重要计划或近况变化值得记录或修正。
 
 智能语义与语境分析准则：
@@ -763,7 +764,7 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
      * 若当前群聊/对话正在讨论外部话题、特定群体（如“上海考生”、“大厂员工”、“他们/大家”）、社会现象、影视游戏或外部组件，且用户的发言是在阐述、评论、吐槽或补充该外部对象（例如讨论高难度考试时说“从小就看英文书籍电影游戏啊，你拿头打，对他们来说英文和中文没差的”），其陈述主体显然是外部群体而非发言者本人，严禁将其误提取为发言者的个人事实！
      * 若结合上下文，发言明显是关于用户【本人】的真实经历、技能、偏好或近况（例如“平时主力用 NixOS”、“家里养了只布偶猫”、“准备考研”），即使省略了“我”，只要在语境下确指用户本人，均应提炼。
    - 若结合上下文仍不足以确定主体是指代用户本人还是泛指他人，保持克制，不要主观臆造事实。
-2. 引用消息中的说话人可能是其他人，图片摘要也可能描述他人或外部内容；二者只能作语境参考，不能单独证明事实属于当前用户。呆呆的回复同样不能作为事实证据。
+2. 引用消息中的说话人可能是其他人，图片摘要也可能描述他人或外部内容；二者只能作语境参考，不能单独证明事实属于当前用户。%s的回复同样不能作为事实证据。
 3. 对照【用户已知事实列表】：
    - 只能使用【用户已知事实列表】中当前用户可见的事实；群聊只会收到“当前用户在本群记录的个人事实”，只允许更新或删除这些事实，不得读取或修改私聊中的全局事实；
    - 若新信息与当前可修改范围内的某条旧事实属同一维度且发生变更或补充，输出 UPDATE 并填写对应 fact_id 与合并后的完整精炼陈述；
@@ -771,7 +772,7 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
    - 若是全新的个人事实且列表中未包含，输出 ADD；
    - 若本轮对话无任何值得沉淀的长期事实，返回空数组 {"mutations": []}。
 4. 每条 fact 陈述必须简明扼要（不超过 40 字），只输出合法 JSON 对象，格式如下：
-{"mutations": [{"action": "ADD|UPDATE|DELETE", "fact_id": 0, "fact": "..."}]}`
+{"mutations": [{"action": "ADD|UPDATE|DELETE", "fact_id": 0, "fact": "..."}]}`, config.BotName(), config.BotName())
 
 	userPrompt := fmt.Sprintf("【用户已知事实列表】：\n%s\n\n【本轮对话】：\n%s", existingBlock, turnBuilder.String())
 

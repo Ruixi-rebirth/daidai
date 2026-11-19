@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"daidai/internal/config"
 	"daidai/internal/core"
 	"daidai/internal/db"
 	"daidai/internal/entity"
@@ -85,13 +86,6 @@ func New(cfg Config, database *db.Manager, recorder func(context.Context, *entit
 	return &Channel{cfg: cfg, database: database, recorder: recorder, immune: immune, http: &http.Client{Timeout: 45 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 }
 func (c *Channel) Name() string { return "telegram" }
-
-func (c *Channel) botName() string {
-	if c != nil && strings.TrimSpace(c.cfg.BotName) != "" {
-		return strings.TrimSpace(c.cfg.BotName)
-	}
-	return "呆呆"
-}
 func (c *Channel) Ready() bool  { return c.ready.Load() }
 func (c *Channel) call(ctx context.Context, method string, body io.Reader, contentType string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.telegram.org/bot"+c.cfg.Token+"/"+method, body)
@@ -245,7 +239,7 @@ func (c *Channel) handle(ctx context.Context, m *message, handler func(*entity.S
 		body = strings.TrimSpace(m.Caption)
 	}
 	group := m.Chat.Type != "private"
-	addressed := !group || strings.Contains(strings.ToLower(body), "@"+strings.ToLower(c.bot.Username)) || strings.Contains(body, c.botName()) || (m.Reply != nil && m.Reply.From != nil && m.Reply.From.ID == c.bot.ID)
+	addressed := !group || strings.Contains(strings.ToLower(body), "@"+strings.ToLower(c.bot.Username)) || strings.Contains(body, config.BotName()) || (m.Reply != nil && m.Reply.From != nil && m.Reply.From.ID == c.bot.ID)
 	// Normalize /command@Bot without stripping suffixes intended for another bot.
 	if strings.HasPrefix(body, "/") {
 		command, rest, _ := strings.Cut(body, " ")

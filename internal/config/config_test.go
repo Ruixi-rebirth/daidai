@@ -79,4 +79,10 @@ func TestBotNameHierarchy(t *testing.T) {
 	if cfg.QQBotName() != "Q宝" || cfg.TelegramBotName() != "大白" {
 		t.Fatal("platform override must take precedence")
 	}
+
+	SetGlobalBotName("小爱")
+	if BotName() != "小爱" {
+		t.Fatal("global bot name setter failed")
+	}
+	SetGlobalBotName("呆呆") // restore
 }

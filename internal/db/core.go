@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"daidai/internal/config"
 	"daidai/internal/core"
 
 	_ "modernc.org/sqlite"
@@ -1101,7 +1102,7 @@ func (m *Manager) LogMessage(ctx context.Context, platform, chatType, convID, us
 
 // LogBotReply records which exact inbound message a delivered bot reply answers.
 func (m *Manager) LogBotReply(ctx context.Context, platform, chatType, convID, text, replyToUID string, replyToMessageID int64) (int64, error) {
-	return m.logMessage(ctx, platform, chatType, convID, "daidai", "呆呆", text, true, replyToUID, "", replyToMessageID)
+	return m.logMessage(ctx, platform, chatType, convID, "daidai", config.BotName(), text, true, replyToUID, "", replyToMessageID)
 }
 
 func (m *Manager) logMessage(ctx context.Context, platform, chatType, convID, userID, name, text string, isBot bool, replyToUID, platformMsgID string, replyToMessageID int64) (int64, error) {
