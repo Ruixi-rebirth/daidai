@@ -174,3 +174,46 @@ func TestAGYWorker_NotLoggedIn_FailFast(t *testing.T) {
 		t.Fatalf("expected ErrAGYNotLoggedIn, got %v", err)
 	}
 }
+
+func TestParseAGYWorkerOutput(t *testing.T) {
+	t.Run("StandardSingleJSON", func(t *testing.T) {
+		input := []byte(`{"response":"done","conversation_id":"c-123","status":"SUCCESS"}`)
+		got, err := parseAGYWorkerOutput(input)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.Response != "done" || got.ConversationID != "c-123" || got.Status != "SUCCESS" {
+			t.Fatalf("unexpected parsed result: %+v", got)
+		}
+	})
+
+	t.Run("NDJSONStreamMultipleObjects", func(t *testing.T) {
+		input := []byte("{\"type\":\"status\",\"status\":\"RUNNING\"}\n{\"type\":\"delta\",\"text\":\"working\"}\n{\"response\":\"final answer\",\"conversation_id\":\"c-456\",\"status\":\"SUCCESS\",\"finished_reason\":\"\"}\n")
+		got, err := parseAGYWorkerOutput(input)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.Response != "final answer" || got.ConversationID != "c-456" || got.Status != "SUCCESS" {
+			t.Fatalf("unexpected parsed result from NDJSON stream: %+v", got)
+		}
+	})
+
+	t.Run("SurroundingLogsAndPrettyPrintedJSON", func(t *testing.T) {
+		input := []byte("[INFO] 2026-11-19 Starting AGY...\nSome log line: {not valid json}\n{\n  \"response\": \"configured sysctl\",\n  \"conversation_id\": \"c-789\",\n  \"status\": \"ERROR\",\n  \"finished_reason\": \"\"\n}\n[INFO] AGY worker exited with 0\n")
+		got, err := parseAGYWorkerOutput(input)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.Response != "configured sysctl" || got.ConversationID != "c-789" || got.Status != "ERROR" {
+			t.Fatalf("unexpected parsed result with surrounding logs: %+v", got)
+		}
+	})
+
+	t.Run("NoValidJSON", func(t *testing.T) {
+		input := []byte("[ERROR] command failed without JSON output")
+		_, err := parseAGYWorkerOutput(input)
+		if err == nil {
+			t.Fatalf("expected error for non-JSON output, got nil")
+		}
+	})
+}

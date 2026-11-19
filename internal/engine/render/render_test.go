@@ -74,6 +74,24 @@ func TestRenderCard_Compile(t *testing.T) {
 	}
 }
 
+func TestRenderCard_Math(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	md := "# 数学公式测试\n\n行内公式测试：质能方程为 $E = mc^2$，求根公式为 $x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}$，价格 $100 原样展示。\n\n块级公式测试：\n$$\n\\sum_{i=1}^n i = \\frac{n(n+1)}{2}\n$$\n\n矩阵测试：\n$$\n\\begin{pmatrix} 1 & 2 \\\\ 3 & 4 \\end{pmatrix}\n$$\n"
+	pngBytes, err := RenderCard(ctx, md)
+	if err != nil {
+		t.Fatalf("RenderCard with LaTeX math failed: %v", err)
+	}
+
+	if len(pngBytes) < 100 {
+		t.Fatalf("rendered png is suspiciously small: %d bytes", len(pngBytes))
+	}
+	if string(pngBytes[:8]) != "\x89PNG\r\n\x1a\n" {
+		t.Fatalf("expected PNG header magic, got: %v", pngBytes[:8])
+	}
+}
+
 func TestShouldRenderCard(t *testing.T) {
 	cases := []struct {
 		name     string

@@ -165,6 +165,7 @@ const maxQQOutgoingParts = 5
 const passiveReplyBudgetSweepInterval = time.Minute
 const groupInterjectionCooldown = 5 * time.Minute
 const groupInterjectionQuietPeriod = 4 * time.Second
+const activeConversationWindow = 60 * time.Second
 
 func qqQuoteCacheKey(msgID, chatType, convID string) string {
 	return chatType + "\x00" + convID + "\x00" + msgID
@@ -453,6 +454,58 @@ type QQChannel struct {
 	historyRecorder          func(context.Context, *entity.SensoryEvent) error
 	voiceModeMu              sync.RWMutex
 	voiceMode                string
+	activeConversationsMu     sync.Mutex
+	activeConversations       map[string]time.Time
+	activeConversationSweepAt time.Time
+}
+
+func activeConversationKey(groupID, userID string) string {
+	return groupID + "\x00" + userID
+}
+
+func (q *QQChannel) touchActiveConversation(groupID, userID string) {
+	if q == nil || strings.TrimSpace(groupID) == "" || strings.TrimSpace(userID) == "" {
+		return
+	}
+	now := time.Now()
+	q.activeConversationsMu.Lock()
+	defer q.activeConversationsMu.Unlock()
+	if q.activeConversations == nil {
+		q.activeConversations = make(map[string]time.Time)
+	}
+	key := activeConversationKey(groupID, userID)
+	q.activeConversations[key] = now
+
+	if now.Sub(q.activeConversationSweepAt) >= 5*time.Minute || len(q.activeConversations) > 2048 {
+		for k, last := range q.activeConversations {
+			if now.Sub(last) >= activeConversationWindow {
+				delete(q.activeConversations, k)
+			}
+		}
+		q.activeConversationSweepAt = now
+	}
+}
+
+func (q *QQChannel) isConversationActive(groupID, userID string) bool {
+	if q == nil || strings.TrimSpace(groupID) == "" || strings.TrimSpace(userID) == "" {
+		return false
+	}
+	now := time.Now()
+	q.activeConversationsMu.Lock()
+	defer q.activeConversationsMu.Unlock()
+	if q.activeConversations == nil {
+		return false
+	}
+	key := activeConversationKey(groupID, userID)
+	last, exists := q.activeConversations[key]
+	if !exists {
+		return false
+	}
+	if now.Sub(last) > activeConversationWindow {
+		delete(q.activeConversations, key)
+		return false
+	}
+	return true
 }
 
 // SetHistoryRecorder installs the callback used to persist each raw inbound
@@ -551,6 +604,7 @@ func (q *QQChannel) dispatchPendingGroupInterjection(groupID string, pending *pe
 	event := pending.event
 	event.GroupInterjection = true
 	event.GroupParticipants = q.recentGroupParticipants(groupID)
+	q.touchActiveConversation(groupID, event.SenderID)
 	if !q.debounce.Push(event) {
 		slog.Warn("qq_channel: 群聊插话候选未能进入处理队列", "channelID", groupID, "msgID", event.RawMessageID)
 	}
@@ -1625,6 +1679,7 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 			slog.Warn("qq: 引用消息候选不唯一且缺少匹配索引", "msgID", msgID, "quoteCount", qqQuoteElementCount(d))
 		}
 	}
+	quotedBot := false
 	if q.msgCache != nil {
 		cacheKey := qqReferenceCacheKey(d)
 		if cacheKey != "" {
@@ -1649,7 +1704,10 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 				}
 				replyCtx.ContentComplete = record.TextComplete
 				replyCtx.ContentKind = record.ContentKind
-				slog.Info("qq: 引用命中语义正文索引", "msgID", msgID, "hasRefIndex", strings.HasPrefix(cacheKey, "REFIDX_"), "contentKind", record.ContentKind, "textComplete", record.TextComplete, "refContentBytes", len(replyCtx.Content))
+				if record.Direction == "outbound" {
+					quotedBot = true
+				}
+				slog.Info("qq: 引用命中语义正文索引", "msgID", msgID, "hasRefIndex", strings.HasPrefix(cacheKey, "REFIDX_"), "contentKind", record.ContentKind, "textComplete", record.TextComplete, "refContentBytes", len(replyCtx.Content), "quotedBot", quotedBot)
 			}
 		}
 	}
@@ -1732,7 +1790,14 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 			}
 			return true
 		}
-		botAddressed := botMentioned || (fullGroupEvent && !strings.HasPrefix(strings.TrimSpace(content), "/") && strings.Contains(content, "呆呆"))
+		isContinuingDialog := false
+		if fullGroupEvent && !strings.HasPrefix(strings.TrimSpace(content), "/") {
+			quotedOtherUser := (replyCtx != nil && !quotedBot)
+			if !quotedOtherUser && q.isConversationActive(convID, userID) {
+				isContinuingDialog = true
+			}
+		}
+		botAddressed := botMentioned || quotedBot || (fullGroupEvent && !strings.HasPrefix(strings.TrimSpace(content), "/") && (strings.Contains(content, "呆呆") || isContinuingDialog))
 		trimmedContent := strings.TrimSpace(content)
 		hasIncomingImages := len(images)+omittedImages > 0
 		hasIncomingFiles := len(files)+omittedFiles > 0
@@ -1761,6 +1826,7 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 			}
 		}
 		if isGroup && botAddressed {
+			q.touchActiveConversation(convID, userID)
 			trimmed := strings.TrimSpace(content)
 			if strings.HasPrefix(trimmed, "/bot") {
 				marked, matched := groupBotCommand(trimmed)
@@ -2187,6 +2253,11 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 	}
 
 	slog.Info("qq_channel: 表达成功送达客户端", "channelID", u.ChannelID, "isGroup", u.IsGroup, "hasMedia", u.HasMedia())
+	if u.IsGroup {
+		for _, uid := range u.MentionUserIDs {
+			q.touchActiveConversation(u.ChannelID, uid)
+		}
+	}
 	return nil
 }
 
@@ -2342,6 +2413,11 @@ func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utteranc
 		}
 	}
 	slog.Info("qq_channel: 多图 Markdown 消息已接受，已释放临时素材", "channelID", u.ChannelID, "pages", len(images), "messages", len(parts))
+	if u.IsGroup {
+		for _, uid := range u.MentionUserIDs {
+			q.touchActiveConversation(u.ChannelID, uid)
+		}
+	}
 	return nil
 }
 

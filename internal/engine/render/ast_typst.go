@@ -330,7 +330,7 @@ func MarkdownToTypst(source []byte) string {
 			if entering {
 				val := string(node.Segment.Value(source))
 				if val != "" {
-					buf.WriteString("#" + typstQuote(val))
+					renderTextOrMath(val, &buf)
 				}
 				if node.HardLineBreak() {
 					buf.WriteString(" \\\n")
@@ -343,7 +343,7 @@ func MarkdownToTypst(source []byte) string {
 			if entering {
 				val := string(node.Value)
 				if val != "" {
-					buf.WriteString("#" + typstQuote(val))
+					renderTextOrMath(val, &buf)
 				}
 			}
 		}
@@ -352,4 +352,103 @@ func MarkdownToTypst(source []byte) string {
 	})
 
 	return strings.TrimSpace(buf.String())
+}
+
+// renderTextOrMath 分离纯文本与 LaTeX 数学公式 ($...$ 及 $$...$$) 并分别渲染
+func renderTextOrMath(s string, buf *bytes.Buffer) {
+	tokens := parseMathAndText(s)
+	for _, tok := range tokens {
+		if !tok.IsMath {
+			if tok.Content != "" {
+				buf.WriteString("#" + typstQuote(tok.Content))
+			}
+			continue
+		}
+
+		typstMath := LaTeXToTypstMath(tok.Content)
+		if typstMath == "" {
+			continue
+		}
+
+		if tok.IsBlock {
+			buf.WriteString("\n$ " + typstMath + " $\n")
+		} else {
+			buf.WriteString(" $" + typstMath + "$ ")
+		}
+	}
+}
+
+type mathToken struct {
+	IsMath  bool
+	IsBlock bool
+	Content string
+}
+
+func parseMathAndText(s string) []mathToken {
+	var tokens []mathToken
+	n := len(s)
+	last := 0
+	i := 0
+
+	for i < n {
+		// 块级公式 $$...$$
+		if i+1 < n && s[i] == '$' && s[i+1] == '$' {
+			if i > 0 && s[i-1] == '\\' {
+				i += 2
+				continue
+			}
+			end := strings.Index(s[i+2:], "$$")
+			if end != -1 {
+				formula := s[i+2 : i+2+end]
+				if i > last {
+					tokens = append(tokens, mathToken{IsMath: false, Content: s[last:i]})
+				}
+				tokens = append(tokens, mathToken{IsMath: true, IsBlock: true, Content: formula})
+				i = i + 2 + end + 2
+				last = i
+				continue
+			}
+		}
+
+		// 行内公式 $...$
+		if s[i] == '$' {
+			if i > 0 && s[i-1] == '\\' {
+				i++
+				continue
+			}
+			// 行内公式规则：后接不能紧跟空白或数字（排除诸如 $100 等货币价格写法）
+			if i+1 < n && !unicode.IsSpace(rune(s[i+1])) && (s[i+1] < '0' || s[i+1] > '9') {
+				closeIdx := -1
+				for j := i + 1; j < n; j++ {
+					if s[j] == '$' && s[j-1] != '\\' {
+						// 闭合 $ 前不能紧贴空格
+						if !unicode.IsSpace(rune(s[j-1])) {
+							closeIdx = j
+							break
+						}
+					}
+					if s[j] == '\n' {
+						break
+					}
+				}
+				if closeIdx != -1 {
+					formula := s[i+1 : closeIdx]
+					if i > last {
+						tokens = append(tokens, mathToken{IsMath: false, Content: s[last:i]})
+					}
+					tokens = append(tokens, mathToken{IsMath: true, IsBlock: false, Content: formula})
+					i = closeIdx + 1
+					last = i
+					continue
+				}
+			}
+		}
+
+		i++
+	}
+
+	if last < n {
+		tokens = append(tokens, mathToken{IsMath: false, Content: s[last:]})
+	}
+	return tokens
 }

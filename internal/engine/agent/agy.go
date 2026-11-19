@@ -45,6 +45,8 @@ type agyJSONOutput struct {
 	Response       string `json:"response"`
 	ConversationID string `json:"conversation_id"`
 	Status         string `json:"status"`
+	FinishedReason string `json:"finished_reason"`
+	Error          string `json:"error"`
 	Usage          struct {
 		TotalTokens int `json:"total_tokens"`
 	} `json:"usage"`
@@ -456,23 +458,36 @@ func (w *AGYWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (string
 		sessionSaveErr = w.saveConversationID(t, cwd, conversationID)
 	}
 	status := strings.ToUpper(strings.TrimSpace(parsed.Status))
-	if status != "SUCCESS" {
-		response := strings.TrimSpace(parsed.Response)
-		if response == "" {
-			response = "AGY 未返回可确认完成的阶段结果。"
+	finishedReason := strings.ToLower(strings.TrimSpace(parsed.FinishedReason))
+	response := strings.TrimSpace(parsed.Response)
+
+	// Explicit AGY error finished_reason or error message
+	if finishedReason == "error" || parsed.Error != "" {
+		errDetail := strings.TrimSpace(parsed.Error)
+		if errDetail == "" {
+			errDetail = fmt.Sprintf("finished_reason: %s", parsed.FinishedReason)
 		}
-		response = "【本阶段未完成】\n" + response
+		if response == "" {
+			response = "AGY 执行异常终止: " + errDetail
+		}
 		response = appendSessionSaveWarning(response, sessionSaveErr)
 		if !t.AllowSensitive {
 			response = core.RedactSensitiveIPs(response)
 		}
-		return response, fmt.Errorf("AGY 执行状态未确认成功: %q", status)
+		return response, fmt.Errorf("AGY 执行终止: %s", errDetail)
 	}
 
-	response := strings.TrimSpace(parsed.Response)
 	if response == "" {
+		if status != "SUCCESS" {
+			return appendSessionSaveWarning("AGY 未返回有效结果。", sessionSaveErr), fmt.Errorf("AGY 执行状态未确认成功: %q", status)
+		}
 		response = "工单已由 AGY 工作者执行完毕。"
 	}
+
+	if status != "SUCCESS" {
+		slog.Warn("agy: 执行状态非 SUCCESS 但具有完整响应结果", "status", status, "finishedReason", parsed.FinishedReason, "conversationID", parsed.ConversationID)
+	}
+
 	response = appendSessionSaveWarning(response, sessionSaveErr)
 
 	if !t.AllowSensitive {
@@ -534,18 +549,49 @@ func partialAGYOutput(stdout, stderr string, stdoutTruncated, stderrTruncated bo
 }
 
 func parseAGYWorkerOutput(raw []byte) (agyJSONOutput, error) {
+	trimmed := bytes.TrimSpace(raw)
 	var parsed agyJSONOutput
-	if err := json.Unmarshal(raw, &parsed); err == nil {
+	if err := json.Unmarshal(trimmed, &parsed); err == nil && isMeaningfulAGYOutput(parsed) {
 		return parsed, nil
 	}
 
-	start := bytes.IndexByte(raw, '{')
-	end := bytes.LastIndexByte(raw, '}')
-	if start < 0 || end <= start {
-		return agyJSONOutput{}, fmt.Errorf("JSON 对象缺失")
+	// Try stream decoding (e.g. for streaming NDJSON where multiple objects are emitted)
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	var lastDecoded agyJSONOutput
+	foundDecoded := false
+	for dec.More() {
+		var item agyJSONOutput
+		if err := dec.Decode(&item); err != nil {
+			break
+		}
+		if isMeaningfulAGYOutput(item) {
+			lastDecoded = item
+			foundDecoded = true
+		}
 	}
-	if err := json.Unmarshal(raw[start:end+1], &parsed); err != nil {
-		return agyJSONOutput{}, err
+	if foundDecoded {
+		return lastDecoded, nil
 	}
-	return parsed, nil
+
+	// Fall back to scanning backwards from the last '}' for valid JSON object blocks
+	// (handles surrounding logs, progress lines, or pretty-printed JSON mixed with text)
+	end := bytes.LastIndexByte(trimmed, '}')
+	for end > 0 {
+		for start := end - 1; start >= 0; start-- {
+			if trimmed[start] == '{' {
+				candidate := trimmed[start : end+1]
+				var candidateParsed agyJSONOutput
+				if err := json.Unmarshal(candidate, &candidateParsed); err == nil && isMeaningfulAGYOutput(candidateParsed) {
+					return candidateParsed, nil
+				}
+			}
+		}
+		end = bytes.LastIndexByte(trimmed[:end], '}')
+	}
+
+	return agyJSONOutput{}, fmt.Errorf("AGY 输出中未找到有效的结构化 JSON 结果")
+}
+
+func isMeaningfulAGYOutput(o agyJSONOutput) bool {
+	return o.Response != "" || o.ConversationID != "" || o.Status != "" || o.FinishedReason != "" || o.Error != ""
 }
