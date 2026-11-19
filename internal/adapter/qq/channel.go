@@ -604,7 +604,6 @@ func (q *QQChannel) dispatchPendingGroupInterjection(groupID string, pending *pe
 	event := pending.event
 	event.GroupInterjection = true
 	event.GroupParticipants = q.recentGroupParticipants(groupID)
-	q.touchActiveConversation(groupID, event.SenderID)
 	if !q.debounce.Push(event) {
 		slog.Warn("qq_channel: 群聊插话候选未能进入处理队列", "channelID", groupID, "msgID", event.RawMessageID)
 	}
