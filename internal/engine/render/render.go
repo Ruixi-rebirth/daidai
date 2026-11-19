@@ -159,13 +159,27 @@ func RenderMemoryProfileCard(ctx context.Context, md string) ([]byte, error) {
 	return renderTypst(ctx, doc, "#f8f0ed")
 }
 
-// ShouldRenderCard decides from the content's size and structure whether an
+// HasMathFormulas checks whether markdown text contains real LaTeX math expressions
+// outside code blocks, while strictly excluding currency amounts like $100.
+func HasMathFormulas(md string) bool {
+	trimmed := strings.TrimSpace(md)
+	if trimmed == "" || !strings.Contains(trimmed, "$") {
+		return false
+	}
+	_, mathList := extractAndProtectMath([]byte(trimmed))
+	return len(mathList) > 0
+}
+
+// ShouldRenderCard decides from the content's size, math content, and structure whether an
 // image is easier to scan than a short chat reply. Explicit image tools can
 // still render regardless of this preference.
 func ShouldRenderCard(md string) bool {
 	trimmed := strings.TrimSpace(md)
 	if trimmed == "" {
 		return false
+	}
+	if HasMathFormulas(trimmed) {
+		return true
 	}
 	runeCount := utf8.RuneCountInString(trimmed)
 	nonEmptyLines, headings, listItems, tableLines := 0, 0, 0, 0

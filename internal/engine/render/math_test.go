@@ -2,7 +2,6 @@ package render
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
 	"time"

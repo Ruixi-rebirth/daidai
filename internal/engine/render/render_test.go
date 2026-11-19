@@ -106,6 +106,10 @@ func TestShouldRenderCard(t *testing.T) {
 		{"short 2 lines under 60 runes", "第一行\n第二行", false},
 		{"structured list over 4 lines", "- 方案 A：快速接入\n- 方案 B：稳定隔离\n- 方案 C：混合架构\n最后一条备注", true},
 		{"heading with 60+ runes", "# 模块状态概述\n" + strings.Repeat("系统运行平稳，各项指标正常。", 5), true},
+		{"short formula under 20 runes", "质能方程是 $E = mc^2$。", true},
+		{"block formula under 30 runes", "$$\\sum_{i=1}^n i$$", true},
+		{"currency amount should not trigger card", "这个商品价格是 $100 块钱。", false},
+		{"formula inside code block should not trigger card", "```\n$foo = 100$\n```", false},
 	}
 
 	for _, tc := range cases {
