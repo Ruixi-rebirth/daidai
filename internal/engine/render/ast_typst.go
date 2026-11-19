@@ -3,6 +3,8 @@ package render
 import (
 	"bytes"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -94,7 +96,7 @@ func isTableDelimiter(line string) bool {
 	return true
 }
 
-func tryRenderMarkdownTable(node *ast.Paragraph, source []byte, buf *bytes.Buffer) bool {
+func tryRenderMarkdownTable(node *ast.Paragraph, source []byte, mathList []mathToken, buf *bytes.Buffer) bool {
 	lines := node.Lines()
 	if lines.Len() < 2 {
 		return false
@@ -114,7 +116,9 @@ func tryRenderMarkdownTable(node *ast.Paragraph, source []byte, buf *bytes.Buffe
 	}
 	fmt.Fprintf(buf, "#table(columns: %d, stroke: 0.6pt + rgb(\"#d0d7de\"), inset: 8pt,\n", cols)
 	for _, h := range headers {
-		fmt.Fprintf(buf, "  table.cell(fill: rgb(\"#f6f8fa\"))[#strong[#%s]],\n", typstQuote(h))
+		buf.WriteString("  table.cell(fill: rgb(\"#f6f8fa\"))[#strong[")
+		renderTextOrMath(h, mathList, buf)
+		buf.WriteString("]],\n")
 	}
 	for _, rowLine := range rawLines[2:] {
 		if !strings.Contains(rowLine, "|") {
@@ -126,7 +130,9 @@ func tryRenderMarkdownTable(node *ast.Paragraph, source []byte, buf *bytes.Buffe
 			if i < len(cells) {
 				val = cells[i]
 			}
-			fmt.Fprintf(buf, "  [#%s],\n", typstQuote(val))
+			buf.WriteString("  [")
+			renderTextOrMath(val, mathList, buf)
+			buf.WriteString("],\n")
 		}
 	}
 	buf.WriteString(")\n\n")
@@ -177,7 +183,8 @@ func listIndentDepth(n ast.Node) int {
 
 // MarkdownToTypst 基于 Goldmark AST 语法树遍历将 Markdown 编译为原生 Typst AST 节点与字符串字面量
 func MarkdownToTypst(source []byte) string {
-	doc := goldmark.DefaultParser().Parse(text.NewReader(source))
+	protected, mathList := extractAndProtectMath(source)
+	doc := goldmark.DefaultParser().Parse(text.NewReader(protected))
 	var buf bytes.Buffer
 
 	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
@@ -194,7 +201,7 @@ func MarkdownToTypst(source []byte) string {
 
 		case *ast.Paragraph:
 			if entering {
-				if tryRenderMarkdownTable(node, source, &buf) {
+				if tryRenderMarkdownTable(node, protected, mathList, &buf) {
 					return ast.WalkSkipChildren, nil
 				}
 			} else {
@@ -221,13 +228,13 @@ func MarkdownToTypst(source []byte) string {
 			if entering {
 				info := ""
 				if node.Info != nil {
-					info = strings.TrimSpace(string(node.Info.Value(source)))
+					info = strings.TrimSpace(string(node.Info.Value(protected)))
 				}
 				var codeBuf bytes.Buffer
 				lines := node.Lines()
 				for i := 0; i < lines.Len(); i++ {
 					line := lines.At(i)
-					codeBuf.Write(line.Value(source))
+					codeBuf.Write(line.Value(protected))
 				}
 				codeText := strings.TrimRight(codeBuf.String(), "\r\n")
 				if info != "" {
@@ -244,7 +251,7 @@ func MarkdownToTypst(source []byte) string {
 				lines := node.Lines()
 				for i := 0; i < lines.Len(); i++ {
 					line := lines.At(i)
-					codeBuf.Write(line.Value(source))
+					codeBuf.Write(line.Value(protected))
 				}
 				codeText := strings.TrimRight(codeBuf.String(), "\r\n")
 				fmt.Fprintf(&buf, "#raw(block: true, %s)\n\n", typstQuote(codeText))
@@ -256,7 +263,7 @@ func MarkdownToTypst(source []byte) string {
 				var spanBuf bytes.Buffer
 				for c := node.FirstChild(); c != nil; c = c.NextSibling() {
 					if t, ok := c.(*ast.Text); ok {
-						spanBuf.Write(t.Segment.Value(source))
+						spanBuf.Write(t.Segment.Value(protected))
 					}
 				}
 				fmt.Fprintf(&buf, "#raw(block: false, %s)", typstQuote(spanBuf.String()))
@@ -300,7 +307,7 @@ func MarkdownToTypst(source []byte) string {
 				var altBuf bytes.Buffer
 				for c := node.FirstChild(); c != nil; c = c.NextSibling() {
 					if t, ok := c.(*ast.Text); ok {
-						altBuf.Write(t.Segment.Value(source))
+						altBuf.Write(t.Segment.Value(protected))
 					}
 				}
 				alt := strings.TrimSpace(altBuf.String())
@@ -321,16 +328,16 @@ func MarkdownToTypst(source []byte) string {
 
 		case *ast.AutoLink:
 			if entering {
-				url := string(node.URL(source))
-				label := string(node.Label(source))
+				url := string(node.URL(protected))
+				label := string(node.Label(protected))
 				fmt.Fprintf(&buf, "#link(%s)[#%s]", typstQuote(url), typstQuote(label))
 			}
 
 		case *ast.Text:
 			if entering {
-				val := string(node.Segment.Value(source))
+				val := string(node.Segment.Value(protected))
 				if val != "" {
-					renderTextOrMath(val, &buf)
+					renderTextOrMath(val, mathList, &buf)
 				}
 				if node.HardLineBreak() {
 					buf.WriteString(" \\\n")
@@ -343,7 +350,7 @@ func MarkdownToTypst(source []byte) string {
 			if entering {
 				val := string(node.Value)
 				if val != "" {
-					renderTextOrMath(val, &buf)
+					renderTextOrMath(val, mathList, &buf)
 				}
 			}
 		}
@@ -354,89 +361,93 @@ func MarkdownToTypst(source []byte) string {
 	return strings.TrimSpace(buf.String())
 }
 
-// renderTextOrMath 分离纯文本与 LaTeX 数学公式 ($...$ 及 $$...$$) 并分别渲染
-func renderTextOrMath(s string, buf *bytes.Buffer) {
-	tokens := parseMathAndText(s)
-	for _, tok := range tokens {
-		if !tok.IsMath {
-			if tok.Content != "" {
-				buf.WriteString("#" + typstQuote(tok.Content))
-			}
-			continue
-		}
-
-		typstMath := LaTeXToTypstMath(tok.Content)
-		if typstMath == "" {
-			continue
-		}
-
-		if tok.IsBlock {
-			buf.WriteString("\n$ " + typstMath + " $\n")
-		} else {
-			buf.WriteString(" $" + typstMath + "$ ")
-		}
-	}
-}
-
 type mathToken struct {
-	IsMath  bool
 	IsBlock bool
 	Content string
 }
 
-func parseMathAndText(s string) []mathToken {
-	var tokens []mathToken
-	n := len(s)
-	last := 0
+var mathPlaceholderRegex = regexp.MustCompile(`DAIDAITYPSTMATHPLACEHOLDERX(\d+)XX`)
+
+// extractAndProtectMath 在 Goldmark AST 解析前保护 LaTeX 数学公式，防止其内部的下划线、星号或感叹号被 Markdown 解释器打碎
+func extractAndProtectMath(src []byte) ([]byte, []mathToken) {
+	var mathList []mathToken
+	var out bytes.Buffer
+	out.Grow(len(src))
+
+	n := len(src)
 	i := 0
+	last := 0
 
 	for i < n {
-		// 块级公式 $$...$$
-		if i+1 < n && s[i] == '$' && s[i+1] == '$' {
-			if i > 0 && s[i-1] == '\\' {
+		// Fenced code block ``` or ~~~
+		if (i+2 < n && src[i] == '`' && src[i+1] == '`' && src[i+2] == '`') ||
+			(i+2 < n && src[i] == '~' && src[i+1] == '~' && src[i+2] == '~') {
+			fence := src[i : i+3]
+			end := bytes.Index(src[i+3:], fence)
+			if end != -1 {
+				i = i + 3 + end + 3
+				continue
+			}
+		}
+
+		// Inline code `
+		if src[i] == '`' {
+			end := bytes.IndexByte(src[i+1:], '`')
+			if end != -1 {
+				i = i + 1 + end + 1
+				continue
+			}
+		}
+
+		// Block math $$...$$
+		if i+1 < n && src[i] == '$' && src[i+1] == '$' {
+			if i > 0 && src[i-1] == '\\' {
 				i += 2
 				continue
 			}
-			end := strings.Index(s[i+2:], "$$")
+			end := bytes.Index(src[i+2:], []byte("$$"))
 			if end != -1 {
-				formula := s[i+2 : i+2+end]
-				if i > last {
-					tokens = append(tokens, mathToken{IsMath: false, Content: s[last:i]})
-				}
-				tokens = append(tokens, mathToken{IsMath: true, IsBlock: true, Content: formula})
+				out.Write(src[last:i])
+				idx := len(mathList)
+				mathList = append(mathList, mathToken{
+					IsBlock: true,
+					Content: string(src[i+2 : i+2+end]),
+				})
+				fmt.Fprintf(&out, "DAIDAITYPSTMATHPLACEHOLDERX%dXX", idx)
 				i = i + 2 + end + 2
 				last = i
 				continue
 			}
 		}
 
-		// 行内公式 $...$
-		if s[i] == '$' {
-			if i > 0 && s[i-1] == '\\' {
+		// Inline math $...$
+		if src[i] == '$' {
+			if i > 0 && src[i-1] == '\\' {
 				i++
 				continue
 			}
-			// 行内公式规则：后接不能紧跟空白或数字（排除诸如 $100 等货币价格写法）
-			if i+1 < n && !unicode.IsSpace(rune(s[i+1])) && (s[i+1] < '0' || s[i+1] > '9') {
+			// Inline math condition: not followed by space or digit (e.g. $100)
+			if i+1 < n && !unicode.IsSpace(rune(src[i+1])) && (src[i+1] < '0' || src[i+1] > '9') {
 				closeIdx := -1
 				for j := i + 1; j < n; j++ {
-					if s[j] == '$' && s[j-1] != '\\' {
-						// 闭合 $ 前不能紧贴空格
-						if !unicode.IsSpace(rune(s[j-1])) {
+					if src[j] == '$' && src[j-1] != '\\' {
+						if !unicode.IsSpace(rune(src[j-1])) {
 							closeIdx = j
 							break
 						}
 					}
-					if s[j] == '\n' {
+					if src[j] == '\n' {
 						break
 					}
 				}
 				if closeIdx != -1 {
-					formula := s[i+1 : closeIdx]
-					if i > last {
-						tokens = append(tokens, mathToken{IsMath: false, Content: s[last:i]})
-					}
-					tokens = append(tokens, mathToken{IsMath: true, IsBlock: false, Content: formula})
+					out.Write(src[last:i])
+					idx := len(mathList)
+					mathList = append(mathList, mathToken{
+						IsBlock: false,
+						Content: string(src[i+1 : closeIdx]),
+					})
+					fmt.Fprintf(&out, "DAIDAITYPSTMATHPLACEHOLDERX%dXX", idx)
 					i = closeIdx + 1
 					last = i
 					continue
@@ -447,8 +458,54 @@ func parseMathAndText(s string) []mathToken {
 		i++
 	}
 
-	if last < n {
-		tokens = append(tokens, mathToken{IsMath: false, Content: s[last:]})
+	out.Write(src[last:])
+	return out.Bytes(), mathList
+}
+
+// renderTextOrMath 将文本和 LaTeX 数学公式占位符分离并渲染为 Typst
+func renderTextOrMath(s string, mathList []mathToken, buf *bytes.Buffer) {
+	if s == "" {
+		return
 	}
-	return tokens
+	if len(mathList) == 0 || !strings.Contains(s, "DAIDAITYPSTMATHPLACEHOLDERX") {
+		buf.WriteString("#" + typstQuote(s))
+		return
+	}
+
+	matches := mathPlaceholderRegex.FindAllStringSubmatchIndex(s, -1)
+	if len(matches) == 0 {
+		buf.WriteString("#" + typstQuote(s))
+		return
+	}
+
+	lastIdx := 0
+	for _, m := range matches {
+		if m[0] > lastIdx {
+			textPart := s[lastIdx:m[0]]
+			if textPart != "" {
+				buf.WriteString("#" + typstQuote(textPart))
+			}
+		}
+		idStr := s[m[2]:m[3]]
+		id, err := strconv.Atoi(idStr)
+		if err == nil && id >= 0 && id < len(mathList) {
+			mToken := mathList[id]
+			typstMath := LaTeXToTypstMath(mToken.Content)
+			if typstMath != "" {
+				if mToken.IsBlock {
+					buf.WriteString("\n$ " + typstMath + " $\n")
+				} else {
+					buf.WriteString(" $" + typstMath + "$ ")
+				}
+			}
+		}
+		lastIdx = m[1]
+	}
+
+	if lastIdx < len(s) {
+		textPart := s[lastIdx:]
+		if textPart != "" {
+			buf.WriteString("#" + typstQuote(textPart))
+		}
+	}
 }
