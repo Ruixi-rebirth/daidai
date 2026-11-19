@@ -30,6 +30,7 @@ type Config struct {
 	AppID       string
 	Secret      string
 	OwnerOpenID string
+	BotName     string
 }
 
 const (
@@ -1032,6 +1033,13 @@ func (q *QQChannel) Name() string {
 	return "qq"
 }
 
+func (q *QQChannel) botName() string {
+	if q != nil && strings.TrimSpace(q.cfg.BotName) != "" {
+		return strings.TrimSpace(q.cfg.BotName)
+	}
+	return "呆呆"
+}
+
 // Ready reports whether the QQ gateway has completed READY or RESUMED.
 func (q *QQChannel) Ready() bool {
 	return q.wsReady.Load()
@@ -1736,7 +1744,7 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 			}
 			return true
 		}
-		botAddressed := botMentioned || quotedBot || (fullGroupEvent && !strings.HasPrefix(strings.TrimSpace(content), "/") && strings.Contains(content, "呆呆"))
+		botAddressed := botMentioned || quotedBot || (fullGroupEvent && !strings.HasPrefix(strings.TrimSpace(content), "/") && strings.Contains(content, q.botName()))
 		trimmedContent := strings.TrimSpace(content)
 		hasIncomingImages := len(images)+omittedImages > 0
 		hasIncomingFiles := len(files)+omittedFiles > 0

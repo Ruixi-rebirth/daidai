@@ -58,3 +58,25 @@ func TestBriefingDefaultsAndValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestBotNameHierarchy(t *testing.T) {
+	var nilCfg *Config
+	if nilCfg.GetBotName() != "呆呆" || nilCfg.QQBotName() != "呆呆" || nilCfg.TelegramBotName() != "呆呆" {
+		t.Fatal("nil config must return 呆呆")
+	}
+
+	cfg := &Config{}
+	if cfg.GetBotName() != "呆呆" || cfg.QQBotName() != "呆呆" || cfg.TelegramBotName() != "呆呆" {
+		t.Fatal("empty config must default to 呆呆")
+	}
+
+	cfg.Name = "大白"
+	if cfg.GetBotName() != "大白" || cfg.QQBotName() != "大白" || cfg.TelegramBotName() != "大白" {
+		t.Fatal("global name must propagate to platforms")
+	}
+
+	cfg.QQ.BotName = "Q宝"
+	if cfg.QQBotName() != "Q宝" || cfg.TelegramBotName() != "大白" {
+		t.Fatal("platform override must take precedence")
+	}
+}

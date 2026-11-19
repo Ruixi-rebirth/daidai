@@ -246,6 +246,7 @@ func run() int {
 		}
 	}
 	persona := entity.NewDefaultPersona()
+	persona.Name = cfg.GetBotName()
 
 	// 按配置挂载多沙箱工作者与工单调度中枢 (全局最大并发限制)
 	delegates := entity.NewDelegatesWithLimit(cfg.Agent.MaxConcurrent, agyWorker)
@@ -372,7 +373,11 @@ func run() int {
 
 	// 全双工通信管道 (实现 entity.Channel)
 	if cfg.Telegram.Enabled {
-		telegramChannel = telegram.New(telegram.Config{Token: cfg.Telegram.Token, OwnerUsername: cfg.Telegram.OwnerUsername}, database, cortex.RecordInbound, immune)
+		telegramChannel = telegram.New(telegram.Config{
+			Token:         cfg.Telegram.Token,
+			OwnerUsername: cfg.Telegram.OwnerUsername,
+			BotName:       cfg.TelegramBotName(),
+		}, database, cortex.RecordInbound, immune)
 		telegramChannel.Inbox = attachmentInbox
 		mediaSources.Register("telegram-file", telegramChannel.FetchFile)
 		channelRegistry.Register(telegramChannel)
@@ -383,6 +388,7 @@ func run() int {
 			AppID:       cfg.QQ.AppID,
 			Secret:      cfg.QQ.Secret,
 			OwnerOpenID: ownerOpenID,
+			BotName:     cfg.QQBotName(),
 		}, immune)
 		qqChannel.SetAttachmentInbox(attachmentInbox)
 		qqChannel.SetAccessRequestStore(database)

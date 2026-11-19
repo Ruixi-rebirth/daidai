@@ -13,10 +13,14 @@ import (
 )
 
 type Config struct {
+	Name    string `yaml:"name"`
+	BotName string `yaml:"bot_name"`
+
 	Telegram struct {
 		Enabled       bool   `yaml:"enabled"`
 		Token         string `yaml:"token"`
 		OwnerUsername string `yaml:"owner_username"`
+		BotName       string `yaml:"bot_name"`
 	} `yaml:"telegram"`
 	Server struct {
 		Port int `yaml:"port"`
@@ -28,6 +32,7 @@ type Config struct {
 		Secret        string   `yaml:"secret"`
 		OwnerOpenID   string   `yaml:"owner_openid"`
 		Collaborators []string `yaml:"collaborators"`
+		BotName       string   `yaml:"bot_name"`
 	} `yaml:"qq"`
 
 	LLM struct {
@@ -99,11 +104,46 @@ type OCIConfig struct {
 // DefaultConfig 返回未启用外部通道的默认配置。
 func DefaultConfig() *Config {
 	cfg := &Config{}
+	cfg.Name = "呆呆"
 	cfg.Server.Port = 8080
 	cfg.Agent.MaxConcurrent = 1
 	cfg.Agent.ExecutionTimeout = "30m"
 	cfg.Briefing = BriefingConfig{Enabled: true, Timezone: "Asia/Singapore", Time: "08:00"}
 	return cfg
+}
+
+// GetBotName 返回全局机器人名称，未配置时默认为 "呆呆"。
+func (c *Config) GetBotName() string {
+	if c == nil {
+		return "呆呆"
+	}
+	if n := strings.TrimSpace(c.Name); n != "" {
+		return n
+	}
+	if n := strings.TrimSpace(c.BotName); n != "" {
+		return n
+	}
+	return "呆呆"
+}
+
+// QQBotName 返回 QQ 平台机器人名称，未单独配置时回退到全局名称。
+func (c *Config) QQBotName() string {
+	if c != nil {
+		if n := strings.TrimSpace(c.QQ.BotName); n != "" {
+			return n
+		}
+	}
+	return c.GetBotName()
+}
+
+// TelegramBotName 返回 Telegram 平台机器人名称，未单独配置时回退到全局名称。
+func (c *Config) TelegramBotName() string {
+	if c != nil {
+		if n := strings.TrimSpace(c.Telegram.BotName); n != "" {
+			return n
+		}
+	}
+	return c.GetBotName()
 }
 
 // LoadConfig 从指定路径加载 yaml 配置
