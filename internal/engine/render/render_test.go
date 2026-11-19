@@ -54,6 +54,37 @@ func TestMarkdownToTypst_AST(t *testing.T) {
 	}
 }
 
+func TestMarkdownToTypst_TableInlineFormatting(t *testing.T) {
+	md := "| 阶段 | 说明 |\n| :--- | :---: |\n| **预训练** | 学习 `通用表示` 与 $E=mc^2$ |\n| **微调 (SFT)** | 遵循 [指令](https://example.com) |\n"
+	res := MarkdownToTypst([]byte(md))
+	if !strings.Contains(res, "#table(columns: 2") {
+		t.Fatalf("expected #table with 2 columns, got:\n%s", res)
+	}
+	if !strings.Contains(res, `#strong[#"预训练"]`) {
+		t.Fatalf("expected bold text compiled to #strong, got:\n%s", res)
+	}
+	if !strings.Contains(res, `#raw(block: false, "通用表示")`) {
+		t.Fatalf("expected inline code compiled to #raw, got:\n%s", res)
+	}
+	if !strings.Contains(res, `$E = m  c ^2$`) {
+		t.Fatalf("expected math compiled to Typst math, got:\n%s", res)
+	}
+	if !strings.Contains(res, `#link("https://example.com")[#"指令"]`) {
+		t.Fatalf("expected link compiled to #link, got:\n%s", res)
+	}
+	if strings.Contains(res, `#"**预训练**"`) {
+		t.Fatalf("asterisks leaked into typst string literal: %s", res)
+	}
+}
+
+func TestMarkdownToTypst_Strikethrough(t *testing.T) {
+	md := "这是 ~~已废弃内容~~ 文本"
+	res := MarkdownToTypst([]byte(md))
+	if !strings.Contains(res, `#strike[#"已废弃内容"]`) {
+		t.Fatalf("expected strikethrough compiled to #strike, got:\n%s", res)
+	}
+}
+
 func TestRenderCard_Compile(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

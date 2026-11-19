@@ -10,134 +10,18 @@ import (
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/extension"
+	extast "github.com/yuin/goldmark/extension/ast"
 	"github.com/yuin/goldmark/text"
 )
 
-func parseTableRow(line string) []string {
-	trimmed := strings.TrimSpace(line)
-	var cells []string
-	var cell strings.Builder
-	codeTicks := 0
-	lastWasSeparator := false
-
-	for i := 0; i < len(trimmed); {
-		if trimmed[i] == '`' {
-			end := i + 1
-			for end < len(trimmed) && trimmed[end] == '`' {
-				end++
-			}
-			tickCount := end - i
-			switch codeTicks {
-			case 0:
-				codeTicks = tickCount
-			case tickCount:
-				codeTicks = 0
-			}
-			cell.WriteString(trimmed[i:end])
-			i = end
-			lastWasSeparator = false
-			continue
-		}
-
-		if trimmed[i] == '\\' && codeTicks == 0 {
-			end := i + 1
-			for end < len(trimmed) && trimmed[end] == '\\' {
-				end++
-			}
-			backslashes := end - i
-			if end < len(trimmed) && trimmed[end] == '|' && backslashes%2 == 1 {
-				cell.WriteString(strings.Repeat("\\", backslashes/2))
-				cell.WriteByte('|')
-				i = end + 1
-				lastWasSeparator = false
-				continue
-			}
-			if end < len(trimmed) && trimmed[end] == '|' {
-				cell.WriteString(strings.Repeat("\\", backslashes/2))
-			} else {
-				cell.WriteString(trimmed[i:end])
-			}
-			i = end
-			lastWasSeparator = false
-			continue
-		}
-
-		if trimmed[i] == '|' && codeTicks == 0 {
-			// Ignore an optional leading border pipe while preserving empty inner cells.
-			if i != 0 || len(cells) != 0 || cell.Len() != 0 {
-				cells = append(cells, strings.TrimSpace(cell.String()))
-				cell.Reset()
-			}
-			i++
-			lastWasSeparator = true
-			continue
-		}
-
-		cell.WriteByte(trimmed[i])
-		lastWasSeparator = false
-		i++
-	}
-	if !lastWasSeparator {
-		cells = append(cells, strings.TrimSpace(cell.String()))
-	}
-	return cells
-}
-
-func isTableDelimiter(line string) bool {
-	trimmed := strings.TrimSpace(line)
-	if !strings.Contains(trimmed, "|") || !strings.Contains(trimmed, "-") {
-		return false
-	}
-	for _, r := range trimmed {
-		if r != '|' && r != '-' && r != ':' && !unicode.IsSpace(r) {
-			return false
-		}
-	}
-	return true
-}
-
-func tryRenderMarkdownTable(node *ast.Paragraph, source []byte, mathList []mathToken, buf *bytes.Buffer) bool {
-	lines := node.Lines()
-	if lines.Len() < 2 {
-		return false
-	}
-	rawLines := make([]string, 0, lines.Len())
-	for i := 0; i < lines.Len(); i++ {
-		seg := lines.At(i)
-		rawLines = append(rawLines, strings.TrimRight(string(seg.Value(source)), "\r\n"))
-	}
-	if !strings.Contains(rawLines[0], "|") || !isTableDelimiter(rawLines[1]) {
-		return false
-	}
-	headers := parseTableRow(rawLines[0])
-	cols := len(headers)
-	if cols == 0 {
-		return false
-	}
-	fmt.Fprintf(buf, "#table(columns: %d, stroke: 0.6pt + rgb(\"#d0d7de\"), inset: 8pt,\n", cols)
-	for _, h := range headers {
-		buf.WriteString("  table.cell(fill: rgb(\"#f6f8fa\"))[#strong[")
-		renderTextOrMath(h, mathList, buf)
-		buf.WriteString("]],\n")
-	}
-	for _, rowLine := range rawLines[2:] {
-		if !strings.Contains(rowLine, "|") {
-			continue
-		}
-		cells := parseTableRow(rowLine)
-		for i := 0; i < cols; i++ {
-			val := ""
-			if i < len(cells) {
-				val = cells[i]
-			}
-			buf.WriteString("  [")
-			renderTextOrMath(val, mathList, buf)
-			buf.WriteString("],\n")
-		}
-	}
-	buf.WriteString(")\n\n")
-	return true
-}
+var mdEngine = goldmark.New(
+	goldmark.WithExtensions(
+		extension.Table,
+		extension.Strikethrough,
+		extension.TaskList,
+	),
+)
 
 // typstQuote 将任意 UTF-8 文本编码为严格符合 Typst 词法规范的字符串字面量
 func typstQuote(s string) string {
@@ -184,7 +68,7 @@ func listIndentDepth(n ast.Node) int {
 // MarkdownToTypst 基于 Goldmark AST 语法树遍历将 Markdown 编译为原生 Typst AST 节点与字符串字面量
 func MarkdownToTypst(source []byte) string {
 	protected, mathList := extractAndProtectMath(source)
-	doc := goldmark.DefaultParser().Parse(text.NewReader(protected))
+	doc := mdEngine.Parser().Parse(text.NewReader(protected))
 	var buf bytes.Buffer
 
 	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
@@ -200,16 +84,74 @@ func MarkdownToTypst(source []byte) string {
 			}
 
 		case *ast.Paragraph:
-			if entering {
-				if tryRenderMarkdownTable(node, protected, mathList, &buf) {
-					return ast.WalkSkipChildren, nil
-				}
-			} else {
+			if !entering {
 				if _, inList := node.Parent().(*ast.ListItem); inList {
 					buf.WriteString("\n")
 				} else {
 					buf.WriteString("\n\n")
 				}
+			}
+
+		case *extast.Table:
+			if entering {
+				cols := len(node.Alignments)
+				if cols == 0 {
+					for c := node.FirstChild(); c != nil; c = c.NextSibling() {
+						if c.ChildCount() > cols {
+							cols = c.ChildCount()
+						}
+					}
+				}
+				if cols == 0 {
+					cols = 1
+				}
+				fmt.Fprintf(&buf, "#table(columns: %d, stroke: 0.6pt + rgb(\"#d0d7de\"), inset: 8pt,\n", cols)
+			} else {
+				buf.WriteString(")\n\n")
+			}
+
+		case *extast.TableHeader:
+			// 容器节点，直接遍历子单元格
+
+		case *extast.TableRow:
+			// 容器节点，直接遍历子单元格
+
+		case *extast.TableCell:
+			_, inHeader := node.Parent().(*extast.TableHeader)
+			if entering {
+				var attrs []string
+				if inHeader {
+					attrs = append(attrs, `fill: rgb("#f6f8fa")`)
+				}
+				switch node.Alignment {
+				case extast.AlignRight:
+					attrs = append(attrs, `align: right`)
+				case extast.AlignCenter:
+					attrs = append(attrs, `align: center`)
+				case extast.AlignLeft:
+					attrs = append(attrs, `align: left`)
+				}
+
+				if len(attrs) > 0 {
+					buf.WriteString(fmt.Sprintf("  table.cell(%s)[", strings.Join(attrs, ", ")))
+				} else {
+					buf.WriteString("  [")
+				}
+				if inHeader {
+					buf.WriteString("#strong[")
+				}
+			} else {
+				if inHeader {
+					buf.WriteString("]")
+				}
+				buf.WriteString("],\n")
+			}
+
+		case *extast.Strikethrough:
+			if entering {
+				buf.WriteString("#strike[")
+			} else {
+				buf.WriteString("]")
 			}
 
 		case *ast.TextBlock:
