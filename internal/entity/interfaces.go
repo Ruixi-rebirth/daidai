@@ -49,7 +49,7 @@ type Worker interface {
 
 // Memory 记忆与经验中枢接口 (零前缀规范)
 type Memory interface {
-	WorkingContext(ctx context.Context, event *SensoryEvent, limit int) []core.ChatMessage
+	WorkingContext(ctx context.Context, event *SensoryEvent, limit ...int) []core.ChatMessage
 	RecallEpisodic(ctx context.Context, event *SensoryEvent) string
 	Commit(ctx context.Context, event *SensoryEvent, replyText string)
 }

@@ -35,7 +35,6 @@ type HandsConfig struct {
 	Workspaces       *entity.WorkspaceManager
 	AttachmentInbox  *media.Inbox
 	Database         *db.Manager
-	EnableNixSearch  bool
 	OCIConfig        *config.OCIConfig
 	OCIClient        *OCIClient
 	CloudflareConfig *config.CloudflareConfig
@@ -74,9 +73,7 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 	if cfg.Workspaces != nil {
 		h.Register(NewWorkspaceTool(cfg.Workspaces, cfg.Immune, cfg.Delegates))
 	}
-	if cfg.EnableNixSearch {
-		h.Register(NewNixSearchTool())
-	}
+	h.Register(NewNixSearchTool())
 	if cfg.Router != nil {
 		h.Register(NewModelSwitchTool(cfg.Router, cfg.Immune))
 	}

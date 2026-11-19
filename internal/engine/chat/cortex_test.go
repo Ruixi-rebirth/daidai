@@ -55,7 +55,7 @@ func (m *mockLLMWithRenderTool) ChatWithTools(ctx context.Context, messages []co
 func TestCortex_ThinkWithQuoteMarkdown(t *testing.T) {
 	mockLLM := &mockLLMWithRenderTool{}
 	persona := entity.NewDefaultPersona()
-	hands := tool.NewHandsWithConfig(tool.HandsConfig{EnableNixSearch: true})
+	hands := tool.NewHandsWithConfig(tool.HandsConfig{})
 
 	cortex := NewCortex(CortexConfig{
 		LLM:     mockLLM,

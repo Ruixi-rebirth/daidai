@@ -11,9 +11,7 @@ import (
 )
 
 func TestHandsRegistry_BasicsAndDeterministicOrder(t *testing.T) {
-	reg := NewHandsWithConfig(HandsConfig{
-		EnableNixSearch: true,
-	})
+	reg := NewHandsWithConfig(HandsConfig{})
 
 	defs := reg.Definitions()
 	if len(defs) != 9 {

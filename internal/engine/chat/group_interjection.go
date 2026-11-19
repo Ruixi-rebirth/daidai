@@ -51,7 +51,7 @@ func (c *Cortex) thinkGroupInterjection(ctx context.Context, event *entity.Senso
 	chatter, dream := state.Available(time.Now())
 	var recent []core.ChatMessage
 	if c.memory != nil {
-		recent = c.memory.WorkingContext(ctx, event, min(c.workingLimit, 20))
+		recent = c.memory.WorkingContext(ctx, event, 20)
 	}
 	// Keep the recent end of the conversation without pulling episodic memory,
 	// user profiles, workspaces or machine runtime state into this read-only path.

@@ -348,7 +348,6 @@ func run() int {
 		Workspaces:       workspaceMgr,
 		AttachmentInbox:  attachmentInbox,
 		Database:         database,
-		EnableNixSearch:  cfg.Plugins.NixSearch.Enabled,
 		OCIConfig:        &cfg.OCI,
 		OCIClient:        ociClient,
 		CloudflareConfig: &cfg.Cloudflare,
@@ -367,7 +366,6 @@ func run() int {
 		Vision:           visEngine,
 		Workspaces:       workspaceMgr,
 		Inbox:            attachmentInbox,
-		WorkingLimit:     cfg.Memory.WorkingLimit,
 		GroupExpressions: groupExpressions,
 		Drafts:           database,
 	})

@@ -20,9 +20,10 @@ import (
 )
 
 const (
-	maxWorkingChars      = 12000
-	maxIdleGap           = 2 * time.Hour
-	maxBridgeAge         = 24 * time.Hour
+	maxWorkingChars          = 12000
+	maxIdleGap               = 2 * time.Hour
+	defaultWorkingCandidates = 200
+	maxBridgeAge             = 24 * time.Hour
 	maxBridgeActiveMsgs  = 4
 	defaultMaxFacts      = 40
 	maxPrevSessionMsgs   = 8
@@ -254,10 +255,17 @@ func (m *MemoryEngine) getDB() *db.Manager {
 }
 
 // WorkingContext 获取近期滑动窗口工作记忆 (实现 entity.Memory)
-func (m *MemoryEngine) WorkingContext(ctx context.Context, event *entity.SensoryEvent, limit int) []core.ChatMessage {
+// 以字符预算 (maxWorkingChars = 12000) 与时间连续性 (maxIdleGap = 2小时) 为核心动态截断，
+// 摆脱死板的消息条数束缚，保证长话题与碎片化短消息的上下文完整性。
+func (m *MemoryEngine) WorkingContext(ctx context.Context, event *entity.SensoryEvent, limits ...int) []core.ChatMessage {
 	dbMgr := m.getDB()
 	if dbMgr == nil || event == nil || event.Platform == "" {
 		return nil
+	}
+
+	limit := defaultWorkingCandidates
+	if len(limits) > 0 && limits[0] > 0 {
+		limit = limits[0]
 	}
 
 	chatType := "private"

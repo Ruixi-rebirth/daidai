@@ -34,13 +34,6 @@ agent:
       command: "agy"
       default_dir: "data/workspace/sandbox"
 
-plugins:
-  nixsearch:
-    enabled: true
-
-memory:
-  working_limit: 30
-
 briefing:
   enabled: true # 工具与调度可用；收件人需在搭档私聊自然语言订阅，默认无人订阅
   timezone: "Asia/Singapore"

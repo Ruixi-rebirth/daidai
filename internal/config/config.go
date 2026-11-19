@@ -47,16 +47,6 @@ type Config struct {
 		} `yaml:"embedding"`
 	} `yaml:"llm"`
 
-	Memory struct {
-		WorkingLimit int `yaml:"working_limit"`
-	} `yaml:"memory"`
-
-	Plugins struct {
-		NixSearch struct {
-			Enabled bool `yaml:"enabled"`
-		} `yaml:"nixsearch"`
-	} `yaml:"plugins"`
-
 	Agent struct {
 		MaxConcurrent    int    `yaml:"max_concurrent"`
 		ExecutionTimeout string `yaml:"execution_timeout"`
@@ -207,9 +197,6 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.Agent.MaxConcurrent == 0 {
 		cfg.Agent.MaxConcurrent = defaults.Agent.MaxConcurrent
-	}
-	if cfg.Memory.WorkingLimit < 0 {
-		return nil, fmt.Errorf("memory.working_limit cannot be negative")
 	}
 	if strings.TrimSpace(cfg.Agent.ExecutionTimeout) == "" {
 		cfg.Agent.ExecutionTimeout = defaults.Agent.ExecutionTimeout

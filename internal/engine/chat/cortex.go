@@ -231,7 +231,6 @@ type Cortex struct {
 	vision           *vision.Engine
 	workspaces       *entity.WorkspaceManager
 	inbox            *media.Inbox
-	workingLimit     int
 	groupExpressions *groupchat.Store
 	drafts           *db.Manager
 }
@@ -245,17 +244,12 @@ type CortexConfig struct {
 	Vision           *vision.Engine
 	Workspaces       *entity.WorkspaceManager
 	Inbox            *media.Inbox
-	WorkingLimit     int
 	GroupExpressions *groupchat.Store
 	Drafts           *db.Manager
 }
 
 // NewCortex 按配置实例化认知大脑
 func NewCortex(cfg CortexConfig) *Cortex {
-	limit := cfg.WorkingLimit
-	if limit <= 0 {
-		limit = 30
-	}
 	return &Cortex{
 		llm:              cfg.LLM,
 		persona:          cfg.Persona,
@@ -264,16 +258,8 @@ func NewCortex(cfg CortexConfig) *Cortex {
 		vision:           cfg.Vision,
 		workspaces:       cfg.Workspaces,
 		inbox:            cfg.Inbox,
-		workingLimit:     limit,
 		groupExpressions: cfg.GroupExpressions,
 		drafts:           cfg.Drafts,
-	}
-}
-
-// SetWorkingLimit 设置滑动工作记忆消息条数上限
-func (c *Cortex) SetWorkingLimit(limit int) {
-	if limit > 0 {
-		c.workingLimit = limit
 	}
 }
 
@@ -1064,13 +1050,9 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (out *en
 		})
 	}
 
-	// 注入近期工作记忆上下文 (默认 30 条，保证长话题与深度探讨不忘前文)
-	limit := c.workingLimit
-	if limit <= 0 {
-		limit = 30
-	}
+	// 注入近期工作记忆上下文 (以字符预算 12000 字与 2 小时闲置断档为主的动态滑动窗口)
 	if c.memory != nil {
-		messages = append(messages, c.memory.WorkingContext(ctx, event, limit)...)
+		messages = append(messages, c.memory.WorkingContext(ctx, event)...)
 	}
 
 	userContent := event.Content
