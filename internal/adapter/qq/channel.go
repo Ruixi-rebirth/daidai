@@ -2058,6 +2058,15 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 	if u == nil {
 		return nil
 	}
+	defer func() {
+		if sendErr == nil && u.IsGroup && u.ChannelID != "" {
+			target := u.TargetUserID
+			if target == "" && len(u.MentionUserIDs) > 0 {
+				target = u.MentionUserIDs[0]
+			}
+			q.recordGroupActiveSession(u.ChannelID, target)
+		}
+	}()
 	if u.Proactive {
 		defer func() {
 			observation := &sendObservation{at: time.Now(), success: sendErr == nil}

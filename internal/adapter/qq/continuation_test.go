@@ -256,3 +256,69 @@ func TestEvaluateGroupContinuation_QuoteBotExemption(t *testing.T) {
 	}
 	q.groupActiveSessionsMu.Unlock()
 }
+
+func TestEvaluateGroupContinuation_InterjectionAndPartnerPrivilege(t *testing.T) {
+	immune := entity.NewImmuneSystem("partner_openid")
+	q := &QQChannel{
+		groupActiveSessions: make(map[string]*groupActiveSession),
+		immune:              immune,
+	}
+
+	groupID := "test_group_interject"
+	targetUser := "user_a"
+	partnerUser := "partner_openid"
+	otherUser := "user_c"
+
+	// 呆呆插话给 user_a 建立会话
+	q.recordGroupActiveSession(groupID, targetUser)
+
+	// 场景 A：搭档（月）在干净消息流中直接接话 -> 享受特权，无需 @ 呆呆
+	handled := q.evaluateGroupContinuation(groupID, partnerUser, "哈哈你又插话，别逗他了", map[string]any{}, nil, false)
+	if !handled {
+		t.Fatalf("partner should trigger continuation in clean stream even after interjection to another user")
+	}
+
+	// 场景 B：重新插话建立会话，路人群友发言 1 条
+	q.recordGroupActiveSession(groupID, targetUser)
+	handled = q.evaluateGroupContinuation(groupID, otherUser, "今晚吃牛肉火锅", map[string]any{}, nil, false)
+	if handled {
+		t.Fatalf("other user should not trigger continuation")
+	}
+
+	// 此时有 1 条插话，搭档用追问词接话 -> 成功唤醒
+	handled = q.evaluateGroupContinuation(groupID, partnerUser, "那你觉得应该怎么做？", map[string]any{}, nil, false)
+	if !handled {
+		t.Fatalf("partner with follow up question should handle interleaved continuation")
+	}
+
+	q.groupActiveSessionsMu.Lock()
+	sess := q.groupActiveSessions[groupID]
+	if sess == nil || sess.speakerID != partnerUser || sess.remainingTurns != 1 {
+		t.Fatalf("expected session to transfer to partner with remainingTurns=1, got %v", sess)
+	}
+	q.groupActiveSessionsMu.Unlock()
+}
+
+func TestEvaluateGroupContinuation_OpenSessionFromChatter(t *testing.T) {
+	q := &QQChannel{
+		groupActiveSessions: make(map[string]*groupActiveSession),
+	}
+
+	groupID := "test_group_open"
+
+	// 呆呆主动发梦/闲聊 (speakerID为空，开放会话)
+	q.recordGroupActiveSession(groupID, "")
+
+	// 任何群友首个接话 -> 锁定会话并接续
+	handled := q.evaluateGroupContinuation(groupID, "user_first", "梦到啥离谱的了说说看", map[string]any{}, nil, false)
+	if !handled {
+		t.Fatalf("open session should accept first responsive user")
+	}
+
+	q.groupActiveSessionsMu.Lock()
+	sess := q.groupActiveSessions[groupID]
+	if sess == nil || sess.speakerID != "user_first" || sess.remainingTurns != 1 {
+		t.Fatalf("expected open session to lock to user_first with remainingTurns=1, got %v", sess)
+	}
+	q.groupActiveSessionsMu.Unlock()
+}

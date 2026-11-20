@@ -547,11 +547,12 @@ func (a *SuperAgent) transmitReplyTextDelivered(ctx context.Context, event *Sens
 		text = core.RedactSensitiveIPs(text)
 	}
 	delivered, err := a.transmitUtterance(ctx, &Utterance{
-		Platform:   event.Platform,
-		IsGroup:    event.IsGroup,
-		ChannelID:  event.ChannelID,
-		QuoteMsgID: event.RawMessageID,
-		Text:       text,
+		Platform:     event.Platform,
+		IsGroup:      event.IsGroup,
+		ChannelID:    event.ChannelID,
+		QuoteMsgID:   event.RawMessageID,
+		TargetUserID: event.SenderID,
+		Text:         text,
 	}, event.SenderID)
 	if err != nil {
 		slog.Warn("superagent: 文本回复发送失败", "platform", event.Platform, "channel", event.ChannelID, "err", err)
@@ -843,6 +844,7 @@ func (a *SuperAgent) transmitInfo(ctx context.Context, event *SensoryEvent, capt
 		IsGroup:      event.IsGroup,
 		ChannelID:    event.ChannelID,
 		QuoteMsgID:   event.RawMessageID,
+		TargetUserID: event.SenderID,
 		Text:         caption,
 		FallbackText: content,
 		CardData:     card,
@@ -890,6 +892,7 @@ func (a *SuperAgent) transmitInfoCard(ctx context.Context, event *SensoryEvent, 
 		IsGroup:      event.IsGroup,
 		ChannelID:    event.ChannelID,
 		QuoteMsgID:   event.RawMessageID,
+		TargetUserID: event.SenderID,
 		Text:         caption,
 		FallbackText: content,
 		CardData:     card,
@@ -1419,6 +1422,9 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			if event.GroupInterjection && event.StillValid != nil && !event.StillValid() {
 				a.commitObservedGroupMessage(event)
 				return
+			}
+			if utterance.TargetUserID == "" && event.SenderID != "" {
+				utterance.TargetUserID = event.SenderID
 			}
 			if event.Platform == "qq" && event.IsGroup && !event.GroupInterjection && len(utterance.MentionUserIDs) == 0 && event.SenderID != "" {
 				utterance.MentionUserIDs = []string{event.SenderID}

@@ -23,9 +23,9 @@ type groupActiveSession struct {
 	interleavedCount int       // 中间穿插的其它群友消息条数 (最多容忍 2 条)
 }
 
-// recordGroupActiveSession 显式唤醒或引用回复呆呆时，建立或重置会话
+// recordGroupActiveSession 显式唤醒、插话发声或引用回复呆呆时，建立或重置会话
 func (q *QQChannel) recordGroupActiveSession(groupID, speakerID string) {
-	if q == nil || groupID == "" || speakerID == "" {
+	if q == nil || groupID == "" {
 		return
 	}
 	q.groupActiveSessionsMu.Lock()
@@ -95,14 +95,21 @@ func (q *QQChannel) evaluateGroupContinuation(
 		return false
 	}
 
-	// 场景 1：其他人发言（非当前目标用户）
-	if userID != session.speakerID {
+	isPartner := q.immune != nil && q.immune.ResolveRole(userID) == entity.RolePartner
+
+	// 场景 1：其他人发言（非当前目标用户，且非搭档特权，且非开放会话）
+	if userID != session.speakerID && !isPartner && session.speakerID != "" {
 		session.interleavedCount++
 		// 其它群友插话超过阈值 (>=3 条)：判定群聊焦点已彻底转移，熔断会话
 		if session.interleavedCount > maxInterleavedMessages {
 			delete(q.groupActiveSessions, groupID)
 		}
 		return false
+	}
+
+	// 开放会话或搭档接入，将会话主体锁定/更新为当前发言用户
+	if session.speakerID == "" || isPartner {
+		session.speakerID = userID
 	}
 
 	// 场景 2：目标用户发言

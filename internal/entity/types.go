@@ -90,6 +90,7 @@ type Utterance struct {
 	IsGroup                 bool   // 是否为群聊会话
 	ChannelID               string // 纯净会话标识 (纯群号或纯私聊用户 ID)
 	QuoteMsgID              string
+	TargetUserID            string   // 目标用户 ID (群聊回复或插话的交互对象)
 	Proactive               bool     // 主动发送；平台可能限制适用场景或频率
 	GroupInterjection       bool     // 未 @ 群消息的有限插话；必须关联原群消息作为被动回复
 	MentionUserIDs          []string // QQ 群聊消息要点名的成员 OpenID；主动插话由模型决定是否填写
