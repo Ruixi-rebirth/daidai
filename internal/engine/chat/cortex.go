@@ -1115,7 +1115,11 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (out *en
 				speaker = "群成员"
 			}
 		}
-		userContent = fmt.Sprintf("[%s]: %s", speaker, userContent)
+		if !event.GroupInterjection {
+			userContent = fmt.Sprintf("[%s (正在对你说话)]: %s", speaker, userContent)
+		} else {
+			userContent = fmt.Sprintf("[%s]: %s", speaker, userContent)
+		}
 	}
 
 	if quotedContent != "" {
