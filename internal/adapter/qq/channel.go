@@ -12,6 +12,7 @@ import (
 	"mime"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1246,7 +1247,11 @@ func qqReferencedMessageElement(message map[string]any) map[string]any {
 	quoteCount := 0
 	for _, value := range elements {
 		element, _ := value.(map[string]any)
-		if element == nil || qqMessageElementType(element) != 103 {
+		if element == nil {
+			continue
+		}
+		mType := qqMessageElementType(element)
+		if mType != 103 && mType != 102 {
 			continue
 		}
 		quoteCount++
@@ -1267,11 +1272,74 @@ func qqQuoteElementCount(message map[string]any) int {
 	count := 0
 	for _, value := range elements {
 		element, _ := value.(map[string]any)
-		if element != nil && qqMessageElementType(element) == 103 {
-			count++
+		if element != nil {
+			mType := qqMessageElementType(element)
+			if mType == 103 || mType == 102 {
+				count++
+			}
 		}
 	}
 	return count
+}
+
+// extractQQChatHistoryText 从 QQ 官方 102 消息（聊天记录/合并转发）中递归提取多条对话文本与作者
+func extractQQChatHistoryText(elements []any) string {
+	if len(elements) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	idx := 1
+	for _, item := range elements {
+		elem, ok := item.(map[string]any)
+		if !ok || elem == nil {
+			continue
+		}
+		text, _ := elem["content"].(string)
+		text = strings.TrimSpace(text)
+		author := ""
+		if a, ok := elem["author"].(map[string]any); ok {
+			author, _ = a["username"].(string)
+		}
+		if author == "" {
+			author, _ = elem["name"].(string)
+		}
+		if author == "" {
+			author, _ = elem["sender_name"].(string)
+		}
+		author = strings.TrimSpace(author)
+
+		if text == "" {
+			if atts, ok := elem["attachments"].([]any); ok && len(atts) > 0 {
+				text = "[包含图片或文件附件]"
+			}
+		}
+
+		if sub, ok := elem["msg_elements"].([]any); ok && len(sub) > 0 {
+			subText := extractQQChatHistoryText(sub)
+			if subText != "" {
+				if text != "" {
+					text += "\n" + subText
+				} else {
+					text = subText
+				}
+			}
+		}
+		if text == "" && author == "" {
+			continue
+		}
+		if sb.Len() > 0 {
+			sb.WriteString("\n\n")
+		}
+		fmt.Fprintf(&sb, "=== 消息 %d ===\n", idx)
+		if text != "" {
+			fmt.Fprintf(&sb, "[消息内容] %s\n", text)
+		}
+		if author != "" {
+			fmt.Fprintf(&sb, "[发送者] %s", author)
+		}
+		idx++
+	}
+	return sb.String()
 }
 
 func qqQuotedMessageContext(element map[string]any, depth int) *entity.SensoryEvent {
@@ -1280,6 +1348,26 @@ func qqQuotedMessageContext(element map[string]any, depth int) *entity.SensoryEv
 	}
 	content, _ := element["content"].(string)
 	content = entity.SanitizeQuotedMessageContent(content)
+
+	if subElements, ok := element["msg_elements"].([]any); ok && len(subElements) > 0 {
+		historyText := extractQQChatHistoryText(subElements)
+		if historyText != "" {
+			title, _ := element["title"].(string)
+			title = strings.TrimSpace(title)
+			if title != "" && !strings.HasPrefix(title, "[") {
+				title = "[" + title + "]"
+			}
+			if title != "" {
+				historyText = title + "\n" + historyText
+			}
+			if content == "" || content == "[聊天记录]" || content == "[转发的聊天记录]" {
+				content = historyText
+			} else {
+				content = content + "\n\n" + historyText
+			}
+		}
+	}
+
 	authorName := ""
 	if author, ok := element["author"].(map[string]any); ok {
 		authorName, _ = author["username"].(string)
@@ -1414,7 +1502,6 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 		content        string
 		msgID          string
 		isGroup        bool
-		fullGroupEvent bool
 		botMentioned   bool
 		images         []*core.Attachment
 		omittedImages  int
@@ -1424,12 +1511,36 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 
 	msgID, _ = d["id"].(string)
 	rawContent, _ := d["content"].(string)
-	content = cleanQQContent(rawContent)
+	if qqMessageElementType(d) == 102 {
+		if subElements, ok := d["msg_elements"].([]any); ok && len(subElements) > 0 {
+			historyText := extractQQChatHistoryText(subElements)
+			if historyText != "" {
+				title, _ := d["title"].(string)
+				title = strings.TrimSpace(title)
+				if title != "" && !strings.HasPrefix(title, "[") {
+					title = "[" + title + "]"
+				}
+				if title != "" {
+					historyText = title + "\n" + historyText
+				}
+				if rawContent == "" || rawContent == "[聊天记录]" {
+					rawContent = historyText
+				} else {
+					rawContent = rawContent + "\n\n" + historyText
+				}
+			}
+		}
+	}
+	content = resolveQQMentions(rawContent, d)
 
 	switch eventType {
 	case "GROUP_AT_MESSAGE_CREATE": // 群聊中被 @ 的消息
 		isGroup = true
-		botMentioned = true
+		if mentions, ok := d["mentions"].([]any); ok && len(mentions) > 0 {
+			botMentioned = qqMessageMentionsBot(d)
+		} else {
+			botMentioned = true
+		}
 		convID, _ = d["group_openid"].(string)
 		if author, ok := d["author"].(map[string]any); ok {
 			userID, _ = author["member_openid"].(string)
@@ -1437,7 +1548,6 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 		}
 	case "GROUP_MESSAGE_CREATE": // 群聊全量消息；仅唤醒 @ 机器人的消息
 		isGroup = true
-		fullGroupEvent = true
 		botMentioned = qqMessageMentionsBot(d)
 		convID, _ = d["group_openid"].(string)
 		if author, ok := d["author"].(map[string]any); ok {
@@ -1738,7 +1848,7 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 			}
 			return true
 		}
-		botAddressed := botMentioned || quotedBot || (fullGroupEvent && !strings.HasPrefix(strings.TrimSpace(content), "/") && strings.Contains(content, config.BotName()))
+		botAddressed := botMentioned || quotedBot || (isGroup && !strings.HasPrefix(strings.TrimSpace(content), "/") && strings.Contains(content, config.BotName()))
 		trimmedContent := strings.TrimSpace(content)
 		hasIncomingImages := len(images)+omittedImages > 0
 		hasIncomingFiles := len(files)+omittedFiles > 0
@@ -1787,7 +1897,7 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 				return true
 			}
 		}
-		if fullGroupEvent && !botAddressed {
+		if isGroup && !botAddressed {
 			historyAttachmentNote := attachmentHistoryNote(currentImageCount, currentOmittedImages, currentFileCount, currentOmittedFiles)
 			if content == "" && historyAttachmentNote == "" {
 				if q.dedup != nil {
@@ -1837,7 +1947,7 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 			}
 			return accepted
 		}
-		if fullGroupEvent && botAddressed {
+		if isGroup && botAddressed {
 			q.cancelPendingGroupInterjection(convID)
 		}
 		if replyCtx != nil {
@@ -2397,18 +2507,85 @@ func (q *QQChannel) Stop(ctx context.Context) error {
 	return firstErr
 }
 
-// cleanQQContent 剥离 QQ 官方网关在群聊 @ 消息中注入的 <@!bot_id> 标签并清理首尾空白
-func cleanQQContent(s string) string {
-	for {
-		start := strings.Index(s, "<@")
-		if start == -1 {
-			break
-		}
-		end := strings.Index(s[start:], ">")
-		if end == -1 {
-			break
-		}
-		s = s[:start] + s[start+end+1:]
+var qqMentionTagRegex = regexp.MustCompile(`<@!?([^>]+)>`)
+
+// cleanWhitespace 规范化行内连续多余空白，保留换行
+func cleanWhitespace(s string) string {
+	var lines []string
+	for _, line := range strings.Split(s, "\n") {
+		fields := strings.Fields(line)
+		lines = append(lines, strings.Join(fields, " "))
 	}
-	return core.TruncateRunes(strings.TrimSpace(s), core.MaxUserMessageRunes, "\n[消息过长，后续内容已截断]")
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+// resolveQQMentions 将 QQ 消息中的 @ 标签精准解析：
+// 1. 若为机器人自身唤醒词（is_you == true），剥离该标签；
+// 2. 若为其他群成员，依据 mentions 列表替换为 @真实群昵称（避免被抹除导致句子主谓语缺失）；
+// 3. 规范化空白字符并截断超长内容。
+func resolveQQMentions(s string, eventData map[string]any) string {
+	if s == "" {
+		return ""
+	}
+	type mentionInfo struct {
+		isYou    bool
+		username string
+	}
+	mentionMap := make(map[string]mentionInfo)
+	if eventData != nil {
+		if rawMentions, ok := eventData["mentions"].([]any); ok {
+			for _, item := range rawMentions {
+				m, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				isYou, _ := m["is_you"].(bool)
+				name, _ := m["username"].(string)
+				name = strings.TrimSpace(name)
+				info := mentionInfo{isYou: isYou, username: name}
+				if id, ok := m["id"].(string); ok && id != "" {
+					mentionMap[strings.TrimSpace(id)] = info
+				}
+				if openid, ok := m["member_openid"].(string); ok && openid != "" {
+					mentionMap[strings.TrimSpace(openid)] = info
+				}
+				if userOpenid, ok := m["user_openid"].(string); ok && userOpenid != "" {
+					mentionMap[strings.TrimSpace(userOpenid)] = info
+				}
+			}
+		}
+	}
+
+	hasMentionsData := len(mentionMap) > 0
+
+	resolved := qqMentionTagRegex.ReplaceAllStringFunc(s, func(tag string) string {
+		match := qqMentionTagRegex.FindStringSubmatch(tag)
+		if len(match) < 2 {
+			return tag
+		}
+		targetID := strings.TrimSpace(match[1])
+		if info, found := mentionMap[targetID]; found {
+			if info.isYou {
+				return "" // 机器人自身唤醒词直接剥离
+			}
+			if info.username != "" {
+				return "@" + info.username + " "
+			}
+			return "@" + targetID + " "
+		}
+		// 如果没有 mentions 元数据（如旧单测或精简环境），保守剥离避免标签残留
+		if !hasMentionsData {
+			return ""
+		}
+		// 存在 mentions 列表但当前 ID 不在列表中，保留为 @ID 防止误抹除
+		return "@" + targetID + " "
+	})
+
+	cleaned := cleanWhitespace(resolved)
+	return core.TruncateRunes(cleaned, core.MaxUserMessageRunes, "\n[消息过长，后续内容已截断]")
+}
+
+// cleanQQContent 兼容旧调用的快捷入口
+func cleanQQContent(s string) string {
+	return resolveQQMentions(s, nil)
 }

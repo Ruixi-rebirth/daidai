@@ -306,6 +306,151 @@ func TestCleanQQContent_StripMentionTags(t *testing.T) {
 	}
 }
 
+func TestResolveQQMentions_PreservesMemberMentions(t *testing.T) {
+	eventData := map[string]any{
+		"mentions": []any{
+			map[string]any{
+				"id":       "69A563594EA1778013E5823ED2A5F5F7",
+				"username": "早睡早起的大老鼠",
+				"is_you":   false,
+			},
+		},
+	}
+	raw := "I thought <@!69A563594EA1778013E5823ED2A5F5F7> would be interested... 🙂🥲😢"
+	got := resolveQQMentions(raw, eventData)
+	expected := "I thought @早睡早起的大老鼠 would be interested... 🙂🥲😢"
+	if got != expected {
+		t.Fatalf("expected %q, got %q", expected, got)
+	}
+}
+
+func TestResolveQQMentions_StripsBotPreservesMember(t *testing.T) {
+	eventData := map[string]any{
+		"mentions": []any{
+			map[string]any{
+				"id":     "BOT_APP_ID",
+				"is_you": true,
+			},
+			map[string]any{
+				"id":       "USER_YUE",
+				"username": "月",
+				"is_you":   false,
+			},
+		},
+	}
+	raw := "<@!BOT_APP_ID> 我喜欢 <@!USER_YUE>"
+	got := resolveQQMentions(raw, eventData)
+	expected := "我喜欢 @月"
+	if got != expected {
+		t.Fatalf("expected %q, got %q", expected, got)
+	}
+}
+
+func TestQQChannel_GroupAtMessageToOtherMemberDoesNotWakeBot(t *testing.T) {
+	channel := &QQChannel{
+		dedup: newDedupCache(100),
+	}
+	events := startTestQQChannel(t, channel)
+
+	payload := map[string]any{
+		"t": "GROUP_AT_MESSAGE_CREATE",
+		"d": map[string]any{
+			"id":           "msg_at_other_member",
+			"content":      "I thought <@!69A563594EA1778013E5823ED2A5F5F7> would be interested...",
+			"group_openid": "GROUP_103",
+			"author": map[string]any{
+				"member_openid": "USER_VINKON",
+				"username":      "vinkon",
+			},
+			"mentions": []any{
+				map[string]any{
+					"id":       "69A563594EA1778013E5823ED2A5F5F7",
+					"username": "早睡早起的大老鼠",
+					"is_you":   false,
+				},
+			},
+		},
+	}
+
+	channel.dispatchEvent(context.Background(), payload)
+	capturedEvent := awaitTestQQEvent(t, events)
+	if capturedEvent == nil {
+		t.Fatalf("expected event to be captured")
+	}
+	if !capturedEvent.GroupMessageObserved {
+		t.Fatalf("expected GroupMessageObserved=true for unaddressed group message, got false")
+	}
+	expectedText := "I thought @早睡早起的大老鼠 would be interested..."
+	if capturedEvent.Content != expectedText {
+		t.Fatalf("expected content %q, got %q", expectedText, capturedEvent.Content)
+	}
+}
+
+func TestQQChannel_MergedForwardChatHistoryParsing(t *testing.T) {
+	channel := &QQChannel{
+		dedup: newDedupCache(100),
+	}
+	events := startTestQQChannel(t, channel)
+
+	payload := map[string]any{
+		"t": "GROUP_AT_MESSAGE_CREATE",
+		"d": map[string]any{
+			"id":           "msg_quote_forward_102",
+			"content":      "<@!BOT_123> 帮我分析下这段聊天",
+			"group_openid": "GROUP_FORWARD",
+			"message_type": 103,
+			"author": map[string]any{
+				"member_openid": "USER_YUE",
+				"username":      "月",
+			},
+			"mentions": []any{
+				map[string]any{
+					"id":     "BOT_123",
+					"is_you": true,
+				},
+			},
+			"msg_elements": []any{
+				map[string]any{
+					"message_type": 102,
+					"title":        "月和绪的聊天记录",
+					"msg_elements": []any{
+						map[string]any{
+							"content": "你觉得是施舍那我收回吧",
+							"author": map[string]any{
+								"username": "月",
+							},
+						},
+						map[string]any{
+							"content": "你的消费观没错",
+							"author": map[string]any{
+								"username": "月",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	channel.dispatchEvent(context.Background(), payload)
+	capturedEvent := awaitTestQQEvent(t, events)
+	if capturedEvent == nil {
+		t.Fatalf("expected event captured")
+	}
+	if capturedEvent.ReplyContext == nil {
+		t.Fatalf("expected ReplyContext resolved")
+	}
+	if !strings.Contains(capturedEvent.ReplyContext.Content, "[月和绪的聊天记录]") {
+		t.Fatalf("expected title in quoted content, got: %s", capturedEvent.ReplyContext.Content)
+	}
+	if !strings.Contains(capturedEvent.ReplyContext.Content, "你觉得是施舍那我收回吧") {
+		t.Fatalf("expected message 1 content in quote, got: %s", capturedEvent.ReplyContext.Content)
+	}
+	if !strings.Contains(capturedEvent.ReplyContext.Content, "[发送者] 月") {
+		t.Fatalf("expected author in quote, got: %s", capturedEvent.ReplyContext.Content)
+	}
+}
+
 func TestQQChannel_V2MsgElementsQuoteResolution(t *testing.T) {
 	channel := &QQChannel{
 		dedup: newDedupCache(100),
