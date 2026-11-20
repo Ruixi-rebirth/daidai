@@ -456,6 +456,8 @@ type QQChannel struct {
 	historyRecorder          func(context.Context, *entity.SensoryEvent) error
 	voiceModeMu              sync.RWMutex
 	voiceMode                string
+	groupActiveSessionsMu    sync.Mutex
+	groupActiveSessions      map[string]*groupActiveSession
 }
 
 // SetHistoryRecorder installs the callback used to persist each raw inbound
@@ -1009,9 +1011,10 @@ func NewQQChannel(cfg Config, immune *entity.ImmuneSystem) *QQChannel {
 	channel := &QQChannel{
 		cfg:      cfg,
 		client:   cli,
-		immune:   immune,
-		msgCache: cache,
-		dedup:    newDedupCache(2000),
+		immune:              immune,
+		msgCache:            cache,
+		dedup:               newDedupCache(2000),
+		groupActiveSessions: make(map[string]*groupActiveSession),
 	}
 	cli.SetOnMessageSent(func(msgID, refIndex, targetType, targetID string, metadata QuoteMetadata) {
 		// If QQ reflects an outbound group message through GROUP_MESSAGE_CREATE,
@@ -1849,6 +1852,11 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 			return true
 		}
 		botAddressed := botMentioned || quotedBot || (isGroup && !strings.HasPrefix(strings.TrimSpace(content), "/") && strings.Contains(content, config.BotName()))
+		if isGroup && !botAddressed {
+			if q.evaluateGroupContinuation(convID, userID, content, d, replyCtx, quotedBot) {
+				botAddressed = true
+			}
+		}
 		trimmedContent := strings.TrimSpace(content)
 		hasIncomingImages := len(images)+omittedImages > 0
 		hasIncomingFiles := len(files)+omittedFiles > 0
@@ -1949,6 +1957,9 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 		}
 		if isGroup && botAddressed {
 			q.cancelPendingGroupInterjection(convID)
+			if botMentioned || quotedBot || (config.BotName() != "" && strings.Contains(content, config.BotName())) {
+				q.recordGroupActiveSession(convID, userID)
+			}
 		}
 		if replyCtx != nil {
 			quotedFiles, omittedQuotedFiles := qqQuotedFiles(replyCtx)
@@ -2480,6 +2491,9 @@ func (q *QQChannel) Stop(ctx context.Context) error {
 		delete(q.pendingInterjections, groupID)
 	}
 	q.pendingInterjectionsMu.Unlock()
+	q.groupActiveSessionsMu.Lock()
+	q.groupActiveSessions = nil
+	q.groupActiveSessionsMu.Unlock()
 	if q.stopCancel != nil {
 		q.stopCancel()
 	}

@@ -1405,7 +1405,7 @@ func (a *SuperAgent) Process(ctx context.Context, event *SensoryEvent) {
 			}
 			return
 		}
-		if utterance == nil {
+		if utterance == nil || strings.TrimSpace(utterance.Text) == "[IGNORE]" {
 			if event.GroupMessageObserved {
 				a.commitObservedGroupMessage(event)
 			}
