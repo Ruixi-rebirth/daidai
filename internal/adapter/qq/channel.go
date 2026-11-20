@@ -1231,8 +1231,17 @@ func qqReferenceCacheKey(message map[string]any) string {
 		return index
 	}
 	if reference, ok := message["message_reference"].(map[string]any); ok {
-		index, _ := reference["message_id"].(string)
-		return index
+		if index, _ := reference["message_id"].(string); index != "" {
+			return index
+		}
+	}
+	if quote := qqReferencedMessageElement(message); quote != nil {
+		if index, _ := quote["msg_idx"].(string); index != "" {
+			return index
+		}
+		if id, _ := quote["id"].(string); id != "" {
+			return id
+		}
 	}
 	return ""
 }
@@ -1372,11 +1381,22 @@ func qqQuotedMessageContext(element map[string]any, depth int) *entity.SensoryEv
 	}
 
 	authorName := ""
+	authorID := ""
 	if author, ok := element["author"].(map[string]any); ok {
 		authorName, _ = author["username"].(string)
+		if id, ok := author["member_openid"].(string); ok && id != "" {
+			authorID = id
+		} else if id, ok := author["user_openid"].(string); ok && id != "" {
+			authorID = id
+		} else if id, ok := author["id"].(string); ok && id != "" {
+			authorID = id
+		}
 	}
 	sourceMessageID, _ := element["msg_idx"].(string)
-	quoted := &entity.SensoryEvent{Content: content, SenderName: strings.TrimSpace(authorName)}
+	if sourceMessageID == "" {
+		sourceMessageID, _ = element["id"].(string)
+	}
+	quoted := &entity.SensoryEvent{Content: content, SenderName: strings.TrimSpace(authorName), SenderID: authorID, RawMessageID: sourceMessageID}
 	quotedImageURLs := qqQuotedImageURLs(content)
 	for _, imageURL := range quotedImageURLs {
 		quoted.Images = append(quoted.Images, &core.Attachment{
@@ -1456,6 +1476,9 @@ func qqQuotedMessageContext(element map[string]any, depth int) *entity.SensoryEv
 		quoted.ContentKind = qqQuoteText
 	}
 	if content == "" && len(quoted.Images)+len(quoted.Files) == 0 {
+		if sourceMessageID != "" {
+			return quoted
+		}
 		return nil
 	}
 	if nested := qqReferencedMessageElement(element); nested != nil {
@@ -1735,7 +1758,7 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 				slog.Info("qq: 从 v2 msg_elements 中解析出引用消息", "msgID", msgID, "refMsgIdx", refIndex, "refContentBytes", len(replyCtx.Content), "hasNestedQuote", replyCtx.ReplyContext != nil)
 			}
 		}
-		if replyCtx == nil && qqMessageElementType(d) == 103 && qqQuoteElementCount(d) > 1 {
+		if replyCtx == nil && qqQuoteElementCount(d) > 1 {
 			replyCtx = &entity.SensoryEvent{Content: "[QQ 消息包含多个引用片段，但无法根据引用索引确定本轮目标]"}
 			slog.Warn("qq: 引用消息候选不唯一且缺少匹配索引", "msgID", msgID, "quoteCount", qqQuoteElementCount(d))
 		}
@@ -1771,6 +1794,9 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 				slog.Info("qq: 引用命中语义正文索引", "msgID", msgID, "hasRefIndex", strings.HasPrefix(cacheKey, "REFIDX_"), "contentKind", record.ContentKind, "textComplete", record.TextComplete, "refContentBytes", len(replyCtx.Content), "quotedBot", quotedBot)
 			}
 		}
+	}
+	if replyCtx != nil && replyCtx.Content == "" && len(replyCtx.Images)+len(replyCtx.Files) == 0 {
+		replyCtx.Content = "[引用消息（QQ 未提供可读取的正文）]"
 	}
 
 	if convID != "" && userID == "" {

@@ -499,6 +499,54 @@ func TestQQChannel_V2MsgElementsQuoteResolution(t *testing.T) {
 	}
 }
 
+func TestQQChannel_V2MsgElementsOutboundCardQuoteWithEmptyContent(t *testing.T) {
+	cache := newMsgCache(100, nil)
+	cardContent := "这是小米平板 6S Pro 12.4 跑 Guix System 的 fastfetch 截图"
+	refIdx := "REFIDX_OUTBOUND_123"
+	cache.SetTypedAsync(refIdx, cardContent, "group", "GROUP_CARD", qqQuoteTextCard, true)
+
+	channel := &QQChannel{
+		dedup:    newDedupCache(100),
+		msgCache: cache,
+	}
+
+	events := startTestQQChannel(t, channel)
+
+	// 模拟官方 v2 原生引用消息包：引用机器人卡片时 content 为空，但携带 msg_idx (REFIDX_...)
+	payload := map[string]any{
+		"t": "GROUP_AT_MESSAGE_CREATE",
+		"d": map[string]any{
+			"id":           "msg_v2_quote_card_inbound",
+			"content":      "我引用了什么？",
+			"group_openid": "GROUP_CARD",
+			"author": map[string]any{
+				"member_openid": "USER_CARD",
+				"username":      "地荒芜，缪弧",
+			},
+			"msg_elements": []any{
+				map[string]any{
+					"message_type": 103,
+					"content":      "",
+					"msg_idx":      refIdx,
+				},
+			},
+		},
+	}
+
+	channel.dispatchEvent(context.Background(), payload)
+
+	capturedEvent := awaitTestQQEvent(t, events)
+	if capturedEvent == nil {
+		t.Fatalf("expected sensory event to be captured")
+	}
+	if capturedEvent.ReplyContext == nil {
+		t.Fatalf("expected ReplyContext restored from msgCache via msg_idx")
+	}
+	if capturedEvent.ReplyContext.Content != cardContent {
+		t.Fatalf("expected ReplyContext content %q, got %q", cardContent, capturedEvent.ReplyContext.Content)
+	}
+}
+
 func TestQQSevenPageBriefingKeepsClickableIndexAndPartialState(t *testing.T) {
 	var pngData bytes.Buffer
 	if err := png.Encode(&pngData, image.NewRGBA(image.Rect(0, 0, 2, 2))); err != nil {

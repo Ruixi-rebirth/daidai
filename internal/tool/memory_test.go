@@ -105,3 +105,44 @@ func TestMemoryAddIsAdditiveAndRetainsRepeatedEvidence(t *testing.T) {
 		t.Fatalf("repeated evidence was lost: sources=%v error=%v", sources, err)
 	}
 }
+
+func TestMemoryProfileRejectsThirdPartyQuery(t *testing.T) {
+	tool := NewMemoryTool(nil)
+	thirdPartyQuestions := []string{
+		"你对主人的印象是什么？",
+		"你对群主的印象是什么？",
+		"谈谈你对管理员的印象",
+		"你对他的看法是什么",
+	}
+	for _, q := range thirdPartyQuestions {
+		ctx := entity.WithSensoryEvent(context.Background(), &entity.SensoryEvent{
+			Platform:  "qq",
+			ChannelID: "group1",
+			SenderID:  "user1",
+			IsGroup:   true,
+			Content:   q,
+		})
+		args, _ := json.Marshal(memoryArgs{Action: "profile"})
+		result, err := tool.Execute(ctx, args)
+		if err != nil {
+			t.Fatalf("unexpected error for %q: %v", q, err)
+		}
+		if !strings.Contains(result.Text, "profile 仅用于查看对提问者本人的印象") {
+			t.Fatalf("expected rejection for query %q, got: %s", q, result.Text)
+		}
+	}
+
+	selfQuery := "你对我有什么印象？"
+	ctx := entity.WithSensoryEvent(context.Background(), &entity.SensoryEvent{
+		Platform:  "qq",
+		ChannelID: "group1",
+		SenderID:  "user1",
+		IsGroup:   true,
+		Content:   selfQuery,
+	})
+	args, _ := json.Marshal(memoryArgs{Action: "profile"})
+	result, _ := tool.Execute(ctx, args)
+	if result != nil && strings.Contains(result.Text, "profile 仅用于查看对提问者本人的印象") {
+		t.Fatalf("self query %q was unexpectedly rejected", selfQuery)
+	}
+}

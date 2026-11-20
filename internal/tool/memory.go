@@ -48,7 +48,7 @@ func (t *MemoryTool) Name() string {
 }
 
 func (t *MemoryTool) Description() string {
-	return "管理当前用户可见的长期记忆：私聊维护个人全局事实，群聊维护当前用户在本群记录的个人事实，并可检索或列出当前可见事实。用户自然语言询问‘你对我有什么印象’‘你还记得我哪些事’‘说说我是什么样的人’时，调用 profile 生成带印象与已记事实的图文卡片；profile 和 list 记忆很多时支持按页浏览。用户询问某条记忆的依据或来源时，调用 source 查看支撑它的原始消息。翻页时‘下一页’‘上一页’使用 page_direction，‘看第 3 页’使用 page；只依据当前会话可见范围，绝不拿其他群或私聊的记忆补充。群聊事实不会与其他成员共享。"
+	return "管理当前用户可见的长期记忆：私聊维护个人全局事实，群聊维护当前用户在本群记录的个人事实，并可检索或列出当前可见事实。仅当用户以第一人称询问对提问者本人的印象或记忆（例如‘你对我有什么印象’‘你眼中的我’‘你还记得我哪些事’‘说说我是什么样的人’）时，调用 profile 生成当前提问者的印象与已记事实图文卡片；若用户询问对其他人、第三者、群主或‘主人’的看法或印象，绝不能调用 profile，应由模型以自然对话直接作答。profile 和 list 记忆很多时支持按页浏览。用户询问某条记忆的依据或来源时，调用 source 查看支撑它的原始消息。翻页时‘下一页’‘上一页’使用 page_direction，‘看第 3 页’使用 page；只依据当前会话可见范围，绝不拿其他群或私聊的记忆补充。群聊事实不会与其他成员共享。"
 }
 
 func (t *MemoryTool) Parameters() map[string]any {
@@ -58,7 +58,7 @@ func (t *MemoryTool) Parameters() map[string]any {
 			"action": map[string]any{
 				"type":        "string",
 				"enum":        []string{"add", "update", "delete", "search", "list", "profile", "source"},
-				"description": "操作类型：profile 生成当前用户的印象与记忆图卡；list 列出当前页记忆；source 分页查询指定记忆的原始消息依据，每页 5 条；profile、list 默认第 1 页、每页 12 条，下一页或上一页使用 page_direction，指定页码使用 page；search 检索当前范围的长期事实与历史对话，命中事实超过 12 条时每页展示 12 条，翻页沿用相同 query；add、update、delete 管理当前范围的长期事实",
+				"description": "操作类型：profile 仅用于生成当前提问者本人的印象与记忆图卡（严禁用于第三方或主人）；list 列出当前页记忆；source 分页查询指定记忆的原始消息依据，每页 5 条；profile、list 默认第 1 页、每页 12 条，下一页或上一页使用 page_direction，指定页码使用 page；search 检索当前范围的长期事实与历史对话，命中事实超过 12 条时每页展示 12 条，翻页沿用相同 query；add、update、delete 管理当前范围的长期事实",
 			},
 			"fact": map[string]any{
 				"type":        "string",
@@ -116,6 +116,9 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 
 	switch action {
 	case "PROFILE":
+		if isThirdPartyImpressionQuery(event.Content, args.Query) {
+			return &core.ToolResult{Text: "profile 仅用于查看对提问者本人的印象与记忆卡片；提问涉及第三方、群主或‘主人’等角色探讨时，请直接在对话中自然回答，不要调用 profile。"}, nil
+		}
 		return t.profile(ctx, event, args.Page, args.PageDirection)
 	case "SOURCE":
 		if args.FactID <= 0 {
@@ -648,4 +651,26 @@ func (t *MemoryTool) visibleFact(ctx context.Context, event *entity.SensoryEvent
 		}
 	}
 	return nil, fmt.Errorf("未找到当前会话可见的记忆事实 ID %d", factID)
+}
+
+func isThirdPartyImpressionQuery(content, query string) bool {
+	combined := strings.TrimSpace(content + " " + query)
+	if combined == "" {
+		return false
+	}
+	thirdPartyKeywords := []string{"主人", "群主", "管理员", "别人", "他", "她", "它们", "他们", "她们"}
+	hasThirdParty := false
+	for _, kw := range thirdPartyKeywords {
+		if strings.Contains(combined, kw) {
+			hasThirdParty = true
+			break
+		}
+	}
+	if !hasThirdParty {
+		return false
+	}
+	if strings.Contains(combined, "对我") || strings.Contains(combined, "我的印象") || strings.Contains(combined, "眼中的我") {
+		return false
+	}
+	return true
 }
