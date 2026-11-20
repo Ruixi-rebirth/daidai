@@ -95,10 +95,8 @@ func (q *QQChannel) evaluateGroupContinuation(
 		return false
 	}
 
-	isPartner := q.immune != nil && q.immune.ResolveRole(userID) == entity.RolePartner
-
-	// 场景 1：其他人发言（非当前目标用户，且非搭档特权，且非开放会话）
-	if userID != session.speakerID && !isPartner && session.speakerID != "" {
+	// 场景 1：其他人发言（非当前目标用户，且非开放会话）
+	if userID != session.speakerID && session.speakerID != "" {
 		session.interleavedCount++
 		// 其它群友插话超过阈值 (>=3 条)：判定群聊焦点已彻底转移，熔断会话
 		if session.interleavedCount > maxInterleavedMessages {
@@ -107,8 +105,8 @@ func (q *QQChannel) evaluateGroupContinuation(
 		return false
 	}
 
-	// 开放会话或搭档接入，将会话主体锁定/更新为当前发言用户
-	if session.speakerID == "" || isPartner {
+	// 若之前是开放会话（如主动闲聊/发梦），首个接话用户锁定为会话主体
+	if session.speakerID == "" {
 		session.speakerID = userID
 	}
 

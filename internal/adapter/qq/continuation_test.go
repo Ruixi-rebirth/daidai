@@ -257,44 +257,34 @@ func TestEvaluateGroupContinuation_QuoteBotExemption(t *testing.T) {
 	q.groupActiveSessionsMu.Unlock()
 }
 
-func TestEvaluateGroupContinuation_InterjectionAndPartnerPrivilege(t *testing.T) {
-	immune := entity.NewImmuneSystem("partner_openid")
+func TestEvaluateGroupContinuation_InterjectionTargetUser(t *testing.T) {
 	q := &QQChannel{
 		groupActiveSessions: make(map[string]*groupActiveSession),
-		immune:              immune,
 	}
 
 	groupID := "test_group_interject"
 	targetUser := "user_a"
-	partnerUser := "partner_openid"
 	otherUser := "user_c"
 
 	// 呆呆插话给 user_a 建立会话
 	q.recordGroupActiveSession(groupID, targetUser)
 
-	// 场景 A：搭档（月）在干净消息流中直接接话 -> 享受特权，无需 @ 呆呆
-	handled := q.evaluateGroupContinuation(groupID, partnerUser, "哈哈你又插话，别逗他了", map[string]any{}, nil, false)
-	if !handled {
-		t.Fatalf("partner should trigger continuation in clean stream even after interjection to another user")
-	}
-
-	// 场景 B：重新插话建立会话，路人群友发言 1 条
-	q.recordGroupActiveSession(groupID, targetUser)
-	handled = q.evaluateGroupContinuation(groupID, otherUser, "今晚吃牛肉火锅", map[string]any{}, nil, false)
+	// 其他人发言（即使是无 @ 接话）-> 不会抢夺会话，计入穿插
+	handled := q.evaluateGroupContinuation(groupID, otherUser, "今晚吃牛肉火锅", map[string]any{}, nil, false)
 	if handled {
-		t.Fatalf("other user should not trigger continuation")
+		t.Fatalf("other user should not trigger continuation without @")
 	}
 
-	// 此时有 1 条插话，搭档用追问词接话 -> 成功唤醒
-	handled = q.evaluateGroupContinuation(groupID, partnerUser, "那你觉得应该怎么做？", map[string]any{}, nil, false)
+	// 目标用户 (user_a) 在插话 1 条后追问 -> 成功接续
+	handled = q.evaluateGroupContinuation(groupID, targetUser, "那我该买哪个牌子好呢？", map[string]any{}, nil, false)
 	if !handled {
-		t.Fatalf("partner with follow up question should handle interleaved continuation")
+		t.Fatalf("target user with follow-up should continue conversation")
 	}
 
 	q.groupActiveSessionsMu.Lock()
 	sess := q.groupActiveSessions[groupID]
-	if sess == nil || sess.speakerID != partnerUser || sess.remainingTurns != 1 {
-		t.Fatalf("expected session to transfer to partner with remainingTurns=1, got %v", sess)
+	if sess == nil || sess.speakerID != targetUser || sess.remainingTurns != 1 {
+		t.Fatalf("expected session remainingTurns=1 for target user, got %v", sess)
 	}
 	q.groupActiveSessionsMu.Unlock()
 }
