@@ -192,33 +192,45 @@ func TestEvaluateGroupContinuation_NegativeChecksBreakSession(t *testing.T) {
 	q.groupActiveSessionsMu.Unlock()
 }
 
-func TestEvaluateGroupContinuation_FarewellTerminatesSession(t *testing.T) {
+func TestEvaluateGroupContinuation_TurnsExhaustion(t *testing.T) {
 	q := &QQChannel{
 		groupActiveSessions: make(map[string]*groupActiveSession),
 	}
 
-	groupID := "test_group_farewell"
+	groupID := "test_group_turns"
 	speakerID := "user_a"
 
 	q.recordGroupActiveSession(groupID, speakerID)
 
-	// 用户在第 1 轮就表达收尾感谢
+	// 第 1 轮发言：无论用词如何，均正常接续并扣减轮次，不靠生硬死词表误杀
 	handled := q.evaluateGroupContinuation(groupID, speakerID, "好的，多谢啦！", map[string]any{}, nil, false)
 	if !handled {
-		t.Fatalf("farewell should be handled to reply politeness")
+		t.Fatalf("first turn follow-up should be handled")
 	}
 
-	// 但 Session 应立即被清理，防止后续自作多情
 	q.groupActiveSessionsMu.Lock()
-	if q.groupActiveSessions[groupID] != nil {
-		t.Fatalf("expected session to be cleaned up immediately on farewell")
+	sess := q.groupActiveSessions[groupID]
+	if sess == nil || sess.remainingTurns != 1 {
+		t.Fatalf("expected session remainingTurns=1, got %v", sess)
 	}
 	q.groupActiveSessionsMu.Unlock()
 
-	// 紧接着再发言不再接话
+	// 第 2 轮发言：正常接续，轮次耗尽后会话自然销毁
+	handled = q.evaluateGroupContinuation(groupID, speakerID, "对了我还想问个细节", map[string]any{}, nil, false)
+	if !handled {
+		t.Fatalf("second turn follow-up should be handled")
+	}
+
+	q.groupActiveSessionsMu.Lock()
+	if q.groupActiveSessions[groupID] != nil {
+		t.Fatalf("expected session to be cleaned up after exhausting turns")
+	}
+	q.groupActiveSessionsMu.Unlock()
+
+	// 轮次耗尽后，第 3 轮无 @ 发言不再接话
 	handled = q.evaluateGroupContinuation(groupID, speakerID, "随便说一句", map[string]any{}, nil, false)
 	if handled {
-		t.Fatalf("should not handle message after farewell")
+		t.Fatalf("should not handle message after turns exhausted")
 	}
 }
 

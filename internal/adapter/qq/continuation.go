@@ -151,20 +151,14 @@ func (q *QQChannel) evaluateGroupContinuation(
 		return true
 	}
 
-	// 【第二层：时序拓扑与语义特征判定】
+	// 【第二层：时序拓扑与追问判定】
 	if trimmed == "" || isPurePunctuationNoise(trimmed) {
 		return false
 	}
 
-	isFarewell := isFarewellOrWrapUp(trimmed)
-
 	// 场景 2A：中间没有任何人插话 (clean stream)
+	// 目标用户的正常连续输入，正常扣减轮次并刷新超时时间
 	if session.interleavedCount == 0 {
-		if isFarewell {
-			// 用户表达感谢或告别，回复本轮收尾后立即销毁会话，防止后续误接话
-			delete(q.groupActiveSessions, groupID)
-			return true
-		}
 		session.remainingTurns--
 		session.expiresAt = now.Add(defaultContinuationTTL)
 		if session.remainingTurns <= 0 {
@@ -174,17 +168,7 @@ func (q *QQChannel) evaluateGroupContinuation(
 	}
 
 	// 场景 2B：中间有 1~2 条插话 (interleaved stream)
-	// 用户转向称呼别人（如“老哥，xxx”、“群主，xxx”）
-	if isAddressingSomeoneElse(trimmed) {
-		delete(q.groupActiveSessions, groupID)
-		return false
-	}
-
-	if isFarewell {
-		delete(q.groupActiveSessions, groupID)
-		return true
-	}
-
+	// 只有明确具备追问特征（如包含问号、追问连词、疑问词或反馈）才接续，避免将转移话题后的无目标发言误当成回复
 	if isFollowUpIndicator(trimmed) {
 		session.remainingTurns--
 		session.expiresAt = now.Add(defaultContinuationTTL)
@@ -211,40 +195,6 @@ func isPurePunctuationNoise(s string) bool {
 		}
 	}
 	return true
-}
-
-// isFarewellOrWrapUp 判断是否为告别、感谢或话题完结收尾短语
-func isFarewellOrWrapUp(s string) bool {
-	lower := strings.ToLower(strings.TrimSpace(s))
-	clean := strings.TrimFunc(lower, func(r rune) bool {
-		return unicode.IsPunct(r) || unicode.IsSymbol(r) || unicode.IsSpace(r)
-	})
-
-	clean = strings.TrimSuffix(clean, "呆呆")
-	clean = strings.TrimSuffix(clean, "啦")
-	clean = strings.TrimSuffix(clean, "呀")
-	clean = strings.TrimSuffix(clean, "哈")
-	clean = strings.TrimSuffix(clean, "吧")
-	clean = strings.TrimSuffix(clean, "哦")
-	clean = strings.TrimSuffix(clean, "了")
-	clean = strings.TrimSpace(clean)
-
-	switch clean {
-	case "好的", "好嘞", "好哦", "好", "好的吧", "行", "行的", "成", "ok", "ojbk", "okay",
-		"谢谢", "多谢", "感谢", "谢", "thx", "thanks", "3q",
-		"收到", "明白", "懂", "了解", "清楚",
-		"拜拜", "88", "886", "溜", "去忙", "晚安":
-		return true
-	}
-
-	// 允许复合简短表达，如“好的谢谢”、“收到感谢”
-	runes := []rune(clean)
-	if len(runes) <= 8 {
-		if strings.Contains(clean, "谢谢") || strings.Contains(clean, "多谢") || strings.Contains(clean, "感谢") || strings.Contains(clean, "拜拜") {
-			return true
-		}
-	}
-	return false
 }
 
 // isBotWakeNickname 判断文本是否提及机器人的常用称谓/昵称
@@ -297,18 +247,5 @@ func isFollowUpIndicator(s string) bool {
 		}
 	}
 
-	return false
-}
-
-// isAddressingSomeoneElse 判断是否在句首明显称呼其他群友
-func isAddressingSomeoneElse(s string) bool {
-	salutations := []string{
-		"老哥", "兄弟", "师傅", "大佬", "群主", "管理",
-	}
-	for _, sal := range salutations {
-		if strings.HasPrefix(s, sal) {
-			return true
-		}
-	}
 	return false
 }
