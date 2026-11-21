@@ -23,6 +23,9 @@ func CommandMenu(platform string) []CommandMenuEntry {
 			if len(fields) == 0 {
 				continue
 			}
+			if platform == "telegram" && !strings.HasPrefix(fields[0], "/") {
+				continue
+			}
 			name := strings.TrimPrefix(fields[0], "/")
 			if seen[name] {
 				continue
