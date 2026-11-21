@@ -60,8 +60,9 @@ func TestQQGroupMemoryImageSharesMessageWithMention(t *testing.T) {
 	channel := &QQChannel{client: client}
 	err := channel.Transmit(context.Background(), &entity.Utterance{
 		ChannelID: "group", IsGroup: true, QuoteMsgID: "question",
-		Images: [][]byte{pngData.Bytes()}, ImageSources: []string{"记忆画像正文"},
-		FallbackText: "记忆画像正文", MentionUserIDs: []string{"member"},
+		Images: [][]byte{nil, pngData.Bytes()}, ImageSources: []string{"已丢弃的图片正文", "记忆画像正文"},
+		InlineNonTextImageCount: 1,
+		FallbackText:            "记忆画像正文", MentionUserIDs: []string{"member"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -71,6 +72,13 @@ func TestQQGroupMemoryImageSharesMessageWithMention(t *testing.T) {
 	}
 	if metadata.Text != "记忆画像正文" || metadata.Kind != qqQuoteTextCard {
 		t.Fatalf("quote source corrupted: %+v", metadata)
+	}
+	err = channel.Transmit(context.Background(), &entity.Utterance{
+		ChannelID: "group", IsGroup: true, QuoteMsgID: "image-question",
+		Images: [][]byte{pngData.Bytes()}, MentionUserIDs: []string{"member"},
+	})
+	if err != nil || metadata.Text != "" || metadata.TextComplete {
+		t.Fatalf("image-only message stored delivery markup as its source: %+v, %v", metadata, err)
 	}
 }
 
@@ -499,6 +507,50 @@ func TestQQChannel_V2MsgElementsQuoteResolution(t *testing.T) {
 	}
 }
 
+func TestQQQuotedFileKeepsOwningMessageAndMixedContentKind(t *testing.T) {
+	quote := map[string]any{
+		"message_type": 103,
+		"msg_idx":      "quoted-message",
+		"content":      "请看这份说明",
+		"message_scene": map[string]any{
+			"ext": []any{"ref_msg_idx=previous-message"},
+		},
+		"attachments": []any{map[string]any{
+			"url":          "https://example.test/spec.pdf",
+			"filename":     "spec.pdf",
+			"content_type": "application/pdf",
+		}},
+	}
+
+	parsed := qqQuotedMessageContext(quote, 0)
+	if parsed == nil || len(parsed.Files) != 1 {
+		t.Fatalf("expected quoted file to be retained: %+v", parsed)
+	}
+	if parsed.Files[0].SourceMessageID != "quoted-message" {
+		t.Fatalf("file source should identify its owning quote, got %q", parsed.Files[0].SourceMessageID)
+	}
+	if parsed.ContentKind != qqQuoteMixed {
+		t.Fatalf("text with a file should be classified as mixed, got %q", parsed.ContentKind)
+	}
+}
+
+func TestQQQuotedUnavailableImageKeepsImageContentKind(t *testing.T) {
+	parsed := qqQuotedMessageContext(map[string]any{
+		"message_type": 103,
+		"msg_idx":      "quoted-image",
+		"attachments": []any{map[string]any{
+			"filename":     "photo.png",
+			"content_type": "image/png",
+		}},
+	}, 0)
+	if parsed == nil || parsed.OmittedImages != 1 {
+		t.Fatalf("expected unavailable image to be recorded: %+v", parsed)
+	}
+	if parsed.ContentKind != qqQuoteImage {
+		t.Fatalf("unavailable image should retain image content kind, got %q", parsed.ContentKind)
+	}
+}
+
 func TestQQChannel_V2MsgElementsOutboundCardQuoteWithEmptyContent(t *testing.T) {
 	cache := newMsgCache(100, nil)
 	cardContent := "这是小米平板 6S Pro 12.4 跑 Guix System 的 fastfetch 截图"
@@ -655,5 +707,41 @@ func TestQQUsesPerPageSourcesForQuotesAndPartialDelivery(t *testing.T) {
 	}
 	if len(metadata) == 0 || metadata[0].Text != "第一页原文" || metadata[0].Kind != qqQuoteTextCard {
 		t.Fatalf("wrong quote source: %+v", metadata)
+	}
+}
+
+func TestQQPassiveReplyNoticeFitsWithoutChangingDeliveredText(t *testing.T) {
+	client := NewClient("test", "test")
+	var sent string
+	var quote QuoteMetadata
+	client.SetOnMessageSent(func(_, _, _, _ string, metadata QuoteMetadata) { quote = metadata })
+	client.httpClient.Transport = qqTestTransport(func(req *http.Request) (*http.Response, error) {
+		var payload struct{ Markdown struct{ Content string } }
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		sent = payload.Markdown.Content
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"id":"sent"}`))}, nil
+	})
+	channel := &QQChannel{client: client}
+	limit := maxQQPassiveReplies(false)
+	budget, reserved, _, err := channel.reservePassiveReplyBudget("incoming", limit-1, limit, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range reserved {
+		channel.commitPassiveReplyAttempt(budget)
+	}
+	first := strings.Repeat("字", 1196)
+	err = channel.Transmit(context.Background(), &entity.Utterance{ChannelID: "recipient", QuoteMsgID: "incoming", Text: first + "\n尾巴很长"})
+	var partial *entity.PartialDeliveryError
+	if !errors.As(err, &partial) || sent != first || partial.DeliveredText != first || partial.UndeliveredText != "尾巴很长" {
+		t.Fatalf("unexpected partial reply: sent=%d runes, err=%v", len([]rune(sent)), err)
+	}
+	err = channel.Transmit(context.Background(), &entity.Utterance{
+		ChannelID: "recipient", QuoteMsgID: "next", Text: "本页", DraftID: "draft-1", HasMoreText: true,
+	})
+	if err != nil || strings.Count(sent, "/continue draft-1") != 1 || quote.Text != "本页" {
+		t.Fatalf("paged reply did not carry one continuation hint: %q, %v", sent, err)
 	}
 }

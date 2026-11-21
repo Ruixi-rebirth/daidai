@@ -53,19 +53,6 @@ func (q *QQChannel) recordGroupActiveSession(groupID, speakerID string) {
 	}
 }
 
-// clearGroupActiveSession 手动注销群聊活跃会话
-func (q *QQChannel) clearGroupActiveSession(groupID string) {
-	if q == nil || groupID == "" {
-		return
-	}
-	q.groupActiveSessionsMu.Lock()
-	defer q.groupActiveSessionsMu.Unlock()
-
-	if q.groupActiveSessions != nil {
-		delete(q.groupActiveSessions, groupID)
-	}
-}
-
 // evaluateGroupContinuation 评估群聊中未带 @ 的消息是否为针对呆呆的免@续接追问
 func (q *QQChannel) evaluateGroupContinuation(
 	groupID, userID, content string,

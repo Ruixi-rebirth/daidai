@@ -19,7 +19,7 @@ func NewGroupExpressionTool(store *groupchat.Store) *GroupExpressionTool {
 
 func (*GroupExpressionTool) Name() string { return "manage_group_expressions" }
 func (*GroupExpressionTool) Description() string {
-	return fmt.Sprintf("仅核心搭档在当前QQ群或TG群/话题内管理%s的碎碎念和做梦。两项默认关闭、独立开关；用户明确说本群开启/关闭碎碎念或做梦时调用set，仅改提到的字段；说两项都开启或关闭时同时传两个字段。status查看本群状态。不支持私聊或指定其他群。碎碎念是结合近期话题的短感想，做梦是带想象语境的小故事；不会立即触发发言，也没有固定时刻广播。", config.BotName())
+	return fmt.Sprintf("管理%s的碎碎念和做梦开关。两项默认关闭、独立开关；用户明确说本群开启/关闭碎碎念或做梦时调用set，仅改提到的字段；说两项都开启或关闭时同时传两个字段。status查看本群状态。碎碎念是结合近期话题的短感想，做梦是带想象语境的小故事；不会立即触发发言，也没有固定时刻广播。", config.BotName())
 }
 func (*GroupExpressionTool) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
@@ -30,7 +30,7 @@ func (*GroupExpressionTool) Parameters() map[string]any {
 }
 func (t *GroupExpressionTool) Execute(ctx context.Context, raw json.RawMessage) (*core.ToolResult, error) {
 	event := entity.SensoryEventFromContext(ctx)
-	if event == nil || !event.IsGroup || event.Role != entity.RolePartner || event.ChannelID == "" {
+	if !entity.ToolAllowedInConversation(t.Name(), event) {
 		return &core.ToolResult{Text: "碎碎念和做梦仅由核心搭档在当前群里管理。"}, nil
 	}
 	var args struct {

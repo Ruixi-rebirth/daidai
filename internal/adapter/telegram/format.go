@@ -26,6 +26,25 @@ type formattedText struct {
 	Text     string
 	Entities []textEntity
 }
+
+// continuationText retains link destinations when a formatted page is stored
+// as ordinary text for quoting or a later send.
+func (value formattedText) continuationText() string {
+	var links []string
+	seen := make(map[string]bool)
+	for _, element := range value.Entities {
+		if element.Type != "text_link" || element.URL == "" || seen[element.URL] || strings.Contains(value.Text, element.URL) {
+			continue
+		}
+		seen[element.URL] = true
+		links = append(links, "<"+element.URL+">")
+	}
+	if len(links) == 0 {
+		return value.Text
+	}
+	return value.Text + "\n\n" + strings.Join(links, "\n")
+}
+
 type textFormatter struct {
 	strings.Builder
 	units    int

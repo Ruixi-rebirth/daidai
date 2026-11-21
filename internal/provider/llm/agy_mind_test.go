@@ -2,12 +2,24 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 
 	"daidai/internal/core"
 )
+
+func TestAGYChatResponsePreservesFinishReason(t *testing.T) {
+	var result AGYResult
+	if err := json.Unmarshal([]byte(`{"status":"SUCCESS","response":"尚未完成的正文","finished_reason":"max_tokens"}`), &result); err != nil {
+		t.Fatal(err)
+	}
+	response, err := (&AGYMindProvider{}).chatResponse(result, "AGY", nil, nil)
+	if err != nil || response == nil || response.Content != "尚未完成的正文" || response.FinishReason != "max_tokens" {
+		t.Fatalf("unexpected response: %+v, %v", response, err)
+	}
+}
 
 func TestFormatAGYUsageOutput(t *testing.T) {
 	rawJSON := []byte(`{

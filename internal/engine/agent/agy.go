@@ -1,17 +1,10 @@
 package agent
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"log/slog"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"daidai/internal/core"
@@ -19,38 +12,6 @@ import (
 	"daidai/internal/entity"
 	"daidai/internal/provider/llm"
 )
-
-// AgySessionState 保存单个会话的 AGY 上下文续接状态
-type AgySessionState struct {
-	mu             sync.Mutex
-	runGate        chan struct{} // 同一会话内串行执行，并允许等待方响应取消
-	users          int           // 受 AGYWorker.mu 保护，包含等待 runGate 的工单
-	LastCwd        string
-	ConversationID string
-	loaded         bool
-	LastActive     time.Time
-}
-
-type agySessionKey struct {
-	platform    string
-	requesterID string
-	channelID   string
-	cwd         string
-}
-
-func (s *AgySessionState) Lock()   { s.mu.Lock() }
-func (s *AgySessionState) Unlock() { s.mu.Unlock() }
-
-type agyJSONOutput struct {
-	Response       string `json:"response"`
-	ConversationID string `json:"conversation_id"`
-	Status         string `json:"status"`
-	FinishedReason string `json:"finished_reason"`
-	Error          string `json:"error"`
-	Usage          struct {
-		TotalTokens int `json:"total_tokens"`
-	} `json:"usage"`
-}
 
 // AGYWorkerConfig AGY 工作区执行器配置
 type AGYWorkerConfig struct {
@@ -65,7 +26,9 @@ type AGYWorkerConfig struct {
 // AGYWorker 实现 entity.Worker 接口，在所选工作目录中启动 AGY CLI。
 type AGYWorker struct {
 	mu          sync.RWMutex
+	resetMu     sync.Mutex
 	sessions    map[agySessionKey]*AgySessionState
+	resetting   map[agyResetScope]chan struct{}
 	command     string
 	description string
 	defaultDir  string
@@ -111,184 +74,6 @@ func (w *AGYWorker) Description() string {
 	return w.description
 }
 
-func (w *AGYWorker) getSession(platform, requesterID, channelID, cwd string) *AgySessionState {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	key := agySessionKey{platform: db.NormPlatform(platform), requesterID: requesterID, channelID: channelID, cwd: cwd}
-
-	// 清理长期未活跃的过期会话，防止 map 无界增长
-	if len(w.sessions) > 200 {
-		now := time.Now()
-		for id, sess := range w.sessions {
-			if sess.users > 0 {
-				continue
-			}
-			sess.Lock()
-			stale := now.Sub(sess.LastActive) > 24*time.Hour && len(sess.runGate) > 0
-			sess.Unlock()
-			if stale {
-				delete(w.sessions, id)
-			}
-		}
-	}
-
-	s, ok := w.sessions[key]
-	if !ok {
-		s = &AgySessionState{
-			LastCwd:    cwd,
-			LastActive: time.Now(),
-			runGate:    make(chan struct{}, 1),
-		}
-		s.runGate <- struct{}{}
-		w.sessions[key] = s
-	} else {
-		s.Lock()
-		s.LastActive = time.Now()
-		s.Unlock()
-	}
-	s.users++
-	return s
-}
-
-func (w *AGYWorker) releaseSession(session *AgySessionState) {
-	if session == nil {
-		return
-	}
-	w.mu.Lock()
-	if session.users > 0 {
-		session.users--
-	}
-	w.mu.Unlock()
-}
-
-// ResetSession 重置指定通道在指定工作空间下的 AGY 会话状态 (清空 ConversationID，下次工单白板启动)
-func (w *AGYWorker) ResetSession(platform, channelID, cwd string) error {
-	resolvedCWD, resolveErr := w.resolveWorkDir(cwd)
-	if resolveErr != nil {
-		return fmt.Errorf("无法解析 AGY 会话工作区 %q: %w", cwd, resolveErr)
-	}
-	cwd = resolvedCWD
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	var sessions []*AgySessionState
-	for key, s := range w.sessions {
-		if key.platform != db.NormPlatform(platform) || key.channelID != channelID || key.cwd != cwd {
-			continue
-		}
-		sessions = append(sessions, s)
-	}
-	for _, s := range sessions {
-		<-s.runGate
-	}
-	if w.sessionDB != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err := w.sessionDB.DeleteAGYSessions(ctx, platform, channelID, cwd)
-		cancel()
-		if err != nil {
-			for _, s := range sessions {
-				s.runGate <- struct{}{}
-			}
-			return fmt.Errorf("删除持久化 AGY 会话失败: %w", err)
-		}
-	}
-	for _, s := range sessions {
-		s.Lock()
-		s.ConversationID = ""
-		s.loaded = true
-		s.LastActive = time.Now()
-		s.Unlock()
-		s.runGate <- struct{}{}
-	}
-	return nil
-}
-
-func (w *AGYWorker) resolveWorkDir(rawWorkspace string) (string, error) {
-	dir := strings.TrimSpace(rawWorkspace)
-	if dir == "" {
-		dir = strings.TrimSpace(w.defaultDir)
-	}
-	if dir == "~" {
-		dir = strings.TrimSpace(w.defaultDir)
-	}
-	if dir == "" {
-		return "", fmt.Errorf("AGY 未配置工作空间，拒绝退回进程当前目录")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("无法解析当前用户主目录: %w", err)
-	}
-	if strings.TrimSpace(home) == "" {
-		return "", fmt.Errorf("当前用户主目录为空")
-	}
-	if dir == "~" || strings.HasPrefix(dir, "~/") || strings.HasPrefix(dir, "~"+string(filepath.Separator)) {
-		suffix := strings.TrimPrefix(dir, "~")
-		suffix = strings.TrimPrefix(suffix, string(filepath.Separator))
-		suffix = strings.TrimPrefix(suffix, "/")
-		dir = filepath.Join(home, suffix)
-	}
-	absDir, err := filepath.Abs(filepath.Clean(dir))
-	if err != nil {
-		return "", fmt.Errorf("无法解析 AGY 工作空间 %q: %w", dir, err)
-	}
-	resolvedDir, err := filepath.EvalSymlinks(absDir)
-	if err != nil {
-		return "", fmt.Errorf("AGY 工作空间目录不存在或不可访问 %q: %w", absDir, err)
-	}
-	resolvedDir = filepath.Clean(resolvedDir)
-	info, err := os.Stat(resolvedDir)
-	if err != nil {
-		return "", fmt.Errorf("无法检查 AGY 工作空间 %q: %w", resolvedDir, err)
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("AGY 工作空间不是目录: %s", resolvedDir)
-	}
-	if resolvedDir == string(filepath.Separator) {
-		return "", fmt.Errorf("AGY 工作空间不能是文件系统根目录")
-	}
-	realHome, err := filepath.EvalSymlinks(home)
-	if err != nil {
-		return "", fmt.Errorf("无法解析用户主目录 %q: %w", home, err)
-	}
-	realHome, err = filepath.Abs(filepath.Clean(realHome))
-	if err != nil {
-		return "", fmt.Errorf("无法规范化用户主目录: %w", err)
-	}
-	if resolvedDir == filepath.Clean(realHome) {
-		return "", fmt.Errorf("AGY 工作空间不能是整个用户主目录")
-	}
-	return resolvedDir, nil
-}
-
-func (w *AGYWorker) resolveModelAndEffort(ticketModel string) (string, string, error) {
-	var baseModel, baseEffort string
-	if w.provider != nil {
-		baseModel, baseEffort = w.provider.GetModelAndEffort()
-	}
-	if w.router != nil {
-		if curr := w.router.CurrentMind(); strings.EqualFold(curr.Channel, "AGY") && curr.Model != "" {
-			baseModel = curr.Model
-			baseEffort = curr.Effort
-		}
-	}
-
-	if strings.TrimSpace(ticketModel) == "" {
-		return baseModel, baseEffort, nil
-	}
-
-	if w.router != nil {
-		return w.router.ResolveModelAndEffortForChannel(ticketModel, baseModel, baseEffort, "AGY")
-	}
-	m, eff := llm.SplitModelAndEffort(ticketModel)
-	if m == "" {
-		m = baseModel
-	}
-	if eff == "" {
-		eff = baseEffort
-	}
-	return m, eff, nil
-}
-
 // ExecuteTicket 在指定工作目录中执行工程任务 (实现 entity.Worker)
 func (w *AGYWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (string, error) {
 	if ctx == nil {
@@ -313,13 +98,7 @@ func (w *AGYWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (string
 	session := w.getSession(t.Platform, t.RequesterID, t.ChannelID, cwd)
 	defer w.releaseSession(session)
 
-	select {
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case <-session.runGate:
-	}
-	if err := ctx.Err(); err != nil {
-		session.runGate <- struct{}{}
+	if err := w.acquireSessionRun(ctx, session); err != nil {
 		return "", err
 	}
 	defer func() { session.runGate <- struct{}{} }()
@@ -337,80 +116,13 @@ func (w *AGYWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (string
 	convID := session.ConversationID
 	session.Unlock()
 
-	executionGoal := t.Goal
-	timeLimit := "调度器未设置固定时限"
-	if t.ExecutionTimeout > 0 {
-		timeLimit = fmt.Sprintf("调度器硬时限为 %s", t.ExecutionTimeout)
-	}
-	executionGoal += fmt.Sprintf("\n\n【工单阶段边界】当前%s。若完整目标无法在本次时限内可靠完成，不要一次性铺开全部工作；先完成一个可独立验证、能在本阶段收敛的部分。阶段结束时明确写出：本阶段完成项、整体目标是否仍未完成、剩余阶段、下一阶段可直接执行的具体指令，以及涉及的文件或状态。不要把阶段完成表述成整体目标完成。若目标可以在本阶段完整完成，则正常完成并说明验证结果。", timeLimit)
-	executionGoal += "\n\n【执行边界】仅在当前工作区读取和修改文件；如遇权限受限，如实说明受限步骤，不得伪报已完成。"
-	if core.IsNixOS() {
-		executionGoal += "\n\n【运行环境与依赖说明】宿主机运行于 NixOS。若工单执行过程中缺少某些特定 CLI 工具（如编译器、分析工具、格式转换工具等），直接利用 NixOS 临时环境即时执行：nix shell nixpkgs#<pkg> -c <cmd>，无需向用户申请预装。"
-	}
-	if !t.AllowSensitive {
-		executionGoal += "\n\n【行为要求：当前不是核心搭档私聊。不要主动探测宿主机公网 IP，也不要在回复中输出本机公网 IP。该要求是行为指引，不代表操作系统权限隔离。】"
-	}
-	args := []string{
-		"-p", executionGoal,
-		"--output-format", "json",
-		"--mode", "accept-edits",
-		"--sandbox",
-		"--dangerously-skip-permissions",
-	}
-	for _, rawDir := range t.AdditionalDirs {
-		absDir, err := filepath.Abs(filepath.Clean(strings.TrimSpace(rawDir)))
-		if err != nil {
-			return "", fmt.Errorf("解析工单附件目录失败: %w", err)
-		}
-		linkInfo, err := os.Lstat(absDir)
-		if err != nil {
-			return "", fmt.Errorf("检查工单附件目录 %q 失败: %w", absDir, err)
-		}
-		if linkInfo.Mode()&os.ModeSymlink != 0 || !linkInfo.IsDir() {
-			return "", fmt.Errorf("工单附件路径 %q 必须是非符号链接目录", absDir)
-		}
-		resolvedDir, err := filepath.EvalSymlinks(absDir)
-		if err != nil {
-			return "", fmt.Errorf("解析工单附件目录 %q 失败: %w", absDir, err)
-		}
-		info, err := os.Stat(resolvedDir)
-		if err != nil {
-			return "", fmt.Errorf("检查工单附件目录 %q 失败: %w", resolvedDir, err)
-		}
-		if !info.IsDir() {
-			return "", fmt.Errorf("工单附件路径 %q 不是目录", resolvedDir)
-		}
-		args = append(args, "--add-dir", resolvedDir)
-	}
-	if model != "" {
-		args = append(args, "--model", model)
-	}
-	if effort != "" {
-		args = append(args, "--effort", effort)
-	}
-	if convID != "" {
-		args = append(args, "--conversation", convID)
+	args, err := buildAGYCommandArgs(t, model, effort, convID)
+	if err != nil {
+		return "", err
 	}
 
-	cmd := exec.CommandContext(ctx, w.command, args...)
-	cmd.Dir = cwd
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process != nil && cmd.Process.Pid > 0 {
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		return nil
-	}
-	cmd.WaitDelay = 2 * time.Second
-
-	stdoutBuf := core.NewLimitedBuffer(2 << 20)
-	stderrBuf := core.NewLimitedBuffer(2 << 20)
-	cmd.Stdout = stdoutBuf
-	cmd.Stderr = stderrBuf
-
-	startTime := time.Now()
-	err = cmd.Run()
-	duration := time.Since(startTime)
+	process, err := runAGYProcess(ctx, w.command, cwd, args)
+	stdoutBuf, stderrBuf, duration := process.stdout, process.stderr, process.duration
 
 	if err != nil {
 		saveErr := w.retainConversationID(session, t, cwd, stdoutBuf.Bytes())
@@ -441,7 +153,7 @@ func (w *AGYWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (string
 		return partial, fmt.Errorf("AGY 输出超过 2 MiB 上限，结果不完整")
 	}
 
-	parsed, err := parseAGYWorkerOutput(stdoutBuf.Bytes())
+	parsed, err := llm.ParseAGYResult(stdoutBuf.Bytes())
 	if err != nil {
 		partial := partialAGYOutput(stdoutBuf.String(), stderrBuf.String(), false, stderrBuf.Truncated())
 		return partial, fmt.Errorf("AGY 输出不是有效的 JSON 结果: %w", err)
@@ -457,141 +169,33 @@ func (w *AGYWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (string
 		session.Unlock()
 		sessionSaveErr = w.saveConversationID(t, cwd, conversationID)
 	}
-	status := strings.ToUpper(strings.TrimSpace(parsed.Status))
-	finishedReason := strings.ToLower(strings.TrimSpace(parsed.FinishedReason))
-	response := strings.TrimSpace(parsed.Response)
-
-	// Explicit AGY error finished_reason or error message
-	if finishedReason == "error" || parsed.Error != "" {
-		errDetail := strings.TrimSpace(parsed.Error)
-		if errDetail == "" {
-			errDetail = fmt.Sprintf("finished_reason: %s", parsed.FinishedReason)
-		}
-		if response == "" {
-			response = "AGY 执行异常终止: " + errDetail
-		}
-		response = appendSessionSaveWarning(response, sessionSaveErr)
-		if !t.AllowSensitive {
-			response = core.RedactSensitiveIPs(response)
-		}
-		return response, fmt.Errorf("AGY 执行终止: %s", errDetail)
-	}
-
-	if response == "" {
-		if status != "SUCCESS" {
-			return appendSessionSaveWarning("AGY 未返回有效结果。", sessionSaveErr), fmt.Errorf("AGY 执行状态未确认成功: %q", status)
-		}
-		response = "工单已由 AGY 工作者执行完毕。"
-	}
-
-	if status != "SUCCESS" {
-		slog.Warn("agy: 执行状态非 SUCCESS 但具有完整响应结果", "status", status, "finishedReason", parsed.FinishedReason, "conversationID", parsed.ConversationID)
-	}
-
+	response, resultErr := agyTicketResult(parsed)
 	response = appendSessionSaveWarning(response, sessionSaveErr)
-
 	if !t.AllowSensitive {
 		response = core.RedactSensitiveIPs(response)
 	}
+	return response, resultErr
+}
+
+func agyTicketResult(result llm.AGYResult) (string, error) {
+	status := strings.ToUpper(strings.TrimSpace(result.Status))
+	reason := strings.TrimSpace(result.FinishedReason)
+	response := strings.TrimSpace(result.Response)
+
+	if detail := result.FailureDetail(); detail != "" {
+		return response, fmt.Errorf("AGY 执行终止: %s", detail)
+	}
+	if core.OutputLimitReached(reason) {
+		return response, fmt.Errorf("AGY 达到输出上限，本阶段结果不完整")
+	}
+	if status != "SUCCESS" {
+		if status == "" {
+			status = "未知"
+		}
+		return response, fmt.Errorf("AGY 未返回成功状态（%s）", status)
+	}
+	if response == "" {
+		response = "工单已由 AGY 工作者执行完毕。"
+	}
 	return response, nil
-}
-
-func (w *AGYWorker) retainConversationID(session *AgySessionState, ticket *entity.Ticket, cwd string, output []byte) error {
-	parsed, err := parseAGYWorkerOutput(output)
-	if err != nil || strings.TrimSpace(parsed.ConversationID) == "" {
-		return nil
-	}
-	session.Lock()
-	session.ConversationID = strings.TrimSpace(parsed.ConversationID)
-	session.loaded = true
-	conversationID := session.ConversationID
-	session.Unlock()
-	return w.saveConversationID(ticket, cwd, conversationID)
-}
-
-func (w *AGYWorker) saveConversationID(ticket *entity.Ticket, cwd, conversationID string) error {
-	if w.sessionDB == nil || ticket == nil || conversationID == "" {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := w.sessionDB.SaveAGYSession(ctx, ticket.Platform, ticket.RequesterID, ticket.ChannelID, cwd, conversationID); err != nil {
-		slog.Error("agy: save conversation ID failed", "requesterID", ticket.RequesterID, "channelID", ticket.ChannelID, "workspace", cwd, "err", err)
-		return err
-	}
-	return nil
-}
-
-func appendSessionSaveWarning(output string, err error) string {
-	if err == nil {
-		return output
-	}
-	warning := "\n\n【续接状态未保存】当前进程内仍可继续，但服务重启后可能无法续接此 AGY 会话。"
-	return strings.TrimSpace(output) + warning
-}
-
-func partialAGYOutput(stdout, stderr string, stdoutTruncated, stderrTruncated bool) string {
-	var parts []string
-	if stdout = strings.TrimSpace(stdout); stdout != "" {
-		parts = append(parts, "标准输出：\n"+stdout)
-	}
-	if stderr = strings.TrimSpace(stderr); stderr != "" {
-		parts = append(parts, "标准错误：\n"+stderr)
-	}
-	if len(parts) == 0 {
-		return ""
-	}
-	result := strings.Join(parts, "\n\n")
-	if stdoutTruncated || stderrTruncated {
-		result += "\n[子进程输出已截断]"
-	}
-	return "【本阶段未完成，以下是子进程部分输出】\n" + core.TruncateRunes(result, 6000, "\n[阶段输出超过长度限制，后续内容已截断]")
-}
-
-func parseAGYWorkerOutput(raw []byte) (agyJSONOutput, error) {
-	trimmed := bytes.TrimSpace(raw)
-	var parsed agyJSONOutput
-	if err := json.Unmarshal(trimmed, &parsed); err == nil && isMeaningfulAGYOutput(parsed) {
-		return parsed, nil
-	}
-
-	// Try stream decoding (e.g. for streaming NDJSON where multiple objects are emitted)
-	dec := json.NewDecoder(bytes.NewReader(trimmed))
-	var lastDecoded agyJSONOutput
-	foundDecoded := false
-	for dec.More() {
-		var item agyJSONOutput
-		if err := dec.Decode(&item); err != nil {
-			break
-		}
-		if isMeaningfulAGYOutput(item) {
-			lastDecoded = item
-			foundDecoded = true
-		}
-	}
-	if foundDecoded {
-		return lastDecoded, nil
-	}
-
-	// Fall back to scanning backwards from the last '}' for valid JSON object blocks
-	// (handles surrounding logs, progress lines, or pretty-printed JSON mixed with text)
-	end := bytes.LastIndexByte(trimmed, '}')
-	for end > 0 {
-		for start := end - 1; start >= 0; start-- {
-			if trimmed[start] == '{' {
-				candidate := trimmed[start : end+1]
-				var candidateParsed agyJSONOutput
-				if err := json.Unmarshal(candidate, &candidateParsed); err == nil && isMeaningfulAGYOutput(candidateParsed) {
-					return candidateParsed, nil
-				}
-			}
-		}
-		end = bytes.LastIndexByte(trimmed[:end], '}')
-	}
-
-	return agyJSONOutput{}, fmt.Errorf("AGY 输出中未找到有效的结构化 JSON 结果")
-}
-
-func isMeaningfulAGYOutput(o agyJSONOutput) bool {
-	return o.Response != "" || o.ConversationID != "" || o.Status != "" || o.FinishedReason != "" || o.Error != ""
 }

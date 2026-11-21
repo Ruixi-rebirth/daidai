@@ -182,16 +182,37 @@ func (s *Store) SaveDelivery(ctx context.Context, d *Delivery) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO brief_deliveries(edition_id,platform,recipient_id,is_group,status,attempts,next_attempt,delivered_text,remaining_text,error_kind,notified,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(edition_id,platform,recipient_id,is_group) DO UPDATE SET status=excluded.status,attempts=excluded.attempts,next_attempt=excluded.next_attempt,delivered_text=excluded.delivered_text,remaining_text=excluded.remaining_text,error_kind=excluded.error_kind,notified=excluded.notified,updated_at=excluded.updated_at`, d.Edition, d.Platform, d.Recipient, d.IsGroup, d.Status, d.Attempts, d.Next.UnixMilli(), d.Delivered, d.Remaining, d.ErrorKind, d.Notified, time.Now().UnixMilli())
 	return err
 }
-func (s *Store) LastFailure(ctx context.Context, p, r string, group bool) (string, error) {
-	var id string
-	err := s.db.QueryRowContext(ctx, `SELECT edition_id FROM brief_deliveries WHERE platform=? AND recipient_id=? AND is_group=? AND status IN ('partial','uncertain','expired','rejected') AND notified=0 ORDER BY edition_id DESC LIMIT 1`, p, r, group).Scan(&id)
+
+type deliveryFailure struct {
+	editionID string
+	status    string
+	errorKind string
+	attempts  int
+}
+
+func (s *Store) LatestRemainingEdition(ctx context.Context, sub Subscription) (string, error) {
+	var editionID string
+	err := s.db.QueryRowContext(ctx, `SELECT edition_id FROM brief_deliveries
+		WHERE platform=? AND recipient_id=? AND is_group=? AND status NOT IN ('sent','sending')
+		AND remaining_text<>'' ORDER BY edition_id DESC LIMIT 1`, sub.Platform, sub.Recipient, sub.IsGroup).Scan(&editionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
-	return id, err
+	return editionID, err
 }
-func (s *Store) Notice(ctx context.Context, p, r string, group bool) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE brief_deliveries SET notified=1 WHERE platform=? AND recipient_id=? AND is_group=? AND status IN ('partial','uncertain','expired','rejected')`, p, r, group)
+
+func (s *Store) latestUnnotifiedFailure(ctx context.Context, p, r string, group bool) (*deliveryFailure, error) {
+	var failure deliveryFailure
+	err := s.db.QueryRowContext(ctx, `SELECT edition_id,status,error_kind,attempts FROM brief_deliveries WHERE platform=? AND recipient_id=? AND is_group=? AND status IN ('partial','uncertain','expired','rejected') AND notified=0 ORDER BY edition_id DESC LIMIT 1`, p, r, group).
+		Scan(&failure.editionID, &failure.status, &failure.errorKind, &failure.attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return &failure, err
+}
+func (s *Store) markFailureNotified(ctx context.Context, failure *deliveryFailure, p, r string, group bool) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE brief_deliveries SET notified=1 WHERE edition_id=? AND platform=? AND recipient_id=? AND is_group=? AND attempts=? AND status=? AND error_kind=?`,
+		failure.editionID, p, r, group, failure.attempts, failure.status, failure.errorKind)
 	return err
 }
 

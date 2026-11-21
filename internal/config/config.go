@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,11 +181,13 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	defaults := DefaultConfig()
-	if _, err := time.LoadLocation(cfg.Briefing.Timezone); err != nil {
-		return nil, fmt.Errorf("briefing.timezone is invalid")
-	}
-	if _, err := time.Parse("15:04", cfg.Briefing.Time); err != nil {
-		return nil, fmt.Errorf("briefing.time must be HH:MM")
+	if cfg.Briefing.Enabled {
+		if _, err := time.LoadLocation(cfg.Briefing.Timezone); err != nil {
+			return nil, fmt.Errorf("briefing.timezone is invalid: %w", err)
+		}
+		if _, err := time.Parse("15:04", cfg.Briefing.Time); err != nil {
+			return nil, fmt.Errorf("briefing.time must be HH:MM: %w", err)
+		}
 	}
 	if cfg.Server.Port < 0 || cfg.Server.Port > 65535 {
 		return nil, fmt.Errorf("server.port must be 0 (default) or between 1 and 65535")
@@ -269,8 +272,8 @@ func LoadConfig(path string) (*Config, error) {
 		if cfg.OCI.DailyReportMinute != nil && (*cfg.OCI.DailyReportMinute < 0 || *cfg.OCI.DailyReportMinute > 59) {
 			return nil, fmt.Errorf("oci.daily_report_minute must be between 0 and 59")
 		}
-		if cfg.OCI.CostAlertDelta < 0 {
-			return nil, fmt.Errorf("oci.cost_alert_delta cannot be negative")
+		if math.IsNaN(cfg.OCI.CostAlertDelta) || math.IsInf(cfg.OCI.CostAlertDelta, 0) || cfg.OCI.CostAlertDelta < 0 {
+			return nil, fmt.Errorf("oci.cost_alert_delta must be a finite non-negative number")
 		}
 		if cfg.OCI.CostAlertDelta == 0 {
 			cfg.OCI.CostAlertDelta = 1

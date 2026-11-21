@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"daidai/internal/core"
@@ -70,25 +69,27 @@ func (q *QQChannel) transcribeVoiceAudio(ctx context.Context, audioURL, fileName
 		return ""
 	}
 
-	// 检查是否有 agy 多模态 CLI
-	if _, err := exec.LookPath("agy"); err != nil {
-		slog.Warn("qq: 系统未安装 agy，无法进行模型语音转录")
+	command := strings.TrimSpace(q.cfg.AGYCommand)
+	if command == "" {
+		command = "agy"
+	}
+	binary, err := exec.LookPath(command)
+	if err != nil {
+		slog.Warn("qq: 无法找到配置的 AGY 转录命令", "err", err)
+		return ""
+	}
+	binary, err = filepath.Abs(binary)
+	if err != nil {
+		slog.Warn("qq: 无法解析 AGY 转录命令路径", "err", err)
 		return ""
 	}
 
 	prompt := "请仅调用 read_file 工具读取以下音频文件并直接输出转录出的文字内容（无论说话者使用的是中文、日语、英语还是其他任何语言，请忠实输出说话者所用原语言的文本）。严禁运行其他工具或命令。如果无法识别或听不清则输出空，不要包含任何多余解释：\n" + wavPath
 	args := []string{"-p", prompt, "--output-format", "text", "--mode", "plan", "--sandbox"}
 
-	cmd := exec.CommandContext(callCtx, "agy", args...)
+	cmd := core.CommandProcessGroup(callCtx, binary, args...)
 	cmd.Dir = tmpDir
 	cmd.Env = os.Environ()
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process != nil && cmd.Process.Pid > 0 {
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		return nil
-	}
 	cmd.WaitDelay = 2 * time.Second
 	stdout := core.NewLimitedBuffer(64 << 10)
 	stderr := core.NewLimitedBuffer(16 << 10)
@@ -97,6 +98,10 @@ func (q *QQChannel) transcribeVoiceAudio(ctx context.Context, audioURL, fileName
 
 	if err := cmd.Run(); err != nil {
 		slog.Warn("qq: agy 语音转录失败", "err", err, "stderr", stderr.String())
+		return ""
+	}
+	if stdout.Truncated() {
+		slog.Warn("qq: agy 语音转录输出超过上限，放弃不完整转录")
 		return ""
 	}
 

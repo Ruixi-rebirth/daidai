@@ -67,3 +67,34 @@ func TestScreenshotDoesNotPreventLaterPageReadingAndAnswer(t *testing.T) {
 		t.Fatalf("image interrupted remaining work: calls=%v images=%d text=%q", hands.calls, len(utterance.Images), utterance.Text)
 	}
 }
+
+func TestWebToolBudgetUsesNormalizedTargets(t *testing.T) {
+	processed := make(map[string]struct{})
+	var result toolBatchResult
+	for index, target := range []string{"example.com/a!", "https://example.com/a!", "example.com/b", "example.com/c"} {
+		arguments, err := json.Marshal(map[string]string{"url": target})
+		if err != nil {
+			t.Fatal(err)
+		}
+		call := core.ToolCall{
+			Function: core.ToolCallFunction{Name: "read_link", Arguments: string(arguments)},
+		}
+		if allowed := allowToolLinks(call, processed, &result); allowed != (index < 3) {
+			t.Fatalf("unexpected budget decision for %q: %v", target, allowed)
+		}
+	}
+	if _, ok := processed["https://example.com/a!"]; !ok {
+		t.Fatal("budget discarded punctuation from the actual URL")
+	}
+}
+
+func TestWebToolBudgetIgnoresSearchURLsRemovedBeforeExecution(t *testing.T) {
+	query := strings.Repeat("技", 1000) + " https://a.example https://b.example https://c.example"
+	args, err := json.Marshal(map[string]string{"query": query})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if urls := extractToolURLs("search_web", string(args)); len(urls) != 0 {
+		t.Fatalf("URLs outside the submitted query consumed budget: %v", urls)
+	}
+}

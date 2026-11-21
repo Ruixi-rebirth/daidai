@@ -33,3 +33,16 @@ func TestSplitMarkdownChunks_BasicAndCodeBlock(t *testing.T) {
 		}
 	}
 }
+
+func TestMarkdownCodeBlockPreservesLiteralFences(t *testing.T) {
+	for _, tc := range []struct{ text, fence string }{
+		{"plain output", "```"},
+		{"line\n````\nmore", "~~~"},
+		{"````\n~~~~~~", "`````"},
+	} {
+		want := tc.fence + "bash\n" + tc.text + "\n" + tc.fence
+		if got := MarkdownCodeBlock(tc.text, "bash"); got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	}
+}

@@ -3,7 +3,6 @@ package entity
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 )
 
@@ -34,7 +33,7 @@ func TestFixedPresentationFallbackRequiresUnsentProof(t *testing.T) {
 			agent := NewSuperAgent(Config{Channels: registry})
 			result, err := agent.transmitUtterance(context.Background(), &Utterance{Platform: "fixture", ChannelID: "1", FixedPresentation: true, Images: [][]byte{[]byte("image")}, FallbackText: "完整早报", Text: "原文索引"}, "owner")
 			if unsent {
-				if err != nil || channel.calls != 2 || !strings.Contains(result, "完整早报") {
+				if err != nil || channel.calls != 2 || result != "完整早报\n\n原文索引" {
 					t.Fatalf("safe text fallback lost: %s %v calls=%d", result, err, channel.calls)
 				}
 			} else if err == nil || channel.calls != 1 {
@@ -52,7 +51,63 @@ func TestFixedPartialViewDoesNotCreateSecondContinuationQueue(t *testing.T) {
 	if err != nil || result != "已送原文" || channel.calls != 1 {
 		t.Fatal("partial view was resent")
 	}
-	if _, ok := agent.takeReplyContinuation(&SensoryEvent{Platform: "fixture", ChannelID: "1", SenderID: "owner"}); ok {
+	if _, ok := agent.takeReplyContinuation(&SensoryEvent{Platform: "fixture", ChannelID: "1", SenderID: "owner"}, ""); ok {
 		t.Fatal("duplicate continuation queue created")
+	}
+}
+
+func TestOrdinaryMediaFallbackRequiresKnownRejection(t *testing.T) {
+	for _, scenario := range []struct {
+		name     string
+		failure  error
+		fallback bool
+	}{
+		{"ambiguous receipt", errors.New("connection lost"), false},
+		{"explicit rejection", &DeliveryRejection{Err: errors.New("unsupported image")}, true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			channel := &fixedPresentationChannel{first: scenario.failure}
+			registry := NewChannelRegistry()
+			registry.Register(channel)
+			agent := NewSuperAgent(Config{Channels: registry})
+			u := &Utterance{Platform: "fixture", ChannelID: "chat", Images: [][]byte{[]byte("image")}, FallbackText: "正文"}
+			text, err := agent.transmitUtterance(context.Background(), u, "owner")
+			if scenario.fallback {
+				if err != nil || text != "正文" || channel.calls != 2 {
+					t.Fatalf("safe fallback failed: %q, %v, calls=%d", text, err, channel.calls)
+				}
+			} else if !errors.Is(err, scenario.failure) || channel.calls != 1 {
+				t.Fatalf("ambiguous media was retried: %v, calls=%d", err, channel.calls)
+			}
+		})
+	}
+}
+
+func TestHelpCardDoesNotResendAfterAmbiguousReceipt(t *testing.T) {
+	failure := errors.New("connection lost")
+	channel := &fixedPresentationChannel{first: failure}
+	registry := NewChannelRegistry()
+	registry.Register(channel)
+	agent := NewSuperAgent(Config{Channels: registry, Cognition: &pendingCardRenderer{}})
+	event := &SensoryEvent{Platform: "fixture", ChannelID: "chat", SenderID: "owner"}
+	err := agent.transmitInfo(context.Background(), event, "帮助", "命令列表", true)
+	if !errors.Is(err, failure) || channel.calls != 1 {
+		t.Fatalf("help card delivery was retried: %v, calls=%d", err, channel.calls)
+	}
+}
+
+func TestFixedCardFallbackPreservesPerImageSources(t *testing.T) {
+	channel := &fixedPresentationChannel{first: &UnsentError{Err: errors.New("image preparation failed")}}
+	registry := NewChannelRegistry()
+	registry.Register(channel)
+	agent := NewSuperAgent(Config{Channels: registry})
+	u := &Utterance{
+		Platform: "fixture", ChannelID: "chat", FixedPresentation: true,
+		Images: [][]byte{{1}, {2}, {3}}, ImageSources: []string{"第一页", "第二页", "第二页"},
+		Text: "链接索引",
+	}
+	text, err := agent.transmitUtterance(context.Background(), u, "owner")
+	if err != nil || text != "第一页\n\n第二页\n\n链接索引" || channel.calls != 2 {
+		t.Fatalf("fallback lost image source text: %q, %v, calls=%d", text, err, channel.calls)
 	}
 }

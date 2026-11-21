@@ -8,6 +8,8 @@ import (
 	"unicode/utf8"
 )
 
+const maxExtractedSearchTerms = 400
+
 func isSeparatorRune(r rune) bool {
 	return unicode.IsSpace(r) || unicode.IsPunct(r) || unicode.IsSymbol(r) || unicode.IsControl(r)
 }
@@ -32,6 +34,9 @@ func ExtractSearchTerms(query string) []string {
 	}
 
 	for _, clause := range clauses {
+		if len(terms) >= maxExtractedSearchTerms {
+			break
+		}
 		runes := []rune(clause)
 		if len(runes) <= 2 {
 			addTerm(clause)
@@ -40,7 +45,7 @@ func ExtractSearchTerms(query string) []string {
 
 		// 将连续汉字与连续非汉字（拉丁字母/数字等）分段处理
 		start := 0
-		for start < len(runes) {
+		for start < len(runes) && len(terms) < maxExtractedSearchTerms {
 			isHan := unicode.Is(unicode.Han, runes[start])
 			end := start + 1
 			for end < len(runes) && unicode.Is(unicode.Han, runes[end]) == isHan {
@@ -51,7 +56,7 @@ func ExtractSearchTerms(query string) []string {
 				if len(seg) <= 2 {
 					addTerm(string(seg))
 				} else {
-					for i := 0; i+1 < len(seg); i++ {
+					for i := 0; i+1 < len(seg) && len(terms) < maxExtractedSearchTerms; i++ {
 						addTerm(string(seg[i : i+2]))
 					}
 				}

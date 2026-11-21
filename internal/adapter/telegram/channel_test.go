@@ -86,16 +86,19 @@ func TestGroupVerificationUsesGroupAndPreservesTopicRouting(t *testing.T) {
 	c.http.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(response))}, nil
 	})
-	if !c.VerifyGroup(context.Background(), "-100/42") {
+	if valid, err := c.VerifyGroup(context.Background(), "-100/42"); !valid || err != nil {
 		t.Fatal("subscribed forum topic rejected")
 	}
 	response = `{"ok":true,"result":{"id":-101,"type":"supergroup"}}`
-	if c.VerifyGroup(context.Background(), "-100/42") {
+	if valid, err := c.VerifyGroup(context.Background(), "-100/42"); valid || err != nil {
 		t.Fatal("different group admitted")
 	}
 	response = `{"ok":true,"result":{"id":123,"type":"private"}}`
-	if c.VerifyGroup(context.Background(), "123") || c.VerifyGroup(context.Background(), "invalid/42") {
+	if valid, err := c.VerifyGroup(context.Background(), "123"); valid || err != nil {
 		t.Fatal("non-group destination admitted")
+	}
+	if valid, err := c.VerifyGroup(context.Background(), "invalid/42"); valid || err != nil {
+		t.Fatal("invalid group address admitted")
 	}
 }
 
@@ -105,11 +108,11 @@ func TestProactiveOwnerVerificationRechecksUsername(t *testing.T) {
 	c.http.Transport = transportFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(response))}, nil
 	})
-	if !c.VerifyOwnerPrivate(context.Background(), "123") {
+	if valid, err := c.VerifyOwnerPrivate(context.Background(), "123"); !valid || err != nil {
 		t.Fatal("matching username rejected")
 	}
 	response = `{"ok":true,"result":{"id":123,"type":"private","username":"someone_else"}}`
-	if c.VerifyOwnerPrivate(context.Background(), "123") {
+	if valid, err := c.VerifyOwnerPrivate(context.Background(), "123"); valid || err != nil {
 		t.Fatal("numeric address became authorization")
 	}
 	response = `{"ok":false,"error_code":429,"parameters":{"retry_after":600}}`

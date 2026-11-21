@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -26,76 +25,60 @@ const (
 //go:embed code-theme.tmTheme
 var codeTheme []byte
 
+type cardStyle struct {
+	textColor        string
+	paragraphLeading string
+	headingColor     string
+	headingBelow     string
+	headingAbove     string
+	codeRadius       string
+	inlineCodeFill   string
+	cardFill         string
+	cardRadius       string
+	cardStroke       string
+	canvasColor      string
+}
+
+var standardCardStyle = cardStyle{
+	textColor:        "#1f2328",
+	paragraphLeading: "0.85em",
+	headingColor:     "#0969da",
+	headingBelow:     "10pt",
+	headingAbove:     "14pt",
+	codeRadius:       "8pt",
+	inlineCodeFill:   "#eff1f3",
+	cardFill:         "#ffffff",
+	cardRadius:       "10pt",
+	cardStroke:       "0.5pt + rgb(\"#e1e4e8\")",
+	canvasColor:      "#f4f5f8",
+}
+
+var memoryProfileCardStyle = cardStyle{
+	textColor:        "#493a3e",
+	paragraphLeading: "0.95em",
+	headingColor:     "#ad527b",
+	headingBelow:     "9pt",
+	headingAbove:     "15pt",
+	codeRadius:       "9pt",
+	inlineCodeFill:   "#f8eaf0",
+	cardFill:         "#fffdf9",
+	cardRadius:       "10pt",
+	cardStroke:       "0.6pt + rgb(\"#e9d7d5\")",
+	canvasColor:      "#f8f0ed",
+}
+
 // RenderCard 将 Markdown 文本通过 Typst 编译为排版优雅的高清 PNG 卡片图
 func RenderCard(ctx context.Context, md string) ([]byte, error) {
-	trimmed := strings.TrimSpace(md)
-	if trimmed == "" {
-		return nil, fmt.Errorf("empty markdown text")
-	}
-	if len(trimmed) > maxRenderInputBytes {
-		return nil, fmt.Errorf("markdown input exceeds %d byte limit", maxRenderInputBytes)
-	}
-
-	typstBody := MarkdownToTypst([]byte(trimmed))
-
-	doc := fmt.Sprintf(`#set page(
-  width: 680pt,
-  height: auto,
-  margin: 0pt,
-  fill: none
-)
-
-#set text(
-  font: ("Twitter Color Emoji", "Maple Mono", "Source Han Sans SC"),
-  size: 18pt,
-  fill: rgb("#1f2328"),
-  lang: "zh"
-)
-
-#set par(justify: false, leading: 0.85em)
-#set raw(theme: "code-theme.tmTheme")
-#show raw: set text(font: ("Maple Mono", "Source Han Sans SC"), size: 1em / 0.8)
-
-#show heading: it => block(below: 10pt, above: 14pt)[
-  #text(weight: "bold", fill: rgb("#0969da"))[#it.body]
-]
-
-#show raw.where(block: true): it => block(
-  fill: rgb("#17212b"),
-  inset: 12pt,
-  radius: 8pt,
-  width: 100%%
-)[
-  #set text(fill: rgb("#eef2f6"), size: 16pt)
-  #it
-]
-
-#show raw.where(block: false): it => box(
-  fill: rgb("#eff1f3"),
-  inset: (x: 4pt, y: 2pt),
-  radius: 4pt
-)[
-  #set raw(theme: none)
-  #set text(fill: rgb("#93316a"), size: 17pt)
-  #it
-]
-
-#block(
-  width: 100%%,
-  fill: rgb("#ffffff"),
-  inset: (x: 16pt, top: 14pt, bottom: 16pt),
-  radius: 10pt,
-  stroke: 0.5pt + rgb("#e1e4e8")
-)[
-%s
-]
-`, typstBody)
-	return renderTypst(ctx, doc, "#f4f5f8")
+	return renderMarkdownCard(ctx, md, standardCardStyle)
 }
 
 // RenderMemoryProfileCard uses a warmer palette and wider spacing for a
 // personal impression and memory list.
 func RenderMemoryProfileCard(ctx context.Context, md string) ([]byte, error) {
+	return renderMarkdownCard(ctx, md, memoryProfileCardStyle)
+}
+
+func renderMarkdownCard(ctx context.Context, md string, style cardStyle) ([]byte, error) {
 	trimmed := strings.TrimSpace(md)
 	if trimmed == "" {
 		return nil, fmt.Errorf("empty markdown text")
@@ -103,7 +86,9 @@ func RenderMemoryProfileCard(ctx context.Context, md string) ([]byte, error) {
 	if len(trimmed) > maxRenderInputBytes {
 		return nil, fmt.Errorf("markdown input exceeds %d byte limit", maxRenderInputBytes)
 	}
+
 	typstBody := MarkdownToTypst([]byte(trimmed))
+
 	doc := fmt.Sprintf(`#set page(
   width: 680pt,
   height: auto,
@@ -114,22 +99,22 @@ func RenderMemoryProfileCard(ctx context.Context, md string) ([]byte, error) {
 #set text(
   font: ("Twitter Color Emoji", "Maple Mono", "Source Han Sans SC"),
   size: 18pt,
-  fill: rgb("#493a3e"),
+  fill: rgb("%s"),
   lang: "zh"
 )
 
-#set par(justify: false, leading: 0.95em)
+#set par(justify: false, leading: %s)
 #set raw(theme: "code-theme.tmTheme")
 #show raw: set text(font: ("Maple Mono", "Source Han Sans SC"), size: 1em / 0.8)
 
-#show heading: it => block(below: 9pt, above: 15pt)[
-  #text(weight: "bold", fill: rgb("#ad527b"))[#it.body]
+#show heading: it => block(below: %s, above: %s)[
+  #text(weight: "bold", fill: rgb("%s"))[#it.body]
 ]
 
 #show raw.where(block: true): it => block(
   fill: rgb("#17212b"),
   inset: 12pt,
-  radius: 9pt,
+  radius: %s,
   width: 100%%
 )[
   #set text(fill: rgb("#eef2f6"), size: 16pt)
@@ -137,7 +122,7 @@ func RenderMemoryProfileCard(ctx context.Context, md string) ([]byte, error) {
 ]
 
 #show raw.where(block: false): it => box(
-  fill: rgb("#f8eaf0"),
+  fill: rgb("%s"),
   inset: (x: 4pt, y: 2pt),
   radius: 4pt
 )[
@@ -148,15 +133,15 @@ func RenderMemoryProfileCard(ctx context.Context, md string) ([]byte, error) {
 
 #block(
   width: 100%%,
-  fill: rgb("#fffdf9"),
+  fill: rgb("%s"),
   inset: (x: 16pt, top: 14pt, bottom: 16pt),
-  radius: 10pt,
-  stroke: 0.6pt + rgb("#e9d7d5")
+  radius: %s,
+  stroke: %s
 )[
 %s
 ]
-`, typstBody)
-	return renderTypst(ctx, doc, "#f8f0ed")
+`, style.textColor, style.paragraphLeading, style.headingBelow, style.headingAbove, style.headingColor, style.codeRadius, style.inlineCodeFill, style.cardFill, style.cardRadius, style.cardStroke, typstBody)
+	return renderTypst(ctx, doc, style.canvasColor)
 }
 
 // HasMathFormulas checks whether markdown text contains real LaTeX math expressions
@@ -236,14 +221,7 @@ func renderTypstAssets(ctx context.Context, doc string, assets map[string][]byte
 		return nil, fmt.Errorf("write typst file failed: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "typst", "compile", "--root", tmpDir, typPath, pngPath)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process != nil && cmd.Process.Pid > 0 {
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		return nil
-	}
+	cmd := core.CommandProcessGroup(ctx, "typst", "compile", "--root", tmpDir, typPath, pngPath)
 	cmd.WaitDelay = 2 * time.Second
 	output := core.NewLimitedBuffer(64 << 10)
 	cmd.Stdout = output
@@ -307,20 +285,13 @@ func applyShadowEffect(ctx context.Context, tmpDir, srcPath, canvasColor string)
 	outPath := filepath.Join(tmpDir, "card_shadow.png")
 
 	// 极简画板衬底 (16px)，紧凑节约空间，阴影柔和自然，在 QQ 全屏黑底看图时完整呈现 3D 悬浮感
-	cmd := exec.CommandContext(ctx, bin,
+	cmd := core.CommandProcessGroup(ctx, bin,
 		srcPath,
 		"-bordercolor", canvasColor, "-border", "16",
 		"(", "+clone", "-background", "#0f172a", "-shadow", "55x12+6+8", ")",
 		"+swap", "-background", canvasColor, "-layers", "merge", "+repage",
 		outPath,
 	)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process != nil && cmd.Process.Pid > 0 {
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		return nil
-	}
 	cmd.WaitDelay = 10 * time.Second
 	errBuf := core.NewLimitedBuffer(16 << 10)
 	cmd.Stderr = errBuf

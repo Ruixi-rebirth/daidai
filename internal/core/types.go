@@ -151,7 +151,6 @@ type SensoryEvent struct {
 	OmittedFiles          int           // 超出单轮文件处理上限、未下载的文件数
 	OmittedPendingFiles   int           // 待确认文件列表超出保留上限后丢弃的文件数
 	ProcessedAttachments  []*Attachment // 本轮成功处理、仅在回复送达后从待处理列表移除的附件
-	ReplyDelivered        bool          // 发声通道是否接受本轮回复（允许部分送达）；用于提交交付后生效的状态
 	VisionSummary         string        // 多模态看图提炼出的视觉观察摘要（用于持久化至工作记忆）
 	ReplyContext          *SensoryEvent // 引用的前置消息上下文
 	ContentComplete       bool          // 引用的文字正文已完整保存

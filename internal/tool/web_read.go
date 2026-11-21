@@ -16,6 +16,7 @@ import (
 	"golang.org/x/net/html"
 
 	"daidai/internal/core"
+	"daidai/internal/entity"
 	"daidai/internal/provider/llm"
 )
 
@@ -24,22 +25,31 @@ import (
 // falling back to the read-only AGY sandbox when direct fetching is unavailable.
 type ReadLinkTool struct{ search *WebSearchTool }
 
+type webPageChunk struct {
+	URL        string `json:"url"`
+	Offset     int    `json:"offset"`
+	NextOffset int    `json:"next_offset,omitempty"`
+	TotalRunes int    `json:"total_runes"`
+	Complete   bool   `json:"complete"`
+	Content    string `json:"content"`
+}
+
 func NewReadLinkToolWithCommand(router *llm.MindRouter, command string) *ReadLinkTool {
 	return &ReadLinkTool{search: NewWebSearchToolWithCommand(router, command)}
 }
 func (t *ReadLinkTool) Name() string { return "read_link" }
 func (t *ReadLinkTool) Description() string {
-	return "读取用户给出的网页正文，并根据用户原话完成总结、回答问题或提取信息。必须打开指定链接并以页面正文为依据；打不开时明确说明。多个链接逐个调用并综合结果。此工具不截图。"
+	return "读取指定网页正文并按用户原话完成任务；长文分页时检查 complete，未读完用 next_offset 续读。访问失败如实说明，不截图。"
 }
 func (t *ReadLinkTool) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
 		"url":  map[string]any{"type": "string", "description": "用户提供的完整 HTTP/HTTPS 网页链接"},
-		"task": map[string]any{"type": "string", "description": "结合用户整句话填写要对网页做的事，例如总结并回答某个问题"},
+		"task": map[string]any{"type": "string", "description": "可选；仅当该链接有独立于当前用户原话的处理要求时填写"},
 		"offset": map[string]any{
 			"type":        "integer",
-			"description": "可选正文起始字符偏移量。用于超长长文翻页续读（例如上一段读到了 80000 字符，下一轮传 80000 即可接续读取）。默认为 0",
+			"description": "可选正文起始字符偏移量。用于长文续读，传入上次返回的 offset 即可接续读取。默认为 0",
 		},
-	}, "required": []string{"url", "task"}}
+	}, "required": []string{"url"}}
 }
 func (t *ReadLinkTool) Execute(ctx context.Context, raw json.RawMessage) (*core.ToolResult, error) {
 	var args struct {
@@ -50,13 +60,18 @@ func (t *ReadLinkTool) Execute(ctx context.Context, raw json.RawMessage) (*core.
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return nil, fmt.Errorf("invalid read_link args: %w", err)
 	}
-	target, err := normalizeExternalURL(args.URL)
+	target, err := core.NormalizeExternalURL(args.URL)
 	if err != nil {
 		return &core.ToolResult{Text: "网页链接无效：" + err.Error()}, nil
 	}
 	task := strings.TrimSpace(args.Task)
 	if task == "" {
-		task = "概括页面主要内容"
+		if event := entity.SensoryEventFromContext(ctx); event != nil {
+			task = strings.TrimSpace(event.Content)
+		}
+		if task == "" {
+			task = "概括页面主要内容"
+		}
 	}
 	if len([]rune(task)) > core.MaxUserMessageRunes {
 		return &core.ToolResult{Text: fmt.Sprintf("网页处理要求不能超过 %d 个字符，请概括具体目标后重试。", core.MaxUserMessageRunes)}, nil
@@ -76,39 +91,22 @@ func (t *ReadLinkTool) Execute(ctx context.Context, raw json.RawMessage) (*core.
 			start = 0
 		}
 		if start >= totalRunes && totalRunes > 0 {
-			return &core.ToolResult{
-				Text: fmt.Sprintf("【网页正文已全部读取完毕】（URL: %s，全文共 %d 字符，所请求起始位置 %d 已在文章末尾之后）。", target, totalRunes, start),
-			}, nil
+			return pageChunkResult(webPageChunk{URL: target, Offset: start, TotalRunes: totalRunes, Complete: true})
 		}
 
 		sliced := runes[start:]
-		const maxChunkRunes = 80000
+		const maxChunkRunes = 16000
 		hasMore := false
-		remaining := 0
 		if len(sliced) > maxChunkRunes {
 			hasMore = true
-			remaining = len(sliced) - maxChunkRunes
 			sliced = sliced[:maxChunkRunes]
 		}
 
-		var sb strings.Builder
-		if start > 0 {
-			sb.WriteString(fmt.Sprintf("【已直接读取网页续读正文（URL: %s，从第 %d 字符起，任务要求：%s）】：\n", target, start+1, task))
-		} else {
-			sb.WriteString(fmt.Sprintf("【已直接读取网页正文（URL: %s，任务要求：%s）】：\n", target, task))
-		}
-		sb.WriteString(string(sliced))
-
+		chunk := webPageChunk{URL: target, Offset: start, TotalRunes: totalRunes, Complete: !hasMore, Content: string(sliced)}
 		if hasMore {
-			nextOffset := start + maxChunkRunes
-			sb.WriteString(fmt.Sprintf("\n\n[... 网页正文尚未结束：当前已展示至第 %d 字符，全文共 %d 字符（剩余约 %d 字符）。若需继续了解后续章节，可随时告诉我“继续”或“解读后半部分”，下一轮传 offset: %d 即可接续读取 ...]", nextOffset, totalRunes, remaining, nextOffset))
-		} else if start > 0 {
-			sb.WriteString(fmt.Sprintf("\n\n[... 已读完网页正文剩余全部内容（全文共 %d 字符） ...]", totalRunes))
+			chunk.NextOffset = start + maxChunkRunes
 		}
-
-		return &core.ToolResult{
-			Text: sb.String(),
-		}, nil
+		return pageChunkResult(chunk)
 	}
 	if fetchErr != nil {
 		slog.Warn("read_link: 原生直接抓取失败，回退到 AGY 沙箱抓取", "url", target, "err", fetchErr)
@@ -116,6 +114,14 @@ func (t *ReadLinkTool) Execute(ctx context.Context, raw json.RawMessage) (*core.
 
 	// 2. 原生读取不适用或受阻时，回退到受控沙箱
 	return t.search.run(ctx, webRequest{URL: target, Task: task})
+}
+
+func pageChunkResult(chunk webPageChunk) (*core.ToolResult, error) {
+	encoded, err := json.Marshal(chunk)
+	if err != nil {
+		return nil, fmt.Errorf("encode webpage text chunk: %w", err)
+	}
+	return &core.ToolResult{Text: string(encoded)}, nil
 }
 
 // fetchDirectWebPage attempts to fetch and extract readable text from targetURL
@@ -158,7 +164,7 @@ func fetchDirectWebPage(ctx context.Context, targetURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("HTTP status %d", resp.StatusCode)

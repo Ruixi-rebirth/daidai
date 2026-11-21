@@ -27,6 +27,7 @@ func (c *Channel) Transmit(ctx context.Context, u *entity.Utterance) error {
 	if u.GroupInterjection && len(u.MentionUserIDs) == 0 {
 		reply = 0
 	}
+	u = u.WithoutEmptyImages()
 	images := u.Images
 	sources := append([]string(nil), u.ImageSources...)
 	if len(images) == 0 && len(u.CardData) > 0 {
@@ -40,14 +41,14 @@ func (c *Channel) Transmit(ctx context.Context, u *entity.Utterance) error {
 	// Validate before delivering any part of the response.
 	for _, data := range images {
 		if len(data) == 0 || len(data) > core.MaxImageBytes {
-			return fmt.Errorf("telegram image is empty or exceeds size limit")
+			return &entity.UnsentError{Err: fmt.Errorf("telegram image is empty or exceeds size limit")}
 		}
 		config, _, err := image.DecodeConfig(bytes.NewReader(data))
 		if err != nil {
-			return fmt.Errorf("telegram image format is invalid")
+			return &entity.UnsentError{Err: fmt.Errorf("telegram image format is invalid")}
 		}
 		if err = core.ValidateImageDimensions(config.Width, config.Height); err != nil {
-			return err
+			return &entity.UnsentError{Err: err}
 		}
 	}
 	text := u.Text
@@ -106,13 +107,18 @@ func (c *Channel) Transmit(ctx context.Context, u *entity.Utterance) error {
 	formattedChunks := splitFormatted(formatMarkdown(text), 1800)
 	chunks := make([]string, len(formattedChunks))
 	for i, chunk := range formattedChunks {
-		chunks[i] = chunk.Text
+		chunks[i] = chunk.continuationText()
 	}
 	for i, chunk := range chunks {
 		if strings.TrimSpace(chunk) == "" {
 			continue
 		}
 		if err := c.sendFormattedText(ctx, u.ChannelID, formattedChunks[i], reply, chunk); err != nil {
+			var receiptErr *entity.PartialDeliveryError
+			if errors.As(err, &receiptErr) {
+				delivered = joinDeliveryText(delivered, strings.Join(chunks[:i], "\n"))
+				return partial(err, strings.Join(chunks[i+1:], "\n"))
+			}
 			if sent {
 				delivered = joinDeliveryText(delivered, strings.Join(chunks[:i], "\n"))
 				return partial(err, strings.Join(chunks[i:], "\n"))
@@ -228,6 +234,9 @@ func (c *Channel) sendImages(ctx context.Context, chat string, reply int64, imag
 		if err := c.call(ctx, method, &buffer, w.FormDataContentType(), &result); err != nil {
 			return nil, err
 		}
+		if result.ID <= 0 {
+			return nil, &entity.PartialDeliveryError{Err: fmt.Errorf("telegram photo receipt has no message ID")}
+		}
 		return []message{result}, nil
 	}
 	var results []message
@@ -237,6 +246,13 @@ func (c *Channel) sendImages(ctx context.Context, chat string, reply int64, imag
 	}
 	if len(results) != len(images) {
 		return nil, &entity.PartialDeliveryError{Err: fmt.Errorf("telegram returned an incomplete album receipt")}
+	}
+	seen := make(map[int64]struct{}, len(results))
+	for _, result := range results {
+		if _, duplicate := seen[result.ID]; result.ID <= 0 || duplicate {
+			return nil, &entity.PartialDeliveryError{Err: fmt.Errorf("telegram album receipt has missing or duplicate message IDs")}
+		}
+		seen[result.ID] = struct{}{}
 	}
 	return results, nil
 }

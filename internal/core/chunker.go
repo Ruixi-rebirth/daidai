@@ -50,6 +50,60 @@ func closesMarkdownFence(line string, fence markdownFence) bool {
 	return length >= fence.length && strings.TrimSpace(trimmed[length:]) == ""
 }
 
+// CloseMarkdownFence closes an unfinished fenced code block for display.
+func CloseMarkdownFence(text string) string {
+	var open markdownFence
+	for line := range strings.SplitSeq(text, "\n") {
+		if open.length != 0 {
+			if closesMarkdownFence(line, open) {
+				open = markdownFence{}
+			}
+			continue
+		}
+		if fence, ok := parseMarkdownFence(line); ok {
+			open = fence
+		}
+	}
+	if open.length == 0 {
+		return text
+	}
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	return text + strings.Repeat(string(open.marker), open.length)
+}
+
+// MarkdownCodeBlock wraps literal text in a fence longer than any matching run.
+func MarkdownCodeBlock(text, language string) string {
+	backticks, tildes := 0, 0
+	run := 0
+	var previous byte
+	for i := 0; i < len(text); i++ {
+		char := text[i]
+		if char != previous {
+			run = 0
+		}
+		run++
+		switch char {
+		case '`':
+			backticks = max(backticks, run)
+		case '~':
+			tildes = max(tildes, run)
+		}
+		previous = char
+	}
+	marker := "`"
+	length := max(3, backticks+1)
+	if n := max(3, tildes+1); n < length {
+		marker, length = "~", n
+	}
+	fence := strings.Repeat(marker, length)
+	if text != "" && !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	return fence + language + "\n" + text + fence
+}
+
 // TruncateRunes clips text without splitting a UTF-8 character and includes the marker within the limit.
 func TruncateRunes(text string, limit int, marker string) string {
 	if limit <= 0 {

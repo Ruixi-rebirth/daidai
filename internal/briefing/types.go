@@ -6,12 +6,16 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 )
 
-const maxItems = 25
+const itemsPerSection = 5
+const MaxEditionItems = len(sources) * itemsPerSection
+const maxTitleRunes = 30
+const maxSummaryRunes = 80
+const maxSummarySentences = 2
 
-var sources = []string{"hn", "ai", "github", "v2ex", "nixos"}
-var limits = map[string]int{"nixos": 5, "hn": 5, "ai": 5, "github": 5, "v2ex": 5}
+var sources = [...]string{"hn", "ai", "github", "v2ex", "nixos"}
 var candidateLimits = map[string]int{"nixos": 8, "hn": 8, "ai": 12, "github": 8, "v2ex": 8}
 var labels = map[string]string{"nixos": "❄️ NixOS 生态", "hn": "🔥 Hacker News 精选", "ai": "🤖 AI 研究精选", "github": "💻 GitHub 开源发现", "v2ex": "💬 V2EX 技术话题"}
 
@@ -77,9 +81,26 @@ type Delivery struct {
 	Notified  bool
 }
 
+func parsePublishedLink(raw string) *url.URL {
+	link := strings.TrimSpace(raw)
+	u, err := url.Parse(link)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" || u.User != nil ||
+		strings.ContainsAny(link, "<>\\") || strings.IndexFunc(link, unicode.IsSpace) >= 0 {
+		return nil
+	}
+	return u
+}
+
+func publishedLink(raw string) string {
+	if parsePublishedLink(raw) == nil {
+		return ""
+	}
+	return strings.TrimSpace(raw)
+}
+
 func canonical(raw string) string {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" || u.User != nil {
+	u := parsePublishedLink(raw)
+	if u == nil {
 		return ""
 	}
 	u.Fragment = ""
@@ -103,7 +124,10 @@ func identity(i Item) string {
 	if i.RepoID != 0 {
 		return fmt.Sprintf("repo:%d", i.RepoID)
 	}
-	return canonical(i.URL)
+	if link := canonical(i.URL); link != "" {
+		return link
+	}
+	return i.ID
 }
 
 // OrderedItems changes presentation without renumbering a published edition.
@@ -122,6 +146,19 @@ func (e *Edition) OrderedItems() []Item {
 	return items
 }
 
+// LookupItem returns the published entry with the same links shown in the index.
+func (e *Edition) LookupItem(number int) (Item, bool) {
+	label := fmt.Sprintf("%02d", number)
+	for _, item := range e.Items {
+		if item.Number == label {
+			item.URL = publishedLink(item.URL)
+			item.DiscussionURL = publishedLink(item.DiscussionURL)
+			return item, true
+		}
+	}
+	return Item{}, false
+}
+
 func (e *Edition) Text() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# 极客早报 · %s\n\n截止 %s\n", e.ID, e.Cutoff)
@@ -138,9 +175,12 @@ func (e *Edition) Text() string {
 		if i.Summary != "" {
 			fmt.Fprintf(&b, "\n%s\n", escape(i.Summary))
 		}
-		fmt.Fprintf(&b, "\n%s\n\n原文：%s\n", escape(i.Meta), i.URL)
-		if i.DiscussionURL != "" {
-			fmt.Fprintf(&b, "讨论：%s\n", i.DiscussionURL)
+		fmt.Fprintf(&b, "\n%s\n", escape(i.Meta))
+		if link := publishedLink(i.URL); link != "" {
+			fmt.Fprintf(&b, "\n原文：%s\n", link)
+		}
+		if discussion := publishedLink(i.DiscussionURL); discussion != "" {
+			fmt.Fprintf(&b, "讨论：%s\n", discussion)
 		}
 	}
 	if len(e.Items) == 0 {
@@ -152,13 +192,26 @@ func (e *Edition) Index() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "极客早报 · %s\n", e.ID)
 	for _, i := range e.OrderedItems() {
-		fmt.Fprintf(&b, "\n[%s · %s](%s)", i.Number, escape(i.Title), i.URL)
-		if i.DiscussionURL != "" {
-			fmt.Fprintf(&b, " · [讨论](%s)", i.DiscussionURL)
+		title := fmt.Sprintf("%s · %s", i.Number, escape(i.Title))
+		if link := publishedLink(i.URL); link != "" {
+			fmt.Fprintf(&b, "\n[%s](%s)", title, markdownDestination(link))
+		} else {
+			fmt.Fprintf(&b, "\n%s", title)
+		}
+		if discussion := publishedLink(i.DiscussionURL); discussion != "" {
+			fmt.Fprintf(&b, " · [讨论](%s)", markdownDestination(discussion))
 		}
 	}
 	return b.String()
 }
+
+func markdownDestination(link string) string {
+	if strings.ContainsAny(link, "()") {
+		return "<" + link + ">"
+	}
+	return link
+}
+
 func escape(s string) string {
 	return strings.NewReplacer("\\", "\\\\", "[", "\\[", "]", "\\]", "*", "\\*", "_", "\\_", "`", "\\`", "<", "&lt;", ">", "&gt;").Replace(s)
 }

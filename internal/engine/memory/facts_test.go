@@ -72,6 +72,24 @@ func factTestEvent(t *testing.T, engine *MemoryEngine, content string) *entity.S
 	return event
 }
 
+func TestFactExtractionHistoryStopsBeforeMergedTurn(t *testing.T) {
+	store, engine, _ := newFactTestEngine(t, nil, "")
+	prior := factTestEvent(t, engine, "我平时用 NixOS")
+	first := factTestEvent(t, engine, "我平时用 NixOS")
+	merged := factTestEvent(t, engine, "最近在试新版")
+	merged.HistoryRecordIDs = append(first.HistoryRecordIDs, merged.HistoryRecordIDs...)
+	factTestEvent(t, engine, "这是之后发的消息")
+
+	history := factExtractionHistory(context.Background(), store, merged)
+	if len(history) != 1 || history[0].Text != prior.Content || !history[0].FromCurrentUser {
+		t.Fatalf("expected only the message before the merged turn, got %+v", history)
+	}
+	merged.HistoryRecordIDs = nil
+	if history := factExtractionHistory(context.Background(), store, merged); len(history) != 0 {
+		t.Fatalf("read unbounded history without a turn boundary: %+v", history)
+	}
+}
+
 func TestRepeatedFactAddsEvidenceWithoutDuplicatingFact(t *testing.T) {
 	store, engine, _ := newFactTestEngine(t, nil, `{"mutations":[{"action":"ADD","fact":"喜欢乌龙茶"}]}`)
 	for range 2 {

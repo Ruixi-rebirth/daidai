@@ -74,7 +74,7 @@ func TestGroupDreamUsesOnlyGroupSceneAndCommitsCooldownAfterDelivery(t *testing.
 	cortex, model, store, event := expressionFixture(t)
 	ctx := context.Background()
 	u, err := cortex.Think(ctx, event)
-	if err != nil || u == nil || !strings.HasPrefix(u.Text, "梦到个离谱画面") || len(u.MentionUserIDs) > 0 || event.GroupExpression != groupchat.Dream {
+	if err != nil || u == nil || !strings.HasPrefix(u.Text, "梦到个离谱画面") || len(u.MentionUserIDs) > 0 || event.GroupExpression != groupchat.Dream || u.FixedPresentation {
 		t.Fatalf("invalid dream: %+v %v", u, err)
 	}
 	encoded, _ := json.Marshal(model.messages)
@@ -110,6 +110,10 @@ func TestGroupDreamUsesOnlyGroupSceneAndCommitsCooldownAfterDelivery(t *testing.
 	}
 	if again, err := cortex.Think(ctx, event); err != nil || again != nil {
 		t.Fatal("dream bypassed successful-send cooldown")
+	}
+	prompt := model.messages[0].Content
+	if strings.Contains(prompt, "- dream：") || strings.Contains(prompt, "- chatter：") {
+		t.Fatal("prompt offered an expression during the shared cooldown")
 	}
 }
 

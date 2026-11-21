@@ -85,7 +85,7 @@ func TestManager_MessagesAndFactMutations(t *testing.T) {
 
 	// 验证重置会话切断工作记忆 (RecentMessages 不再读取游标前内容，但底层日志保留)
 	time.Sleep(5 * time.Millisecond)
-	err = mgr.ResetSessionHistory("qq", "900100")
+	err = mgr.ResetSessionHistoryInChat("qq", "group", "900100")
 	if err != nil {
 		t.Fatalf("ResetSessionHistory failed: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestManager_MessagesAndFactMutations(t *testing.T) {
 		t.Fatalf("ApplyFactMutations ADD failed: %v", err)
 	}
 
-	facts, err := mgr.ListActiveFacts(ctx, "qq", "10001")
+	facts, err := mgr.ListVisibleFacts(ctx, "qq", "10001", "", false)
 	if err != nil || len(facts) != 2 {
 		t.Fatalf("expected 2 deduplicated active facts, got %d (err: %v)", len(facts), err)
 	}
@@ -127,7 +127,7 @@ func TestManager_MessagesAndFactMutations(t *testing.T) {
 		t.Fatalf("ApplyFactMutations UPDATE/DELETE failed: %v", err)
 	}
 
-	activeAfter, err := mgr.ListActiveFacts(ctx, "qq", "10001")
+	activeAfter, err := mgr.ListVisibleFacts(ctx, "qq", "10001", "", false)
 	if err != nil || len(activeAfter) != 1 {
 		t.Fatalf("expected 1 active fact after UPDATE+DELETE, got %d (err: %v)", len(activeAfter), err)
 	}

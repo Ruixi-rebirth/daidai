@@ -178,7 +178,7 @@ func TestAGYWorker_NotLoggedIn_FailFast(t *testing.T) {
 func TestParseAGYWorkerOutput(t *testing.T) {
 	t.Run("StandardSingleJSON", func(t *testing.T) {
 		input := []byte(`{"response":"done","conversation_id":"c-123","status":"SUCCESS"}`)
-		got, err := parseAGYWorkerOutput(input)
+		got, err := llm.ParseAGYResult(input)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -189,7 +189,7 @@ func TestParseAGYWorkerOutput(t *testing.T) {
 
 	t.Run("NDJSONStreamMultipleObjects", func(t *testing.T) {
 		input := []byte("{\"type\":\"status\",\"status\":\"RUNNING\"}\n{\"type\":\"delta\",\"text\":\"working\"}\n{\"response\":\"final answer\",\"conversation_id\":\"c-456\",\"status\":\"SUCCESS\",\"finished_reason\":\"\"}\n")
-		got, err := parseAGYWorkerOutput(input)
+		got, err := llm.ParseAGYResult(input)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -200,7 +200,7 @@ func TestParseAGYWorkerOutput(t *testing.T) {
 
 	t.Run("SurroundingLogsAndPrettyPrintedJSON", func(t *testing.T) {
 		input := []byte("[INFO] 2026-11-19 Starting AGY...\nSome log line: {not valid json}\n{\n  \"response\": \"configured sysctl\",\n  \"conversation_id\": \"c-789\",\n  \"status\": \"ERROR\",\n  \"finished_reason\": \"\"\n}\n[INFO] AGY worker exited with 0\n")
-		got, err := parseAGYWorkerOutput(input)
+		got, err := llm.ParseAGYResult(input)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -211,9 +211,21 @@ func TestParseAGYWorkerOutput(t *testing.T) {
 
 	t.Run("NoValidJSON", func(t *testing.T) {
 		input := []byte("[ERROR] command failed without JSON output")
-		_, err := parseAGYWorkerOutput(input)
+		_, err := llm.ParseAGYResult(input)
 		if err == nil {
 			t.Fatalf("expected error for non-JSON output, got nil")
 		}
 	})
+}
+
+func TestAGYTicketResultDoesNotCompleteWithPartialOrFailedOutput(t *testing.T) {
+	for _, result := range []llm.AGYResult{
+		{Status: "SUCCESS", FinishedReason: "max_tokens", Response: "部分正文"},
+		{Status: "ERROR", Response: "部分正文"},
+	} {
+		text, err := agyTicketResult(result)
+		if err == nil || text != result.Response {
+			t.Fatalf("wanted incomplete result with preserved output, got %q, %v", text, err)
+		}
+	}
 }

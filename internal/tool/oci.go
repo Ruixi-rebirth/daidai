@@ -1,22 +1,15 @@
 package tool
 
 import (
-	"bytes"
 	"context"
-	"crypto"
 	"crypto/md5"
-	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -176,11 +169,7 @@ func NewOCIClient(ctx context.Context, cfg config.OCIConfig) (*OCIClient, error)
 		imdsCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		if err := FetchIMDS(imdsCtx, "instance", &meta); err == nil {
 			if tenancyOCID == "" {
-				if meta.TenantID != "" {
-					tenancyOCID = meta.TenantID
-				} else if meta.CompartmentID != "" {
-					tenancyOCID = meta.CompartmentID
-				}
+				tenancyOCID = strings.TrimSpace(meta.TenantID)
 			}
 			if compartmentID == "" && meta.CompartmentID != "" {
 				compartmentID = meta.CompartmentID
@@ -224,182 +213,4 @@ func NewOCIClient(ctx context.Context, cfg config.OCIConfig) (*OCIClient, error)
 			},
 		},
 	}, nil
-}
-
-// SignRequest 对 http.Request 实施 OCI HTTP Request Signing 签名
-func (c *OCIClient) SignRequest(req *http.Request, bodyBytes []byte) error {
-	dateStr := time.Now().UTC().Format(http.TimeFormat)
-	req.Header.Set("Date", dateStr)
-
-	host := req.URL.Host
-	if host == "" {
-		host = req.Host
-	}
-	req.Header.Set("Host", host)
-
-	method := strings.ToLower(req.Method)
-	hasBody := method == "post" || method == "put" || method == "patch"
-
-	var headersList []string
-	var signableLines []string
-
-	if hasBody {
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Content-Length", fmt.Sprintf("%d", len(bodyBytes)))
-		shaSum := sha256.Sum256(bodyBytes)
-		xSha256 := base64.StdEncoding.EncodeToString(shaSum[:])
-		req.Header.Set("X-Content-Sha256", xSha256)
-
-		headersList = []string{"date", "(request-target)", "host", "content-length", "content-type", "x-content-sha256"}
-	} else {
-		headersList = []string{"date", "(request-target)", "host"}
-	}
-
-	pathWithQuery := req.URL.RequestURI()
-	if pathWithQuery == "" {
-		pathWithQuery = req.URL.Path
-		if req.URL.RawQuery != "" {
-			pathWithQuery += "?" + req.URL.RawQuery
-		}
-	}
-
-	for _, h := range headersList {
-		switch h {
-		case "(request-target)":
-			signableLines = append(signableLines, fmt.Sprintf("(request-target): %s %s", method, pathWithQuery))
-		case "host":
-			signableLines = append(signableLines, fmt.Sprintf("host: %s", host))
-		case "date":
-			signableLines = append(signableLines, fmt.Sprintf("date: %s", dateStr))
-		default:
-			val := req.Header.Get(h)
-			signableLines = append(signableLines, fmt.Sprintf("%s: %s", h, val))
-		}
-	}
-
-	signableText := strings.Join(signableLines, "\n")
-	hashed := sha256.Sum256([]byte(signableText))
-
-	sigBytes, err := rsa.SignPKCS1v15(rand.Reader, c.privateKey, crypto.SHA256, hashed[:])
-	if err != nil {
-		return fmt.Errorf("rsa sign error: %w", err)
-	}
-
-	b64Sig := base64.StdEncoding.EncodeToString(sigBytes)
-	keyID := fmt.Sprintf("%s/%s/%s", c.tenancyOCID, c.userOCID, c.fingerprint)
-
-	authHeader := fmt.Sprintf(
-		`Signature algorithm="rsa-sha256",headers="%s",keyId="%s",signature="%s",version="%s"`,
-		strings.Join(headersList, " "),
-		keyID,
-		b64Sig,
-		signatureVersion,
-	)
-
-	req.Header.Set("Authorization", authHeader)
-	return nil
-}
-
-// Do 发送已签名的 OCI REST API 请求
-func (c *OCIClient) Do(ctx context.Context, method, urlStr string, bodyData any) (*http.Response, []byte, error) {
-	var bodyBytes []byte
-	var bodyReader io.Reader
-
-	if bodyData != nil {
-		var err error
-		bodyBytes, err = json.Marshal(bodyData)
-		if err != nil {
-			return nil, nil, fmt.Errorf("marshal request body error: %w", err)
-		}
-		bodyReader = bytes.NewReader(bodyBytes)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, method, urlStr, bodyReader)
-	if err != nil {
-		return nil, nil, fmt.Errorf("new request error: %w", err)
-	}
-
-	if err := c.SignRequest(req, bodyBytes); err != nil {
-		return nil, nil, fmt.Errorf("sign request error: %w", err)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, nil, fmt.Errorf("http request [%s %s] failed: %w", method, urlStr, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBytes, err := readLimitedBody(resp.Body, maxOCIResponseBytes)
-	if err != nil {
-		return resp, nil, fmt.Errorf("read response body error: %w", err)
-	}
-
-	return resp, respBytes, nil
-}
-
-func readLimitedBody(body io.Reader, maxBytes int64) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(body, maxBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("read response body: %w", err)
-	}
-	if int64(len(data)) > maxBytes {
-		return nil, fmt.Errorf("response body exceeded %d byte limit", maxBytes)
-	}
-	return data, nil
-}
-
-func summarizeOCIResponse(body []byte) string {
-	const maxSummaryRunes = 4000
-	text := strings.TrimSpace(string(body))
-	runes := []rune(text)
-	if len(runes) > maxSummaryRunes {
-		return string(runes[:maxSummaryRunes]) + "…(已截断)"
-	}
-	return text
-}
-
-func listOCIResources[T any](ctx context.Context, client *OCIClient, endpoint string) ([]T, error) {
-	pageURL := endpoint
-	seenPages := make(map[string]struct{})
-	var all []T
-	var totalBytes int64
-	for page := 0; page < 1000; page++ {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		resp, body, err := client.Do(ctx, http.MethodGet, pageURL, nil)
-		if err != nil {
-			return nil, fmt.Errorf("OCI list request failed: %w", err)
-		}
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("OCI list request returned HTTP %d: %s", resp.StatusCode, summarizeOCIResponse(body))
-		}
-		totalBytes += int64(len(body))
-		if totalBytes > maxOCIPaginatedBytes {
-			return nil, fmt.Errorf("OCI list response exceeded %d byte aggregate limit", maxOCIPaginatedBytes)
-		}
-		var items []T
-		if err := json.Unmarshal(body, &items); err != nil {
-			return nil, fmt.Errorf("decode OCI list response: %w", err)
-		}
-		all = append(all, items...)
-
-		next := strings.TrimSpace(resp.Header.Get("opc-next-page"))
-		if next == "" {
-			return all, nil
-		}
-		if _, exists := seenPages[next]; exists {
-			return nil, fmt.Errorf("OCI list response repeated a pagination token")
-		}
-		seenPages[next] = struct{}{}
-		parsed, err := url.Parse(endpoint)
-		if err != nil {
-			return nil, err
-		}
-		query := parsed.Query()
-		query.Set("page", next)
-		parsed.RawQuery = query.Encode()
-		pageURL = parsed.String()
-	}
-	return nil, fmt.Errorf("OCI list exceeded 1000 pages")
 }

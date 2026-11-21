@@ -58,7 +58,7 @@ func (t *FaceTool) Name() string {
 }
 
 func (t *FaceTool) Description() string {
-	return fmt.Sprintf("发送%s本人的照片、自拍或表情贴纸（支持任意拍摄角度、动作或表情，如：正脸、侧脸、半身、全身、开心、害羞、得意、比心、委屈等；本地已有则直接发送，尚无则自动按%s本人设定现拍生成并缓存）。", config.BotName(), config.BotName())
+	return fmt.Sprintf("发送%s本人的照片或表情贴纸，优先使用本地缓存；核心搭档和协作者可在未命中时现拍生成，访客仅可获取本地缓存或内置表情。", config.BotName())
 }
 
 func (t *FaceTool) Parameters() map[string]any {
@@ -76,6 +76,14 @@ func (t *FaceTool) Parameters() map[string]any {
 
 type faceArgs struct {
 	Emotion string `json:"emotion"`
+}
+
+func preparedFaceImage(data []byte) *core.ToolResult {
+	return &core.ToolResult{
+		ImageData:         data,
+		ImageOnly:         true,
+		FixedPresentation: true,
+	}
 }
 
 func normalizeEmotion(raw string) string {
@@ -187,10 +195,7 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 
 	// 1. 检查本地缓存是否存在该形象或表情
 	if data, ok := t.readCachedFace(ctx, emotion); ok {
-		return &core.ToolResult{
-			Text:      fmt.Sprintf("已发送%s的【%s】图片", config.BotName(), emotion),
-			ImageData: data,
-		}, nil
+		return preparedFaceImage(data), nil
 	}
 
 	event := entity.SensoryEventFromContext(ctx)
@@ -203,10 +208,7 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 	if event.Role == entity.RoleGuest {
 		for _, fallback := range []string{"开心", "正脸"} {
 			if data, ok := t.readCachedFace(ctx, fallback); ok {
-				return &core.ToolResult{
-					Text:      fmt.Sprintf("已发送%s的【%s】图片", config.BotName(), fallback),
-					ImageData: data,
-				}, nil
+				return preparedFaceImage(data), nil
 			}
 		}
 		return &core.ToolResult{
@@ -307,8 +309,5 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 		slog.Warn("face_tool: 更新形象缓存失败", "emotion", emotion, "err", err)
 		return &core.ToolResult{Text: fmt.Sprintf("已生成【%s】图片，但暂时无法保存到形象缓存；请重试。", emotion)}, nil
 	}
-	return &core.ToolResult{
-		Text:      fmt.Sprintf("已生成并发送%s的【%s】图片", config.BotName(), emotion),
-		ImageData: normalized,
-	}, nil
+	return preparedFaceImage(normalized), nil
 }

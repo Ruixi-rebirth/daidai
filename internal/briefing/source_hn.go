@@ -54,7 +54,7 @@ func (c *Collector) hackerNews(ctx context.Context) ([]Item, error) {
 			out = append(out, i)
 		}
 	}
-	out = rank(out, 16)
+	out = rankUniqueCandidates(out, 16)
 	if failed.Load() > 0 {
 		return out, fmt.Errorf("some HN details unavailable")
 	}

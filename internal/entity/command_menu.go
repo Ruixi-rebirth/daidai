@@ -12,6 +12,9 @@ func CommandMenu(platform string) []CommandMenuEntry {
 	var menu []CommandMenuEntry
 	seen := make(map[string]bool)
 	for _, command := range slashCommandRegistry(&SuperAgent{}) {
+		if command.platform != "" && command.platform != platform {
+			continue
+		}
 		if platform == "telegram" && strings.HasPrefix(command.usage, "/voice") {
 			continue
 		}

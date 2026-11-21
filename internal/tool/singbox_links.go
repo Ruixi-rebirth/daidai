@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 
 	"daidai/internal/core"
@@ -47,7 +45,7 @@ func (t *SingboxLinksTool) Name() string {
 }
 
 func (t *SingboxLinksTool) Description() string {
-	return "获取当前服务器的 Sing-box 代理节点配置链接 (包含 VLESS Reality 与 Hysteria 2 订阅串)。当搭档询问代理节点、获取科学上网链接或换绑 IP 需要配置时调用。仅限核心搭档私聊调用以防节点凭据泄露。"
+	return "获取当前服务器的 Sing-box 代理节点配置链接 (包含 VLESS Reality 与 Hysteria 2 订阅串)。当搭档询问代理节点、获取科学上网链接或换绑 IP 需要配置时调用。"
 }
 
 func (t *SingboxLinksTool) Parameters() map[string]any {
@@ -74,7 +72,7 @@ func (t *SingboxLinksTool) Execute(ctx context.Context, rawArgs json.RawMessage)
 	if event.IsGroup {
 		return &core.ToolResult{Text: "Sing-box 节点链接包含密钥凭证，群聊中不便展示。请直接在私聊窗口向我发送'查看singbox节点'，我会在私聊中发给你。"}, nil
 	}
-	if event.Role != entity.RolePartner {
+	if !entity.ToolAllowedInConversation(t.Name(), event) {
 		return &core.ToolResult{Text: "权限拦截：Sing-box 代理节点链接仅限核心搭档查询。"}, nil
 	}
 
@@ -109,14 +107,7 @@ func runSingboxLinks(ctx context.Context, targetIP string) (string, error) {
 	if targetIP != "" {
 		args = append(args, targetIP)
 	}
-	cmd := exec.CommandContext(commandCtx, "singbox-links", args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process != nil && cmd.Process.Pid > 0 {
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		return nil
-	}
+	cmd := core.CommandProcessGroup(commandCtx, "singbox-links", args...)
 	cmd.WaitDelay = 2 * time.Second
 	output := core.NewLimitedBuffer(1 << 20)
 	cmd.Stdout = output
@@ -176,7 +167,7 @@ func formatSingboxJSON(export SingboxExport) string {
 		}
 		for k, v := range export.SubscriptionURLs {
 			if k != "public" && k != "ipv4" && k != "ipv6" && strings.TrimSpace(v) != "" {
-				sb.WriteString(fmt.Sprintf("- **%s 订阅**：\n```text\n%s\n```\n", strings.ToUpper(k), strings.TrimSpace(v)))
+				fmt.Fprintf(&sb, "- **%s 订阅**：\n```text\n%s\n```\n", strings.ToUpper(k), strings.TrimSpace(v))
 			}
 		}
 	} else {
@@ -184,7 +175,7 @@ func formatSingboxJSON(export SingboxExport) string {
 	}
 
 	if len(export.Nodes) > 0 {
-		sb.WriteString(fmt.Sprintf("\n---\n### 🌐 独立代理节点（共 %d 个）\n", len(export.Nodes)))
+		fmt.Fprintf(&sb, "\n---\n### 🌐 独立代理节点（共 %d 个）\n", len(export.Nodes))
 		sb.WriteString("> 点击下方代码块可一键长按复制单节点链接：\n\n")
 
 		for _, node := range export.Nodes {
@@ -199,7 +190,7 @@ func formatSingboxJSON(export SingboxExport) string {
 			if node.Port > 0 {
 				protoInfo = fmt.Sprintf("%s %d", protoInfo, node.Port)
 			}
-			sb.WriteString(fmt.Sprintf("**%s** (%s)\n```text\n%s\n```\n\n", tag, protoInfo, strings.TrimSpace(node.URL)))
+			fmt.Fprintf(&sb, "**%s** (%s)\n```text\n%s\n```\n\n", tag, protoInfo, strings.TrimSpace(node.URL))
 		}
 	}
 

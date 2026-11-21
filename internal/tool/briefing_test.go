@@ -146,3 +146,65 @@ func TestBriefingSubscriptionIsPerPlatformAndNoImplicitOptIn(t *testing.T) {
 		t.Fatal("unsubscribe failed")
 	}
 }
+
+func TestBriefingLookupCanReadLastEditionItem(t *testing.T) {
+	reader, store := newTestBriefingTool(t)
+	ctx := entity.WithSensoryEvent(context.Background(), &entity.SensoryEvent{Platform: "qq", ChannelID: "owner", Role: entity.RolePartner})
+	now := reader.service.Now()
+	edition := &briefing.Edition{ID: now.Format("2006-01-02"), Items: []briefing.Item{
+		{Number: "25", Source: "nixos", Title: "最后一条", URL: "https://example.com/last", DiscussionURL: "javascript:invalid"},
+	}}
+	if err := store.Begin(ctx, edition.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(ctx, edition); err != nil {
+		t.Fatal(err)
+	}
+	result, err := reader.Execute(ctx, json.RawMessage(`{"date":"today","item":25}`))
+	if err != nil || result == nil || !strings.Contains(result.Text, "https://example.com/last") || strings.Contains(result.Text, "javascript:") {
+		t.Fatalf("last article could not be read: %+v, %v", result, err)
+	}
+	if _, err := reader.Execute(ctx, json.RawMessage(`{"date":"today","item":26}`)); err == nil {
+		t.Fatal("out-of-range item accepted")
+	}
+}
+
+func TestBriefingStatusUsesRequestedEdition(t *testing.T) {
+	manager, store := newTestBriefingTool(t)
+	manager.manage = true
+	ctx := entity.WithSensoryEvent(context.Background(), &entity.SensoryEvent{Platform: "qq", ChannelID: "owner", Role: entity.RolePartner})
+	const date = "2026-10-01"
+	now := manager.service.Now()
+	if err := store.Begin(ctx, date, now); err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.Execute(ctx, json.RawMessage(`{"action":"status","date":"2026-10-01"}`))
+	if err != nil || result == nil || !strings.Contains(result.Text, date+" 刊物：生成中") {
+		t.Fatalf("requested date was ignored: %+v, %v", result, err)
+	}
+}
+
+func TestBriefingContinuationFindsUnfinishedOlderEdition(t *testing.T) {
+	manager, store := newTestBriefingTool(t)
+	manager.manage = true
+	ctx := entity.WithSensoryEvent(context.Background(), &entity.SensoryEvent{Platform: "qq", ChannelID: "owner", Role: entity.RolePartner})
+	sub := briefing.Subscription{Platform: "qq", Recipient: "owner", Owner: "owner"}
+	if err := store.Touch(ctx, sub, nil); err != nil {
+		t.Fatal(err)
+	}
+	now := manager.service.Now()
+	edition := &briefing.Edition{ID: now.AddDate(0, 0, -2).Format("2006-01-02")}
+	if err := store.Begin(ctx, edition.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(ctx, edition); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveDelivery(ctx, &briefing.Delivery{Edition: edition.ID, Platform: sub.Platform, Recipient: sub.Recipient, Status: "partial", Remaining: "尚未发送"}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := manager.Execute(ctx, json.RawMessage(`{"action":"resend_remaining"}`))
+	if err != nil || result == nil || !strings.Contains(result.Text, "正在发送已有早报") {
+		t.Fatalf("unnamed continuation did not select an unfinished edition: %+v, %v", result, err)
+	}
+}

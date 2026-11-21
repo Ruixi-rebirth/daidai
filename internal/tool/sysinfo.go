@@ -25,7 +25,7 @@ func (t *SysInfoTool) Name() string {
 }
 
 func (t *SysInfoTool) Description() string {
-	return fmt.Sprintf("获取%s的主机标识、机器人进程状态和当前消息通道连接状态，包括进程运行时间、Go 堆已分配内存、Go 运行时向系统申请的内存、Goroutine 数、逻辑 CPU，以及 Linux 主机 CPU 使用率、内存、根分区、系统运行时间和负载。QQ 状态检查的是 WebSocket 收消息网关；主动发送 API 的可用性不会在此探测，网关断开不代表主动发送一定不可用。状态会以图片卡片展示，并保留文字回退。搭档私聊还会看到启动目录和公网 IP。当用户询问机器人运行状态时调用此工具。查询项目工作空间请使用 switch_workspace 工具。", config.BotName())
+	return fmt.Sprintf("查询%s的进程、主机资源和消息通道状态。当用户询问运行状态时调用；QQ 状态只表示 WebSocket 收消息网关，不代表主动发送 API 状态。搭档私聊还会显示启动目录和公网 IP。", config.BotName())
 }
 
 func (t *SysInfoTool) Parameters() map[string]any {

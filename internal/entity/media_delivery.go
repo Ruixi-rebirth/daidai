@@ -40,3 +40,31 @@ func ImageDeliveryText(sources []string, delivered int) (complete, pending strin
 	}
 	return strings.Join(done, "\n\n"), strings.Join(todo, "\n\n")
 }
+
+// WithoutEmptyImages keeps image positions aligned with their source text.
+func (u *Utterance) WithoutEmptyImages() *Utterance {
+	for _, image := range u.Images {
+		if len(image) != 0 {
+			continue
+		}
+		filtered := *u
+		filtered.Images = nil
+		filtered.ImageSources = nil
+		filtered.InlineNonTextImageCount = 0
+		for index, data := range u.Images {
+			if len(data) == 0 {
+				continue
+			}
+			filtered.Images = append(filtered.Images, data)
+			if index < len(u.ImageSources) {
+				filtered.ImageSources = append(filtered.ImageSources, u.ImageSources[index])
+			}
+			if index < u.InlineNonTextImageCount {
+				filtered.InlineNonTextImageCount++
+			}
+		}
+		filtered.InlineImages = len(filtered.Images) > 0 && u.InlineImages
+		return &filtered
+	}
+	return u
+}

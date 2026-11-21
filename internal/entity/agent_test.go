@@ -2,6 +2,8 @@ package entity
 
 import (
 	"context"
+	"daidai/internal/core"
+	"daidai/internal/db"
 	"errors"
 	"strings"
 	"testing"
@@ -24,8 +26,46 @@ func (mc *mockChannel) Transmit(ctx context.Context, u *Utterance) error {
 func (mc *mockChannel) Stop(ctx context.Context) error { return nil }
 
 type mockCognition struct {
-	reply string
-	delay time.Duration
+	reply    string
+	delay    time.Duration
+	thinkErr error
+}
+
+func TestAskBeforeUnrequestedAttachmentProcessing(t *testing.T) {
+	channel := &mockChannel{name: "qq"}
+	telegramChannel := &mockChannel{name: "telegram"}
+	channels := NewChannelRegistry()
+	channels.Register(channel)
+	channels.Register(telegramChannel)
+	agent := &SuperAgent{Channels: channels}
+	event := &SensoryEvent{
+		Platform: "qq", IsGroup: true, ChannelID: "group", SenderID: "member",
+		Role: RoleGuest, Images: []*core.Attachment{{URL: "private-image-url"}},
+	}
+
+	if !agent.askBeforeUnrequestedAttachmentProcessing(context.Background(), event, "") {
+		t.Fatal("attachment-only message should be handled before cognition")
+	}
+	if channel.sentUtter == nil || !strings.Contains(channel.sentUtter.Text, "还没有查看或读取") {
+		t.Fatalf("expected an explicit attachment processing question, got %+v", channel.sentUtter)
+	}
+	if strings.Contains(channel.sentUtter.Text, "private-image-url") {
+		t.Fatal("attachment URL leaked into the prompt")
+	}
+
+	channel.sentUtter = nil
+	if agent.askBeforeUnrequestedAttachmentProcessing(context.Background(), event, "请描述这张图") {
+		t.Fatal("an explicit attachment request should continue to cognition")
+	}
+	if channel.sentUtter != nil {
+		t.Fatal("explicit attachment request should not receive the generic question")
+	}
+
+	missing := &SensoryEvent{Platform: "telegram", IsGroup: true, ChannelID: "group", OmittedFiles: 2}
+	if !agent.askBeforeUnrequestedAttachmentProcessing(context.Background(), missing, "") ||
+		telegramChannel.sentUtter == nil || !strings.Contains(telegramChannel.sentUtter.Text, "2 个文件") {
+		t.Fatalf("omitted attachments should still be reported: %+v", telegramChannel.sentUtter)
+	}
 }
 
 func (m *mockCognition) MindStatus() string {
@@ -48,6 +88,9 @@ func (m *mockCognition) Think(ctx context.Context, event *SensoryEvent) (*Uttera
 			return nil, ctx.Err()
 		}
 	}
+	if m.thinkErr != nil {
+		return nil, m.thinkErr
+	}
 	return &Utterance{
 		Platform:   event.Platform,
 		IsGroup:    event.IsGroup,
@@ -55,6 +98,25 @@ func (m *mockCognition) Think(ctx context.Context, event *SensoryEvent) (*Uttera
 		QuoteMsgID: event.RawMessageID,
 		Text:       m.reply,
 	}, nil
+}
+
+func TestSuperAgent_ReportsCognitionFailure(t *testing.T) {
+	channel := &mockChannel{name: "qq"}
+	channels := NewChannelRegistry()
+	channels.Register(channel)
+	agent := NewSuperAgent(Config{
+		PartnerID: "owner",
+		Cognition: &mockCognition{thinkErr: errors.New("model unavailable")},
+		Channels:  channels,
+	})
+
+	agent.Process(context.Background(), &SensoryEvent{
+		Platform: "qq", ChannelID: "owner", SenderID: "owner", Role: RolePartner,
+		Content: "请帮我处理",
+	})
+	if channel.sentUtter == nil || !strings.Contains(channel.sentUtter.Text, "这次处理没有完成") {
+		t.Fatalf("cognition failure should receive a truthful fallback: %+v", channel.sentUtter)
+	}
 }
 
 func TestSuperAgent_CreationAndPerception(t *testing.T) {
@@ -301,6 +363,47 @@ type failingReplyChannel struct {
 	send func(*Utterance) error
 }
 
+type draftContinuationCognition struct {
+	Cognition
+	requests []string
+}
+
+func (c *draftContinuationCognition) ContinueDraft(_ context.Context, _ *SensoryEvent, id string) (*Utterance, string, error) {
+	c.requests = append(c.requests, id)
+	return nil, "", nil
+}
+
+func TestContinuePrioritizesUnsentTextAndRespectsDraftID(t *testing.T) {
+	ctx := context.Background()
+	event := &SensoryEvent{Platform: "qq", ChannelID: "private", SenderID: "owner", Role: RolePartner}
+	channel := &mockChannel{name: "qq"}
+	registry := NewChannelRegistry()
+	registry.Register(channel)
+	cognition := &draftContinuationCognition{}
+	a := &SuperAgent{Channels: registry, Cognition: cognition}
+	a.setReplyContinuation(ctx, event.SenderID, &Utterance{Platform: event.Platform, ChannelID: event.ChannelID}, "尚未送达的正文")
+	a.setReplyContinuation(ctx, event.SenderID, &Utterance{Platform: event.Platform, ChannelID: event.ChannelID, DraftID: "draft-2"}, "草稿二未送达的正文")
+
+	event.Content = "/continue\tdraft-2"
+	a.Process(ctx, event)
+	if len(cognition.requests) != 0 || channel.sentUtter == nil || channel.sentUtter.Text != "草稿二未送达的正文" {
+		t.Fatalf("selected draft generated a new segment instead of resending: requests=%v sent=%+v", cognition.requests, channel.sentUtter)
+	}
+
+	event.Content = "/continue missing"
+	a.Process(ctx, event)
+	if len(cognition.requests) != 1 || cognition.requests[0] != "missing" ||
+		channel.sentUtter == nil || !strings.Contains(channel.sentUtter.Text, "草稿") {
+		t.Fatalf("explicit draft selection failed: requests=%v sent=%+v", cognition.requests, channel.sentUtter)
+	}
+
+	event.Content = "继续"
+	a.Process(ctx, event)
+	if len(cognition.requests) != 1 || channel.sentUtter == nil || channel.sentUtter.Text != "尚未送达的正文" {
+		t.Fatalf("pending text did not take priority: requests=%v sent=%+v", cognition.requests, channel.sentUtter)
+	}
+}
+
 func (c *failingReplyChannel) Transmit(_ context.Context, u *Utterance) error {
 	return c.send(u)
 }
@@ -313,40 +416,51 @@ func TestReplyContinuationDelivery(t *testing.T) {
 	registry.Register(channel)
 	a := &SuperAgent{Channels: registry}
 	u := &Utterance{Platform: "qq", ChannelID: "group", IsGroup: true, Text: "尚未送达的正文"}
+	commits := 0
+	u.OnDelivered = func(context.Context) { commits++ }
 	channel.send = func(*Utterance) error { return errors.New("offline") }
 	if _, err := a.transmitUtterance(ctx, u, "owner"); err == nil {
 		t.Fatal("expected send failure")
 	}
 	other := *event
 	other.SenderID = "other"
-	if _, ok := a.takeReplyContinuation(&other); ok {
+	if _, ok := a.takeReplyContinuation(&other, ""); ok {
 		t.Fatal("another user received the continuation")
 	}
 	// A failed retry must restore the original exactly once.
-	a.handleContinueCommand(ctx, event, "")
-	got, ok := a.takeReplyContinuation(event)
-	if !ok || got != u.Text {
-		t.Fatalf("failed retry lost or duplicated reply: %q", got)
+	a.handleContinueCommand(ctx, event, "继续")
+	got, ok := a.takeReplyContinuation(event, "")
+	if !ok || got.text != u.Text {
+		t.Fatalf("failed retry lost or duplicated reply: %q", got.text)
 	}
 	a.restoreReplyContinuation(ctx, event, got)
 	channel.send = func(*Utterance) error {
 		return &PartialDeliveryError{Err: errors.New("offline"), DeliveredText: "尚未", UndeliveredText: "送达的正文"}
 	}
-	a.handleContinueCommand(ctx, event, "")
-	got, _ = a.takeReplyContinuation(event)
-	if got != "送达的正文" {
-		t.Fatalf("partial retry retained delivered text: %q", got)
+	a.handleContinueCommand(ctx, event, "继续")
+	got, _ = a.takeReplyContinuation(event, "")
+	if got.text != "送达的正文" {
+		t.Fatalf("partial retry retained delivered text: %q", got.text)
+	}
+	if commits != 0 {
+		t.Fatal("partial delivery committed the reply")
 	}
 	a.restoreReplyContinuation(ctx, event, got)
 	channel.send = func(u *Utterance) error {
-		if u.Text != got {
+		if u.Text != got.text {
 			t.Fatalf("unexpected retry: %q", u.Text)
+		}
+		if u.TargetUserID != event.SenderID || len(u.MentionUserIDs) != 1 || u.MentionUserIDs[0] != event.SenderID {
+			t.Fatalf("retry did not address the requester: %+v", u)
 		}
 		return nil
 	}
-	a.handleContinueCommand(ctx, event, "")
-	if _, ok := a.takeReplyContinuation(event); ok {
+	a.handleContinueCommand(ctx, event, "继续")
+	if _, ok := a.takeReplyContinuation(event, ""); ok {
 		t.Fatal("successful reply still pending")
+	}
+	if commits != 1 {
+		t.Fatalf("successful retry committed %d times", commits)
 	}
 }
 
@@ -357,18 +471,81 @@ func TestReplyContinuationOmitsPaginationHint(t *testing.T) {
 	registry.Register(channel)
 	a := &SuperAgent{Channels: registry}
 	channel.send = func(u *Utterance) error {
+		if !u.HasMoreText || u.DraftID != "draft-1" || strings.Contains(u.Text, "/continue") || len(u.ImageSources) != 0 || u.InlineNonTextImageCount != 0 {
+			t.Fatalf("invalid paginated text payload: draft prompt or media metadata")
+		}
 		return &PartialDeliveryError{Err: errors.New("offline"), UndeliveredText: u.Text}
 	}
 	text := strings.Repeat("正文内容", 2000) + "结尾"
-	u := &Utterance{Platform: "qq", ChannelID: "private"}
+	u := &Utterance{Platform: "qq", ChannelID: "private", DraftID: "draft-1", ImageSources: []string{"图片来源"}, InlineNonTextImageCount: 1}
 	if _, err := a.transmitTextFallback(ctx, u, text, "owner"); err != nil {
 		t.Fatal(err)
 	}
-	got, _ := a.takeReplyContinuation(&SensoryEvent{Platform: "qq", ChannelID: "private", SenderID: "owner"})
-	if strings.Contains(got, "已达到平台") || !strings.HasSuffix(got, "结尾") {
+	got, _ := a.takeReplyContinuation(&SensoryEvent{Platform: "qq", ChannelID: "private", SenderID: "owner"}, "draft-1")
+	if strings.Contains(got.text, "已达到平台") || !strings.HasSuffix(got.text, "结尾") {
 		t.Fatal("continuation contains pagination metadata or lost its tail")
 	}
-	if strings.ReplaceAll(got, "\n", "") != text {
+	if strings.ReplaceAll(got.text, "\n", "") != text {
 		t.Fatal("partial delivery lost or duplicated content")
+	}
+}
+
+func TestResetCommandUsesConfiguredDatabase(t *testing.T) {
+	ctx := context.Background()
+	store := db.NewManager(t.TempDir())
+	t.Cleanup(func() { _ = store.Close() })
+	draft := db.ConversationDraft{ID: "existing", Platform: "qq", ChatType: "private", ConversationID: "chat", RequesterID: "owner", ContextJSON: "{}", UpdatedAt: time.Now()}
+	if err := store.SaveConversationDraft(ctx, draft); err != nil {
+		t.Fatal(err)
+	}
+	channel := &mockChannel{name: "qq"}
+	registry := NewChannelRegistry()
+	registry.Register(channel)
+	agent := NewSuperAgent(Config{Database: store, Channels: registry})
+	agent.handleResetCommand(ctx, &SensoryEvent{Platform: "qq", ChannelID: "chat", SenderID: "owner", Role: RolePartner}, "/reset")
+	remaining, err := store.GetConversationDraft(ctx, draft.Platform, draft.ChatType, draft.ConversationID, draft.RequesterID, draft.ID)
+	if err != nil || remaining != nil || channel.sentUtter == nil {
+		t.Fatalf("configured store was not reset: draft=%+v, err=%v", remaining, err)
+	}
+}
+
+type pendingCardRenderer struct{ Cognition }
+
+func (*pendingCardRenderer) RenderCard(context.Context, *SensoryEvent, string) ([]byte, error) {
+	return []byte("card"), nil
+}
+
+func TestPendingNotificationKeepsOnlyUnsentCardText(t *testing.T) {
+	channel := &failingReplyChannel{mockChannel: mockChannel{name: "qq"}}
+	sends := 0
+	channel.send = func(*Utterance) error {
+		sends++
+		return &PartialDeliveryError{Err: errors.New("partial"), DeliveredText: "前段", UndeliveredText: "尾段"}
+	}
+	registry := NewChannelRegistry()
+	registry.Register(channel)
+	agent := &SuperAgent{Channels: registry, Cognition: &pendingCardRenderer{}}
+	event := &SensoryEvent{Platform: "qq", ChannelID: "chat", SenderID: "owner"}
+	complete, remaining, err := agent.transmitPendingNotification(context.Background(), event, "通知", "前段尾段")
+	if err != nil || complete || remaining != "尾段" || sends != 1 {
+		t.Fatalf("partial notification was not retained correctly: complete=%v remaining=%q sends=%d err=%v", complete, remaining, sends, err)
+	}
+}
+
+func TestPendingNotificationDoesNotImmediatelyResendAmbiguousCard(t *testing.T) {
+	channel := &failingReplyChannel{mockChannel: mockChannel{name: "qq"}}
+	sends := 0
+	transportErr := errors.New("missing response")
+	channel.send = func(*Utterance) error {
+		sends++
+		return transportErr
+	}
+	registry := NewChannelRegistry()
+	registry.Register(channel)
+	agent := &SuperAgent{Channels: registry, Cognition: &pendingCardRenderer{}}
+	event := &SensoryEvent{Platform: "qq", ChannelID: "chat", SenderID: "owner"}
+	complete, _, err := agent.transmitPendingNotification(context.Background(), event, "通知", "等待发送")
+	if complete || !errors.Is(err, transportErr) || sends != 1 {
+		t.Fatalf("ambiguous card was retried immediately: complete=%v sends=%d err=%v", complete, sends, err)
 	}
 }

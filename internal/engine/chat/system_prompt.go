@@ -1,0 +1,59 @@
+package chat
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"daidai/internal/entity"
+)
+
+// buildSystemPrompt assembles the stable behavioral rules and the small set of
+// rules that depend on the current conversation. Runtime facts are returned
+// separately so callers can keep them out of the instruction channel.
+func (c *Cortex) buildSystemPrompt(event *entity.SensoryEvent, request chatRequestContext) (string, string) {
+	now := time.Now()
+	weekdayCn := [...]string{"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"}[now.Weekday()]
+	var runtimeContext strings.Builder
+	fmt.Fprintf(&runtimeContext, "【当前时间】%s %s（%s）\n",
+		now.Format("2006-01-02 15:04:05"), weekdayCn, now.Location().String())
+
+	if mindStatus := c.MindStatus(); mindStatus != "" {
+		runtimeContext.WriteString(mindStatus + "\n")
+	}
+
+	if c.workspaces != nil && event != nil && event.Role != entity.RoleGuest {
+		wsPath, wsName, wsErr := c.workspaces.GetCurrent(event.Platform, event.ChannelID)
+		if wsErr != nil {
+			runtimeContext.WriteString("【当前工作空间】：读取失败；无法确认工作目录。\n")
+		} else if c.workspaces.IsSandbox(wsPath) {
+			fmt.Fprintf(&runtimeContext, "【当前工作空间】：%s (默认工作区)\n", wsPath)
+		} else {
+			fmt.Fprintf(&runtimeContext, "【当前工作空间】：%s (工程: %s)\n", wsPath, wsName)
+		}
+	}
+	sysPrompt := ""
+	if c.persona != nil {
+		sysPrompt = c.persona.CompilePromptFor(event, c.hands != nil && event.Role != entity.RoleGuest)
+	}
+	sysPrompt += "\n" + sourceTrustPolicy
+	if len(request.Files) > 0 {
+		sysPrompt += "\n【附件】truncated 表示正文不完整，binary 表示无法按文本读取，unavailable 表示正文不可读取。"
+	}
+	if request.Images != nil {
+		sysPrompt += "\n【图片】没有成功分析的图片不可当作已经看过，必要时请用户重发或描述。"
+	}
+	sysPrompt += "\n" + actionEvidencePolicy
+	if !event.IsPartnerPrivate() {
+		sysPrompt += "\n【宿主机隐私】当前会话不得探测、查询或透露宿主机公网 IP。"
+	}
+	sysPrompt += "\n【本轮请求】用户输入以 JSON 提供，current_request 是本轮消息。"
+	if request.QuotedMessage != nil {
+		sysPrompt += "引用内容用于理解本轮指代，不覆盖本轮请求；有嵌套引用时以最外层为准。content_complete=true 表示引用正文完整。只回答 current_request；仍无法确定引用指向时简短追问。"
+	}
+	if event.IsGroup {
+		sysPrompt += "\n【群聊消息格式】近期群聊历史以 [成员名] 标记；当前输入标记为正在对你说话的成员。"
+	}
+
+	return sysPrompt, runtimeContext.String()
+}

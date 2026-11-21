@@ -46,10 +46,10 @@ func (c *Collector) v2ex(ctx context.Context) ([]Item, error) {
 		out = append(out, Item{ID: fmt.Sprintf("v2ex:%d", v.ID), Source: "v2ex", Title: clipped(v.Title, 200), URL: fmt.Sprintf("https://www.v2ex.com/t/%d", v.ID), Evidence: clipped(v.Content, 1400), EvidenceKind: kind, Meta: fmt.Sprintf("%s · %d 条回复 · 首帖", clipped(v.Node.Title, 24), v.Replies), PublishedAt: time.Unix(v.Created, 0), Score: v.Replies})
 	}
 	if hotErr != nil {
-		return rank(out, 8), hotErr
+		return rank(out, candidateLimits["v2ex"]), hotErr
 	}
 	if latestErr != nil {
-		return rank(out, 8), latestErr
+		return rank(out, candidateLimits["v2ex"]), latestErr
 	}
-	return rank(out, 8), nil
+	return rank(out, candidateLimits["v2ex"]), nil
 }

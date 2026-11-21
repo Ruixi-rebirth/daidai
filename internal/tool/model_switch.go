@@ -30,7 +30,7 @@ func (t *ModelSwitchTool) Name() string {
 }
 
 func (t *ModelSwitchTool) Description() string {
-	return "查看、列出或切换心智模型与思考强度 (effort)，查询各通道模型池与用量配额状态 (usage)。当用户询问当前模型、有哪些可用模型、AGY 状态/模型/用量/配额 (usage)、API 通道模型或请求切换模型时，必须调用本工具获取最新权威数据，严禁凭空臆造。支持 action: 'list' (列出所有或指定通道可用模型与配额说明)、'current' (查看当前激活模型)、'switch' (热切换模型或调整思考强度)、'usage' (查询模型通道状态与用量计费说明)。"
+	return "查询当前模型、可用模型和通道用量，或切换模型与思考强度；状态问题须读取实时数据。"
 }
 
 func (t *ModelSwitchTool) Parameters() map[string]any {

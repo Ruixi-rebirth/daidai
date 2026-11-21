@@ -120,15 +120,16 @@ func LaTeXToTypstMath(latex string) string {
 			case "text", "textrm", "textit", "textbf", "mathrm", "mathbf", "mathit", "operatorname":
 				arg, nextI := readLatexArg(runes, i)
 				i = nextI
-				if macro == "mathbf" {
+				switch macro {
+				case "mathbf":
 					sb.WriteString("bold(")
 					sb.WriteString(LaTeXToTypstMath(arg))
 					sb.WriteString(")")
-				} else if macro == "mathit" {
+				case "mathit":
 					sb.WriteString("italic(")
 					sb.WriteString(LaTeXToTypstMath(arg))
 					sb.WriteString(")")
-				} else {
+				default:
 					sb.WriteString(`"`)
 					sb.WriteString(escapeTypstStringContent(arg))
 					sb.WriteString(`"`)
@@ -432,9 +433,10 @@ func readLatexArg(runes []rune, start int) (string, int) {
 				i += 2
 				continue
 			}
-			if runes[i] == '{' {
+			switch runes[i] {
+			case '{':
 				braceCount++
-			} else if runes[i] == '}' {
+			case '}':
 				braceCount--
 				if braceCount == 0 {
 					return string(runes[contentStart:i]), i + 1

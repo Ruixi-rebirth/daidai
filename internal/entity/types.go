@@ -12,6 +12,16 @@ import (
 
 var ErrMessageTooLong = errors.New("message exceeds the platform's single-response limit")
 
+// ErrReplyDeadlineWithDraft reports a timed-out reply with a saved checkpoint.
+var ErrReplyDeadlineWithDraft = fmt.Errorf("reply deadline with saved draft: %w", context.DeadlineExceeded)
+
+type ReplyDeadlineWithDraft struct {
+	DraftID string
+}
+
+func (e *ReplyDeadlineWithDraft) Error() string { return ErrReplyDeadlineWithDraft.Error() }
+func (e *ReplyDeadlineWithDraft) Unwrap() error { return ErrReplyDeadlineWithDraft }
+
 // UserRole 用户身份与权限级别
 type UserRole = core.UserRole
 
@@ -90,6 +100,9 @@ type Utterance struct {
 	IsGroup                 bool   // 是否为群聊会话
 	ChannelID               string // 纯净会话标识 (纯群号或纯私聊用户 ID)
 	QuoteMsgID              string
+	DraftID                 string // 将未送达的续写正文关联到指定草稿
+	continuationQueuedAt    time.Time
+	HasMoreText             bool     // 本次发送之后仍有正文等待续发
 	TargetUserID            string   // 目标用户 ID (群聊回复或插话的交互对象)
 	Proactive               bool     // 主动发送；平台可能限制适用场景或频率
 	GroupInterjection       bool     // 未 @ 群消息的有限插话；必须关联原群消息作为被动回复
@@ -101,6 +114,7 @@ type Utterance struct {
 	ImageSources            []string // 与 Images 对齐；文字渲染图保留正文，真实图片留空
 	InlineImages            bool     // 将多张图片作为 Markdown 图片引用放进同一条消息
 	InlineNonTextImageCount int      // InlineImages 中非正文分页渲染图的数量
+	SuppressAutoCard        bool     // 用户要求纯文字时，跳过自动长图排版
 	OnDelivered             func(context.Context)
 	FixedPresentation       bool // 已由结构化视图完成排版，不再次把索引或文字回退转成图
 	OnDeliveryFailed        func(context.Context, error)
@@ -194,22 +208,29 @@ func SensoryEventFromContext(ctx context.Context) *SensoryEvent {
 	return ev
 }
 
-// WithSystemToolAccess marks a host initiated tool call that has no user
-// identity, such as the internal model-list/status queries. Callers must not
-// use it for tool calls originating from a user message.
-func WithSystemToolAccess(ctx context.Context) context.Context {
+// WithSystemToolAccess grants host code access only to the named tools. It is
+// for internal calls that have no user initiated tool request; callers must
+// never use it to bypass permissions for a model generated tool call.
+func WithSystemToolAccess(ctx context.Context, toolNames ...string) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return context.WithValue(ctx, systemToolAccessKey{}, true)
+	allowed := make(map[string]struct{}, len(toolNames))
+	for _, name := range toolNames {
+		if name != "" {
+			allowed[name] = struct{}{}
+		}
+	}
+	return context.WithValue(ctx, systemToolAccessKey{}, allowed)
 }
 
-// HasSystemToolAccess reports whether the host explicitly authorized a
-// user-independent tool call.
-func HasSystemToolAccess(ctx context.Context) bool {
+// HasSystemToolAccess reports whether host code explicitly authorized this
+// specific tool for a user-independent call.
+func HasSystemToolAccess(ctx context.Context, toolName string) bool {
 	if ctx == nil {
 		return false
 	}
-	allowed, _ := ctx.Value(systemToolAccessKey{}).(bool)
-	return allowed
+	allowed, _ := ctx.Value(systemToolAccessKey{}).(map[string]struct{})
+	_, ok := allowed[toolName]
+	return ok
 }

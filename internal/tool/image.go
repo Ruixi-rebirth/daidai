@@ -6,10 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"daidai/internal/config"
@@ -19,19 +17,12 @@ import (
 )
 
 // runStatelessImageGen 无状态调用一次 agy 执行生图子任务（不占用工程工单槽位，不累积幽灵会话上下文）
-type agyRunResult struct {
-	ConversationID string `json:"conversation_id"`
-	Status         string `json:"status"`
-	Response       string `json:"response"`
-	Error          string `json:"error"`
-}
-
-func runStatelessImageGen(ctx context.Context, command, goal, workDir string) (agyRunResult, error) {
+func runStatelessImageGen(ctx context.Context, command, goal, workDir string) (llm.AGYResult, error) {
 	if ctx == nil {
-		return agyRunResult{}, fmt.Errorf("image generation requires a caller context")
+		return llm.AGYResult{}, fmt.Errorf("image generation requires a caller context")
 	}
 	if err := llm.CheckAGYAuth(); err != nil {
-		return agyRunResult{}, err
+		return llm.AGYResult{}, err
 	}
 	command = strings.TrimSpace(command)
 	if command == "" {
@@ -44,16 +35,9 @@ func runStatelessImageGen(ctx context.Context, command, goal, workDir string) (a
 		"--sandbox",
 	}
 
-	cmd := exec.CommandContext(ctx, command, args...)
+	cmd := core.CommandProcessGroup(ctx, command, args...)
 	if workDir != "" {
 		cmd.Dir = workDir
-	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process != nil && cmd.Process.Pid > 0 {
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		return nil
 	}
 	cmd.WaitDelay = 2 * time.Second
 
@@ -73,25 +57,25 @@ func runStatelessImageGen(ctx context.Context, command, goal, workDir string) (a
 		if stdoutBuf.Truncated() || stderrBuf.Truncated() {
 			errDetail += " (子进程输出已截断)"
 		}
-		return agyRunResult{}, fmt.Errorf("%w (%s)", err, errDetail)
+		return llm.AGYResult{}, fmt.Errorf("%w (%s)", err, errDetail)
 	}
-	var result agyRunResult
-	if err := json.Unmarshal(stdoutBuf.Bytes(), &result); err != nil {
-		return agyRunResult{}, fmt.Errorf("解析 AGY JSON 结果失败: %w", err)
+	if stdoutBuf.Truncated() {
+		return llm.AGYResult{}, fmt.Errorf("AGY 标准输出超过 2 MiB，无法确认生成结果")
 	}
-	if result.Status != "SUCCESS" {
-		if strings.TrimSpace(result.Error) == "" {
-			result.Error = result.Response
-		}
-		return result, fmt.Errorf("AGY 任务状态为 %q: %s", result.Status, strings.TrimSpace(result.Error))
+	result, err := llm.ParseAGYResult(stdoutBuf.Bytes())
+	if err != nil {
+		return llm.AGYResult{}, fmt.Errorf("解析 AGY JSON 结果失败: %w", err)
+	}
+	if detail := result.FailureDetail(); detail != "" {
+		return result, fmt.Errorf("AGY 生图失败: %s", core.TruncateRunes(detail, 1000, "…"))
+	}
+	if !strings.EqualFold(strings.TrimSpace(result.Status), "SUCCESS") {
+		return result, fmt.Errorf("AGY 未确认生图成功")
 	}
 	if result.ConversationID == "" {
 		return result, fmt.Errorf("AGY 结果缺少 conversation_id")
 	}
 	output := strings.TrimSpace(result.Response)
-	if stdoutBuf.Truncated() {
-		output += "\n[标准输出已截断，最多保留 2 MiB]"
-	}
 	if runes := []rune(output); len(runes) > 8000 {
 		output = string(runes[:8000]) + "... (输出摘要已截断)"
 	}
@@ -254,8 +238,9 @@ func (t *ImageTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 			return &core.ToolResult{Text: fmt.Sprintf("生图任务写出了文件，但无法识别或转换为可发送图片（检测类型：%s）：%v", imageContentType(data), normalizeErr)}, nil
 		}
 		return &core.ToolResult{
-			Text:      fmt.Sprintf("已生成图片：%s", prompt),
-			ImageData: normalized,
+			ImageData:         normalized,
+			ImageOnly:         true,
+			FixedPresentation: true,
 		}, nil
 	} else if err != nil && !os.IsNotExist(err) {
 		slog.Warn("image_tool: 生成结果读取失败", "err", err)
@@ -272,7 +257,7 @@ func (t *ImageTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 			slog.Warn("image_tool: AGY 会话产物无法解码或转换", "contentType", imageContentType(data), "format", format, "bytes", len(data), "err", normalizeErr)
 			return &core.ToolResult{Text: fmt.Sprintf("生图任务写出了文件，但无法识别或转换为可发送图片（检测类型：%s）：%v", imageContentType(data), normalizeErr)}, nil
 		}
-		return &core.ToolResult{Text: fmt.Sprintf("已生成图片：%s", prompt), ImageData: normalized}, nil
+		return &core.ToolResult{ImageData: normalized, ImageOnly: true, FixedPresentation: true}, nil
 	} else if err != nil && !os.IsNotExist(err) {
 		slog.Warn("image_tool: AGY 会话产物扫描失败", "err", err)
 	}

@@ -40,6 +40,28 @@ func GuestToolAllowed(name string) bool {
 	}
 }
 
+// ToolAllowedInConversation checks the session requirements shared by tool
+// discovery and execution. Tools still validate operation-specific arguments.
+func ToolAllowedInConversation(name string, event *SensoryEvent) bool {
+	if event == nil {
+		return false
+	}
+	switch name {
+	case "manage_access":
+		return event.IsPartnerPrivate() && event.Platform == "qq"
+	case "singbox_links":
+		return event.IsPartnerPrivate()
+	case "manage_group_expressions":
+		return event.Role == RolePartner && event.IsGroup && event.ChannelID != ""
+	case "get_geek_briefing":
+		return event.IsGroup || event.Role == RolePartner
+	case "manage_geek_briefing":
+		return event.Role == RolePartner
+	default:
+		return true
+	}
+}
+
 // Worker 异构任务执行单元接口；具体隔离能力取决于实现。
 type Worker interface {
 	Name() string

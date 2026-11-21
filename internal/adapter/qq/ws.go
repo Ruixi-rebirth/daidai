@@ -22,6 +22,13 @@ type wsPayload struct {
 	T  string          `json:"t,omitempty"` // 事件名
 }
 
+const maxQueuedQQGatewayEvents = 8
+
+type queuedQQGatewayEvent struct {
+	sequence *int64
+	payload  map[string]any
+}
+
 // StartWebSocket 启动并维护 WebSocket 长连接与自动重连
 func (q *QQChannel) StartWebSocket(ctx context.Context) {
 	q.wsWG.Add(1)
@@ -159,6 +166,42 @@ func (q *QQChannel) runWebSocketSession(ctx context.Context) error {
 		seqMu.Unlock()
 		q.setWSLastSeq(*seq)
 	}
+
+	// Dispatch work can include bounded voice transcription. Keep the only
+	// WebSocket reader free to receive heartbeat ACKs while preserving event
+	// order in a small, bounded queue. Commit the resume sequence only after
+	// handling an event, so unprocessed work can be replayed after disconnect.
+	eventQueue := make(chan queuedQQGatewayEvent, maxQueuedQQGatewayEvents)
+	eventWorkerDone := make(chan struct{})
+	eventWorkerErr := make(chan error, 1)
+	eventCtx, cancelEventWork := context.WithCancel(ctx)
+	go func() {
+		defer close(eventWorkerDone)
+		for event := range eventQueue {
+			if !q.dispatchEvent(eventCtx, event.payload) {
+				if eventCtx.Err() == nil {
+					eventWorkerErr <- fmt.Errorf("QQ event handler rejected a queued event")
+				}
+				return
+			}
+			advanceSequence(event.sequence)
+		}
+	}()
+	defer func() {
+		close(eventQueue)
+		<-eventWorkerDone
+	}()
+	defer cancelEventWork()
+	go func() {
+		select {
+		case err := <-eventWorkerErr:
+			q.wsReady.Store(false)
+			slog.Warn("qq ws: event handler rejected a queued event; reconnecting from the last processed sequence", "err", err)
+			_ = conn.Close()
+		case <-heartbeatStop:
+		case <-ctx.Done():
+		}
+	}()
 
 	// 初始读取超时设置为 60s，等待 Hello 包
 	_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
@@ -323,13 +366,16 @@ func (q *QQChannel) runWebSocketSession(ctx context.Context) error {
 					"t": payload.T,
 					"d": rawData,
 				}
-				if !q.dispatchEvent(ctx, eventMap) {
-					return fmt.Errorf("QQ event queue is full; reconnecting from the last accepted sequence")
+				select {
+				case eventQueue <- queuedQQGatewayEvent{sequence: payload.S, payload: eventMap}:
+				case <-ctx.Done():
+					return nil
+				default:
+					return fmt.Errorf("QQ event queue is full; reconnecting from the last processed sequence")
 				}
 			} else {
 				slog.Warn("qq ws: ignoring non-object dispatch payload and advancing sequence", "eventType", payload.T, "err", err)
 			}
-			advanceSequence(payload.S)
 
 		case 1: // 服务端要求立即心跳
 			seqMu.Lock()

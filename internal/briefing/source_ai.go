@@ -82,7 +82,7 @@ func (c *Collector) aiPapers(ctx context.Context) ([]Item, error) {
 	if !succeeded && sourceErr != nil {
 		return nil, sourceErr
 	}
-	return rank(out, candidateLimits["ai"]), sourceErr
+	return rankUniqueCandidates(out, candidateLimits["ai"]), sourceErr
 }
 
 // arxivIDPattern matches canonical modern (e.g. "2301.07041", "2411.12345v2")

@@ -107,7 +107,7 @@ func TestMemoryEngine_LexicalRecallAndCommit(t *testing.T) {
 	}
 
 	// 验证无空格连续中文句子（二元词组拆解 + BM25）能召回历史消息
-	searched, err := SearchMessagesByBM25(ctx, dbMgr, "qq", "8888", "那只橘猫为什么在键盘上面", 5)
+	searched, err := SearchMessagesInChatByBM25(ctx, dbMgr, "qq", "group", "8888", "那只橘猫为什么在键盘上面", 5)
 	if err != nil || len(searched) == 0 {
 		t.Fatalf("expected SearchMessagesByBM25 to match unspaced Chinese query, got len=%d err=%v", len(searched), err)
 	}
@@ -145,7 +145,7 @@ func TestMemoryEngine_HybridBM25AndVectorRRF(t *testing.T) {
 	_ = dbMgr.UpdateMessageEmbedding(ctx, "qq", msgID, vec, embeddingIdentity(&mockEmbedder{}))
 
 	// 查询词“容器网络方案”与原文“Cilium 和 eBPF”零字面重合，验证稠密向量 + RRF 双路混合成功召回
-	hits, err := SearchMessagesByBM25(ctx, dbMgr, "qq", "9999", "容器网络方案", 5)
+	hits, err := SearchMessagesInChatByBM25(ctx, dbMgr, "qq", "group", "9999", "容器网络方案", 5)
 	if err != nil || len(hits) != 1 || !strings.Contains(hits[0].Text, "Cilium") {
 		t.Fatalf("expected zero-lexical-overlap synonym query to recall Cilium message via vector+RRF, got: %+v (err=%v)", hits, err)
 	}

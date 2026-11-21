@@ -1,6 +1,9 @@
 package core
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // Role 角色
 type Role string
@@ -40,19 +43,21 @@ type ToolCallFunction struct {
 
 // ChatMessage 单条对话消息
 type ChatMessage struct {
-	Role       Role
-	Content    string
-	ToolCalls  []ToolCall // 当 Role 为 assistant 时，可能包含工具调用指令
-	ToolCallID string     // 当 Role 为 tool 时，对应 ToolCall.ID
-	Name       string     // 工具名称
+	RecoveryContent string `json:"-"` // Tool evidence retained only when saving a draft.
+	Role            Role
+	Content         string
+	ToolCalls       []ToolCall // 当 Role 为 assistant 时，可能包含工具调用指令
+	ToolCallID      string     // 当 Role 为 tool 时，对应 ToolCall.ID
+	Name            string     // 工具名称
 }
 
 // ChatOptions 模型生成参数
 type ChatOptions struct {
 	// Temperature is an explicit value whenever ChatOptions is non-nil; zero is valid.
-	Temperature float32
-	MaxTokens   int
-	ReadOnly    bool // 标记受限访客请求，供路由层与提供方选择受限执行路径；不单独构成权限边界
+	Temperature   float32
+	MaxTokens     int
+	ReadOnly      bool // 供路由层与提供方为本次推理选择受限执行路径
+	ReasoningOnly bool // 请求提供方为本轮使用只读推理模式
 }
 
 // ChatResponse 模型响应，支持纯文本与工具调用
@@ -60,6 +65,16 @@ type ChatResponse struct {
 	Content      string
 	ToolCalls    []ToolCall
 	FinishReason string
+}
+
+// OutputLimitReached recognizes provider finish reasons for truncated output.
+func OutputLimitReached(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "length", "max_tokens", "max_output_tokens":
+		return true
+	default:
+		return false
+	}
 }
 
 // LLMProvider 大模型驱动接口 (统一 OpenAI / DeepSeek / Gemini / 本地模型)

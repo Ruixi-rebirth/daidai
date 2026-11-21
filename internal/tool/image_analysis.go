@@ -31,7 +31,7 @@ func (t *imageAnalysisTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"source": map[string]any{
 				"type":        "string",
-				"enum":        []string{"current_message", "quoted_message"},
+				"enum":        []string{entity.CurrentImageSource, entity.QuotedImageSource},
 				"description": "要分析的图片来源",
 			},
 		},
@@ -55,26 +55,10 @@ func (t *imageAnalysisTool) Execute(ctx context.Context, raw json.RawMessage) (*
 	var omitted int
 	var sourceLabel string
 	switch args.Source {
-	case "current_message":
-		images = make([]*core.Attachment, 0, len(event.Images))
-		seen := make(map[string]struct{}, len(event.Images))
-		for _, image := range event.Images {
-			if image == nil || image.URL == "" {
-				continue
-			}
-			if _, exists := seen[image.URL]; exists {
-				continue
-			}
-			seen[image.URL] = struct{}{}
-			if len(images) == core.MaxVisionImagesPerRequest {
-				omitted++
-				continue
-			}
-			images = append(images, image)
-		}
-		omitted += event.OmittedImages
+	case entity.CurrentImageSource:
+		images, omitted = entity.CurrentImagesFromEvent(event)
 		sourceLabel = "本轮消息图片"
-	case "quoted_message":
+	case entity.QuotedImageSource:
 		if event.ReplyContext == nil {
 			return nil, fmt.Errorf("当前请求没有引用消息")
 		}
@@ -94,11 +78,8 @@ func (t *imageAnalysisTool) Execute(ctx context.Context, raw json.RawMessage) (*
 		urls = append(urls, image.URL)
 	}
 	contextText := fmt.Sprintf("图片来源：%s。用户本轮请求：%s", sourceLabel, strings.TrimSpace(event.Content))
-	if args.Source == "quoted_message" {
+	if args.Source == entity.QuotedImageSource {
 		contextText += "\n引用消息正文：" + entity.SanitizeQuotedMessageContent(event.ReplyContext.Content)
-	}
-	if omitted > 0 {
-		contextText += fmt.Sprintf("\n另有 %d 张图片未能纳入本次分析。", omitted)
 	}
 	caption, indexes, err := t.vision.DescribeWithImages(ctx, urls, contextText)
 	if err != nil {
@@ -109,10 +90,11 @@ func (t *imageAnalysisTool) Execute(ctx context.Context, raw json.RawMessage) (*
 		return nil, fmt.Errorf("AGY 没有返回有效的图片描述")
 	}
 	caption = core.TruncateRunes(caption, core.MaxVisionSummaryRunes, "\n[图片观察过长，后续内容已截断]")
+	omitted += len(images) - len(indexes)
 	if omitted > 0 {
 		caption += fmt.Sprintf("\n另有 %d 张图片未分析。", omitted)
 	}
-	if args.Source == "current_message" {
+	if args.Source == entity.CurrentImageSource {
 		event.VisionSummary = caption
 		for _, index := range indexes {
 			if index >= 0 && index < len(images) {

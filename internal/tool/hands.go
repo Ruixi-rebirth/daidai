@@ -157,10 +157,14 @@ func (h *HandsRegistry) Execute(ctx context.Context, name string, rawArgs json.R
 	}
 	event := entity.SensoryEventFromContext(ctx)
 	privilegedRole := event != nil && (event.Role == entity.RolePartner || event.Role == entity.RoleCollaborator)
-	if !privilegedRole && !entity.HasSystemToolAccess(ctx) && !entity.GuestToolAllowed(name) {
-		if event == nil {
-			return nil, fmt.Errorf("权限不足：缺少用户身份上下文，拒绝调用工具 %q", name)
-		}
+	systemAccess := entity.HasSystemToolAccess(ctx, name)
+	if event == nil && !systemAccess {
+		return nil, fmt.Errorf("权限不足：缺少用户身份上下文，拒绝调用工具 %q", name)
+	}
+	if event != nil && !systemAccess && !entity.ToolAllowedInConversation(name, event) {
+		return nil, fmt.Errorf("权限不足：当前会话不允许调用工具 %q", name)
+	}
+	if !privilegedRole && !systemAccess && !entity.GuestToolAllowed(name) {
 		return nil, fmt.Errorf("权限不足：访客不能调用工具 %q", name)
 	}
 

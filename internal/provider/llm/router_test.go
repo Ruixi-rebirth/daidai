@@ -282,13 +282,14 @@ func TestAGYMindProvider_AssemblePromptPreservesHistory(t *testing.T) {
 	}
 
 	roPrompt := agy.assemblePrompt(msgs, nil, true)
-	if !strings.Contains(roPrompt, "访客行为限制") || !strings.Contains(roPrompt, "由应用执行层控制") {
-		t.Fatalf("expected guest behavior and enforcement boundary in prompt, got:\n%s", roPrompt)
+	if !strings.Contains(roPrompt, "只读推理") || strings.Contains(roPrompt, "RoleGuest") {
+		t.Fatalf("expected a read-only scope without changing the user's role, got:\n%s", roPrompt)
 	}
 }
 
 type mockFailingProvider struct {
-	called bool
+	called   bool
+	response *core.ChatResponse
 }
 
 func (m *mockFailingProvider) Name() string { return "failing" }
@@ -297,6 +298,9 @@ func (m *mockFailingProvider) Chat(ctx context.Context, messages []core.ChatMess
 }
 func (m *mockFailingProvider) ChatWithTools(ctx context.Context, messages []core.ChatMessage, tools []core.ToolDefinition, opts *core.ChatOptions) (*core.ChatResponse, error) {
 	m.called = true
+	if m.response != nil {
+		return m.response, nil
+	}
 	return nil, context.Canceled
 }
 
@@ -329,6 +333,18 @@ func TestMindRouter_CanceledContextDoesNotFallback(t *testing.T) {
 	}
 	if fallbackMock.called {
 		t.Fatalf("expected fallback provider NOT to be called when context is canceled")
+	}
+}
+
+func TestMindRouterPreservesEmptyOutputLimitResponse(t *testing.T) {
+	router := NewMindRouter(MindRouterConfig{StatePath: filepath.Join(t.TempDir(), "mind.json"), FallbackChannel: "API"})
+	active := &mockFailingProvider{response: &core.ChatResponse{FinishReason: "length"}}
+	fallback := &mockFailingProvider{}
+	router.RegisterChannel(ChannelRegistration{Channel: "AGY", Provider: active, Models: []ModelInfo{{ID: "agy-model"}}})
+	router.RegisterChannel(ChannelRegistration{Channel: "API", Provider: fallback, Models: []ModelInfo{{ID: "api-model"}}})
+	response, err := router.ChatWithTools(context.Background(), []core.ChatMessage{{Role: core.RoleUser, Content: "继续"}}, nil, nil)
+	if err != nil || response != active.response || fallback.called {
+		t.Fatalf("output limit was lost in routing: response=%+v fallback=%v error=%v", response, fallback.called, err)
 	}
 }
 

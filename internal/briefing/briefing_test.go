@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"daidai/internal/config"
 	"daidai/internal/core"
@@ -79,6 +80,9 @@ func (m *fixtureModel) Chat(ctx context.Context, msg []core.ChatMessage, opts *c
 }
 
 func TestEditorialEvidenceAndInvalidSelection(t *testing.T) {
+	if size := utf8.RuneCountInString(editorPrompt()); size > 1300 {
+		t.Fatalf("editor prompt accumulated scenario rules: %d characters", size)
+	}
 	items := []Item{{ID: "hn:1", Source: "hn", Title: "Original", URL: "https://example.com/a", EvidenceKind: "title_only"}, {ID: "nixos:1", Source: "nixos", Title: "公告", URL: "https://example.com/b", EvidenceKind: "source_body", Evidence: "有依据的正文"}}
 	model := &fixtureModel{reply: `{"items":[{"id":"hn:1","title_zh":"中文标题","summary_zh":"虚构的性能提升100倍"},{"id":"nixos:1","title_zh":"新公告","summary_zh":"有依据的简短摘要"}],"lead_ids":["nixos:1"]}`}
 	chosen, leads, basic := edit(context.Background(), model, items)
@@ -96,6 +100,22 @@ func TestEditorialEvidenceAndInvalidSelection(t *testing.T) {
 	selected, _, basic := edit(context.Background(), model, items)
 	if basic || len(selected) != 0 {
 		t.Fatal("valid empty edition must stay empty")
+	}
+	for _, bad := range []string{`{}`, `{"items":null}`} {
+		model.reply = bad
+		selected, _, basic = edit(context.Background(), model, items)
+		if !basic || len(selected) == 0 || items[0].OriginalTitle != "" {
+			t.Fatalf("malformed selection did not fall back or mutated the candidates: %s", bad)
+		}
+	}
+}
+
+func TestOversizedEditorialInputUsesLocalFallback(t *testing.T) {
+	model := &fixtureModel{reply: `{"items":[]}`}
+	items := []Item{{ID: strings.Repeat("x", 40001), Source: "hn", Title: "候选标题", URL: "https://example.com/a"}}
+	selected, _, basic := edit(context.Background(), model, items)
+	if !basic || len(selected) != 1 || selected[0].URL != items[0].URL || model.calls.Load() != 0 {
+		t.Fatal("oversized candidates did not fall back to existing source material")
 	}
 }
 func TestEditorKeepsFivePerSectionAndStableNumbering(t *testing.T) {
@@ -142,6 +162,10 @@ func TestCanonicalAndCrossSourceDedup(t *testing.T) {
 	}
 	if len(candidates(items, map[string]bool{identity(b): true})) != 0 {
 		t.Fatal("published project repeated")
+	}
+	withoutLinks := []Item{{ID: "hn:missing", Source: "hn"}, {ID: "hn:invalid", Source: "hn", URL: "invalid"}}
+	if got := candidates(withoutLinks, map[string]bool{"": true}); len(got) != 2 {
+		t.Fatalf("unusable URLs caused unrelated IDs to collide: %+v", got)
 	}
 }
 func TestStoreRecoveryAndImmutability(t *testing.T) {
@@ -320,7 +344,7 @@ func testService(t *testing.T, s *Store, model core.LLMProvider, channels *entit
 		t.Fatal(err)
 	}
 	svc.Collector = fixtureCollector(t)
-	svc.Verify = func(context.Context, Subscription) bool { return true }
+	svc.Verify = func(context.Context, Subscription) (bool, error) { return true, nil }
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -380,7 +404,7 @@ func TestRequestDuringDeliveryJoinsExistingJob(t *testing.T) {
 	svc := testService(t, s, model, registry)
 	entered, release := make(chan struct{}), make(chan struct{})
 	defer close(release)
-	svc.Verify = func(ctx context.Context, sub Subscription) bool {
+	svc.Verify = func(ctx context.Context, sub Subscription) (bool, error) {
 		if sub.Platform == "qq" {
 			close(entered)
 			select {
@@ -388,7 +412,7 @@ func TestRequestDuringDeliveryJoinsExistingJob(t *testing.T) {
 			case <-ctx.Done():
 			}
 		}
-		return ctx.Err() == nil
+		return ctx.Err() == nil, ctx.Err()
 	}
 	svc.Request(Subscription{Platform: "qq", Recipient: "1", Owner: "owner"}, false)
 	select {
@@ -533,6 +557,13 @@ func TestPassiveViewFailureUsesDurableLedger(t *testing.T) {
 	if err != nil || d == nil || d.Status != "partial" || d.Delivered != "图卡正文" || d.Remaining != "原文索引" {
 		t.Fatalf("passive failure not durable: %+v %v", d, err)
 	}
+	svc.deliveries[key(sub)] = func() {}
+	svc.FailedView(ctx, e, sub, errors.New("concurrent passive failure"))
+	svc.RecordViewDelivered(ctx, e.ID, sub, e.Text())
+	got, err := store.Delivery(ctx, e.ID, sub.Platform, sub.Recipient, sub.IsGroup)
+	if err != nil || got == nil || got.Status != d.Status || got.Attempts != d.Attempts || got.Remaining != d.Remaining {
+		t.Fatalf("manual view interfered with running delivery: %+v, %v", got, err)
+	}
 }
 
 func TestValidPaperID(t *testing.T) {
@@ -566,5 +597,277 @@ func TestValidPaperID(t *testing.T) {
 		if got := validPaperID(tc.id); got != tc.want {
 			t.Errorf("validPaperID(%q) = %v, want %v", tc.id, got, tc.want)
 		}
+	}
+}
+
+func TestMissingChannelDoesNotRecordSending(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	edition := testEdition(t, store)
+	sub := Subscription{Platform: "qq", Recipient: "owner", Owner: "owner"}
+	if err := store.Touch(ctx, sub, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, registry := range []*entity.ChannelRegistry{nil, entity.NewChannelRegistry()} {
+		service := testService(t, store, nil, registry)
+		service.Verify = func(context.Context, Subscription) (bool, error) {
+			t.Fatal("recipient verification ran without a mounted channel")
+			return false, nil
+		}
+		if err := service.deliver(ctx, edition, sub, requestedDelivery); err == nil {
+			t.Fatal("expected unavailable channel error")
+		}
+		delivery, err := store.Delivery(ctx, edition.ID, sub.Platform, sub.Recipient, sub.IsGroup)
+		if err != nil || delivery != nil {
+			t.Fatalf("unattempted delivery was recorded: %+v, %v", delivery, err)
+		}
+	}
+}
+
+func TestTemporaryRecipientVerificationFailureDoesNotRejectEdition(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	edition := testEdition(t, store)
+	sub := Subscription{Platform: "telegram", Recipient: "owner", Owner: "owner"}
+	if err := store.Touch(ctx, sub, nil); err != nil {
+		t.Fatal(err)
+	}
+	registry := entity.NewChannelRegistry()
+	registry.Register(&fakeChannel{name: "telegram"})
+	service := testService(t, store, nil, registry)
+	service.Verify = func(context.Context, Subscription) (bool, error) {
+		return false, context.DeadlineExceeded
+	}
+	if err := service.deliver(ctx, edition, sub, requestedDelivery); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("verification error was lost: %v", err)
+	}
+	service.Verify = func(context.Context, Subscription) (bool, error) {
+		service.Cancel(sub.Platform, sub.Recipient, sub.IsGroup)
+		return false, nil
+	}
+	if err := service.deliver(ctx, edition, sub, requestedDelivery); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled verification was treated as rejection: %v", err)
+	}
+	delivery, err := store.Delivery(ctx, edition.ID, sub.Platform, sub.Recipient, sub.IsGroup)
+	if err != nil || delivery != nil {
+		t.Fatalf("temporary failure modified delivery: %+v, %v", delivery, err)
+	}
+}
+
+func TestPreviouslySentEditionSkipsRecipientVerification(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	edition := testEdition(t, store)
+	sub := Subscription{Platform: "qq", Recipient: "owner", Owner: "owner"}
+	if err := store.Touch(ctx, sub, nil); err != nil {
+		t.Fatal(err)
+	}
+	delivery := &Delivery{Edition: edition.ID, Platform: sub.Platform, Recipient: sub.Recipient, Status: "sent", Delivered: "已送达正文"}
+	if err := store.SaveDelivery(ctx, delivery); err != nil {
+		t.Fatal(err)
+	}
+	registry := entity.NewChannelRegistry()
+	registry.Register(&fakeChannel{name: "qq"})
+	service := testService(t, store, nil, registry)
+	service.Verify = func(context.Context, Subscription) (bool, error) {
+		t.Fatal("completed delivery was verified again")
+		return false, nil
+	}
+	if err := service.deliver(ctx, edition, sub, requestedDelivery); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Delivery(ctx, edition.ID, sub.Platform, sub.Recipient, sub.IsGroup)
+	if err != nil || got == nil || got.Status != "sent" || got.Delivered != delivery.Delivered {
+		t.Fatalf("completed delivery changed: %+v, %v", got, err)
+	}
+}
+
+func TestQueuedAutomaticDeliveryHonorsPauseAndBackoff(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	edition := testEdition(t, store)
+	sub := Subscription{Platform: "qq", Recipient: "owner", Owner: "owner"}
+	enabled := true
+	if err := store.Touch(ctx, sub, &enabled); err != nil {
+		t.Fatal(err)
+	}
+	registry := entity.NewChannelRegistry()
+	registry.Register(&fakeChannel{name: "qq"})
+	service := testService(t, store, nil, registry)
+	service.Verify = func(context.Context, Subscription) (bool, error) {
+		t.Fatal("ineligible automatic delivery reached recipient verification")
+		return false, nil
+	}
+	if err := store.Pause(ctx, sub.Platform, sub.Recipient, sub.IsGroup, edition.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.deliver(ctx, edition, sub, automaticDelivery); err != nil {
+		t.Fatal(err)
+	}
+	d, err := store.Delivery(ctx, edition.ID, sub.Platform, sub.Recipient, sub.IsGroup)
+	if err != nil || d != nil {
+		t.Fatalf("paused edition changed delivery state: %+v, %v", d, err)
+	}
+	if err := store.Pause(ctx, sub.Platform, sub.Recipient, sub.IsGroup, ""); err != nil {
+		t.Fatal(err)
+	}
+	next := service.Now().Add(time.Hour)
+	if err := store.SaveDelivery(ctx, &Delivery{Edition: edition.ID, Platform: sub.Platform, Recipient: sub.Recipient, Status: "retryable", Next: next}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.deliver(ctx, edition, sub, automaticDelivery); err != nil {
+		t.Fatal(err)
+	}
+	d, err = store.Delivery(ctx, edition.ID, sub.Platform, sub.Recipient, sub.IsGroup)
+	if err != nil || d == nil || d.Status != "retryable" || d.Next.UnixMilli() != next.UnixMilli() {
+		t.Fatalf("queued job changed a pending backoff: %+v, %v", d, err)
+	}
+}
+
+func TestAutomaticDeliveryDoesNotSendPreviousEditionInTodaysWindow(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	registry := entity.NewChannelRegistry()
+	registry.Register(&fakeChannel{name: "qq"})
+	service := testService(t, store, nil, registry)
+	now := service.Now()
+	service.hour, service.minute = now.Hour(), now.Minute()
+	edition := &Edition{ID: now.AddDate(0, 0, -1).Format("2006-01-02")}
+	if err := store.Begin(ctx, edition.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(ctx, edition); err != nil {
+		t.Fatal(err)
+	}
+	sub := Subscription{Platform: "qq", Recipient: "owner", Owner: "owner"}
+	enabled := true
+	if err := store.Touch(ctx, sub, &enabled); err != nil {
+		t.Fatal(err)
+	}
+	service.Verify = func(context.Context, Subscription) (bool, error) {
+		t.Fatal("previous edition reached recipient verification")
+		return false, nil
+	}
+	if err := service.deliver(ctx, edition, sub, automaticDelivery); err != nil {
+		t.Fatal(err)
+	}
+	delivery, err := store.Delivery(ctx, edition.ID, sub.Platform, sub.Recipient, sub.IsGroup)
+	if err != nil || delivery == nil || delivery.Status != "expired" || delivery.Attempts != 0 {
+		t.Fatalf("unexpected stale edition state: %+v, %v", delivery, err)
+	}
+}
+
+func TestCompleteBriefingResendReplacesDeliveredBody(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	edition := testEdition(t, store)
+	sub := Subscription{Platform: "qq", Recipient: "owner", Owner: "owner"}
+	if err := store.Touch(ctx, sub, nil); err != nil {
+		t.Fatal(err)
+	}
+	registry := entity.NewChannelRegistry()
+	channel := &fakeChannel{name: "qq"}
+	registry.Register(channel)
+	service := testService(t, store, nil, registry)
+	for range 2 {
+		if err := service.deliver(ctx, edition, sub, fullDelivery); err != nil {
+			t.Fatal(err)
+		}
+	}
+	delivery, err := store.Delivery(ctx, edition.ID, sub.Platform, sub.Recipient, sub.IsGroup)
+	if err != nil || delivery == nil || delivery.Status != "sent" || delivery.Attempts != 2 || delivery.Delivered != edition.Text() {
+		t.Fatalf("full resend duplicated the stored edition: %+v, %v", delivery, err)
+	}
+	channel.fail = &entity.PartialDeliveryError{Err: errors.New("failed"), DeliveredText: "本次已送达", UndeliveredText: "本次剩余"}
+	if err := service.deliver(ctx, edition, sub, fullDelivery); err == nil {
+		t.Fatal("expected partial resend failure")
+	}
+	delivery, err = store.Delivery(ctx, edition.ID, sub.Platform, sub.Recipient, sub.IsGroup)
+	if err != nil || delivery == nil || delivery.Status != "partial" || delivery.Delivered != "本次已送达" || delivery.Remaining != "本次剩余" {
+		t.Fatalf("full resend mixed distinct delivery attempts: %+v, %v", delivery, err)
+	}
+}
+
+func TestFailureNoticeMarksOnlyTheEditionShown(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t)
+	if err := store.Touch(ctx, Subscription{Platform: "qq", Recipient: "owner", Owner: "owner"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"2026-11-19", "2026-11-20"} {
+		edition := &Edition{ID: id}
+		if err := store.Begin(ctx, id, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Save(ctx, edition); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SaveDelivery(ctx, &Delivery{Edition: id, Platform: "qq", Recipient: "owner", Status: "partial"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shown, err := store.latestUnnotifiedFailure(ctx, "qq", "owner", false)
+	if err != nil || shown == nil || shown.editionID != "2026-11-20" {
+		t.Fatalf("unexpected latest failure: %+v, %v", shown, err)
+	}
+	retry := &Delivery{Edition: shown.editionID, Platform: "qq", Recipient: "owner", Status: shown.status, Attempts: shown.attempts + 1, Notified: true}
+	(&Service{}).failureState(retry, &entity.PartialDeliveryError{Err: errors.New("retry failed"), DeliveredText: "前段", UndeliveredText: "尾段"})
+	if err := store.SaveDelivery(ctx, retry); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.markFailureNotified(ctx, shown, "qq", "owner", false); err != nil {
+		t.Fatal(err)
+	}
+	shown, err = store.latestUnnotifiedFailure(ctx, "qq", "owner", false)
+	if err != nil || shown == nil || shown.editionID != retry.Edition || shown.attempts != retry.Attempts {
+		t.Fatalf("older notice acknowledged a newer failure: %+v, %v", shown, err)
+	}
+	if err := store.markFailureNotified(ctx, shown, "qq", "owner", false); err != nil {
+		t.Fatal(err)
+	}
+	next, err := store.latestUnnotifiedFailure(ctx, "qq", "owner", false)
+	if err != nil || next == nil || next.editionID != "2026-11-19" || next.status != "partial" {
+		t.Fatalf("other failed edition was acknowledged: %+v, %v", next, err)
+	}
+}
+
+func TestIndexKeepsParenthesesInsideLinkDestinations(t *testing.T) {
+	edition := &Edition{Items: []Item{{
+		Number: "01", Source: "hn", Title: "技术文章",
+		URL: "https://example.com/a)b", DiscussionURL: "https://example.com/thread?q=(draft",
+	}}}
+	index := edition.Index()
+	if !strings.Contains(index, "[01 · 技术文章](<https://example.com/a)b>)") ||
+		!strings.Contains(index, "[讨论](<https://example.com/thread?q=(draft>)") {
+		t.Fatalf("Markdown changed the original destination: %q", index)
+	}
+	edition.Items[0].URL = "javascript:invalid"
+	index = edition.Index()
+	if !strings.Contains(index, "01 · 技术文章 · [讨论]") ||
+		strings.Contains(index, "javascript:") || strings.Contains(edition.Text(), "javascript:") {
+		t.Fatalf("invalid original link was displayed: %q", index)
+	}
+}
+
+func TestRejectedBriefingContinuationKeepsConfirmedPrefix(t *testing.T) {
+	service := testService(t, testStore(t), nil, entity.NewChannelRegistry())
+	now := service.Now()
+	service.hour, service.minute = now.Hour(), now.Minute()
+	delivery := &Delivery{Attempts: 2, Delivered: "已送达", Remaining: "尾段"}
+	service.failureState(delivery, &entity.DeliveryRejection{Err: errors.New("rate limited"), After: time.Minute})
+	if delivery.Status != "partial" || delivery.Delivered != "已送达" || delivery.Remaining != "尾段" || canAutomaticallyDeliver(delivery, now) {
+		t.Fatalf("rejected continuation discarded partial delivery state: %+v", delivery)
+	}
+}
+
+func TestDuplicateCandidatesDoNotConsumeSectionQuota(t *testing.T) {
+	var items []Item
+	for i := range candidateLimits["hn"] {
+		items = append(items, Item{ID: fmt.Sprintf("hn:%d", i), Source: "hn", URL: "https://example.com/shared", Score: 100 - i})
+	}
+	items = append(items, Item{ID: "hn:other", Source: "hn", URL: "https://example.com/other", Score: 1})
+	got := candidates(items, nil)
+	if len(got) != 2 || got[0].ID != "hn:0" || got[1].ID != "hn:other" {
+		t.Fatalf("duplicates consumed candidate quota: %+v", got)
 	}
 }

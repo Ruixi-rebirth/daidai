@@ -24,7 +24,7 @@ func (t *RenderTool) Name() string {
 }
 
 func (t *RenderTool) Description() string {
-	return "将 Markdown 内容渲染为卡片长图。对话中按内容和用户偏好判断是否使用：用户明确要求图片时应使用；系统状态、对比数据、报告、分主题总结、较长清单或表格在图片更易浏览或保存时可使用；简单结论、短对话和需要连续阅读的解释保留文字。调用后配文简短即可：图片已完整呈现结果时只写标题或关键结论，不重复正文，也不要写‘见图’或‘详情请看图’；有图片之外的必要说明时再补充。"
+	return "将给定 Markdown 渲染为卡片图片。用于用户明确要求图片/卡片，或当前任务需要单独生成图文作品；普通回复的自动配图由系统按内容策略处理。图片已完整呈现时，配文只补充必要信息，不复述正文。"
 }
 
 func (t *RenderTool) Parameters() map[string]any {
@@ -75,8 +75,10 @@ func (t *RenderTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 	slog.Info("render_tool: 卡片图片渲染成功", "bytes", len(pngBytes))
 
 	return &core.ToolResult{
-		Text:         "卡片图片已成功渲染生成",
-		FallbackText: content,
-		ImageData:    pngBytes,
+		Text:              "卡片图片已成功渲染生成",
+		FallbackText:      content,
+		ImageData:         pngBytes,
+		ImageOnly:         true,
+		FixedPresentation: true,
 	}, nil
 }

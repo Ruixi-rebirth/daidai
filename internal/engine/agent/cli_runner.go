@@ -4,10 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"daidai/internal/core"
@@ -126,16 +124,9 @@ func (w *CLIWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (string
 	}
 	defer cancel()
 
-	cmd := exec.CommandContext(taskCtx, w.cfg.Command, finalArgs...)
+	cmd := core.CommandProcessGroup(taskCtx, w.cfg.Command, finalArgs...)
 	if workDir != "" {
 		cmd.Dir = workDir
-	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process != nil && cmd.Process.Pid > 0 {
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		return nil
 	}
 	cmd.WaitDelay = 2 * time.Second
 

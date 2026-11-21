@@ -264,6 +264,7 @@ func TestQuoteCompletenessReflectsPromptTruncation(t *testing.T) {
 type intentTestLLM struct {
 	textOnly    bool
 	response    string
+	reply       string
 	intentCalls int
 }
 
@@ -287,6 +288,8 @@ func TestTextOnlyPreferenceRequiresExplicitOriginalRequest(t *testing.T) {
 	}{
 		{"ordinary Nix question", "nix的优点是什么", `{"text_only":true,"request":"nix的优点是什么"}`, false, 0},
 		{"explicit request", "只发文字，方便复制", `{"text_only":true,"request":"只发文字"}`, true, 1},
+		{"fenced decision", "只发文字", "```json\n{\"text_only\":true,\"request\":\"只发文字\"}\n```", true, 1},
+		{"unfinished decision", "只发文字", "```json\n{\"text_only\":true,\"request\":\"只发文字\"}", false, 1},
 		{"extract quoted card", "把刚才图里第二条用文字发给我", `{"text_only":true,"request":"第二条用文字发给我"}`, true, 1},
 		{"unsupported guess", "介绍图片压缩", `{"text_only":true}`, false, 1},
 		{"invented evidence", "介绍图片压缩", `{"text_only":true,"request":"请只发文字"}`, false, 1},
@@ -313,11 +316,12 @@ func TestTextPreferenceDoesNotPersistIntoNextReply(t *testing.T) {
 		{"把图里第二条用文字发给我", true},
 		{"nix的优点是什么", false},
 	} {
+		model.reply = strings.Repeat("长回复内容。", 20)
 		out, err := c.Think(context.Background(), &entity.SensoryEvent{
 			Platform: "qq", ChannelID: "group", SenderID: "member", Content: tc.content,
 			ReplyContext: &entity.SensoryEvent{Content: "第一条介绍\n第二条：可复制的正文", ContentKind: "text_card", ContentComplete: true},
 		})
-		if err != nil || out == nil || out.FixedPresentation != tc.textOnly {
+		if err != nil || out == nil || out.SuppressAutoCard != tc.textOnly || out.FixedPresentation {
 			t.Fatalf("content=%s out=%+v err=%v", tc.content, out, err)
 		}
 	}
@@ -339,16 +343,29 @@ func TestTextPreferenceUsesCardSourceAndKeepsRealImages(t *testing.T) {
 			t.Fatalf("card source was not preserved: %+v", out)
 		}
 	}
+	legacyCard := &entity.Utterance{CardData: []byte("image"), FallbackText: "卡片原文", Text: "补充链接"}
+	useCardSourceText(legacyCard)
+	if legacyCard.HasMedia() || legacyCard.Text != "卡片原文\n\n补充链接" {
+		t.Fatalf("legacy card source was not used: %+v", legacyCard)
+	}
+	mixed := &entity.Utterance{Images: [][]byte{{1}, {2}, {3}}, ImageSources: []string{"正文", "", "正文"}, InlineImages: true}
+	useCardSourceText(mixed)
+	if mixed.Text != "正文" || len(mixed.Images) != 1 || mixed.Images[0][0] != 2 || !mixed.InlineImages {
+		t.Fatalf("mixed reply lost its original image or card text: %+v", mixed)
+	}
 }
-func (*intentTestLLM) ChatWithTools(context.Context, []core.ChatMessage, []core.ToolDefinition, *core.ChatOptions) (*core.ChatResponse, error) {
+func (m *intentTestLLM) ChatWithTools(context.Context, []core.ChatMessage, []core.ToolDefinition, *core.ChatOptions) (*core.ChatResponse, error) {
+	if m.reply != "" {
+		return &core.ChatResponse{Content: m.reply}, nil
+	}
 	return &core.ChatResponse{Content: "这里是生成的回复内容"}, nil
 }
 
-func TestCortex_TextOnlyIntentSetsFixedPresentation(t *testing.T) {
+func TestCortex_TextOnlyIntentSuppressesAutomaticCard(t *testing.T) {
 	for _, textOnly := range []bool{true, false} {
 		t.Run(map[bool]string{true: "text_requested", false: "normal_chat"}[textOnly], func(t *testing.T) {
 			c := NewCortex(CortexConfig{
-				LLM:     &intentTestLLM{textOnly: textOnly},
+				LLM:     &intentTestLLM{textOnly: textOnly, reply: strings.Repeat("较长回复内容。", 20)},
 				Persona: entity.NewDefaultPersona(),
 			})
 			event := &entity.SensoryEvent{
@@ -364,8 +381,11 @@ func TestCortex_TextOnlyIntentSetsFixedPresentation(t *testing.T) {
 			if out == nil {
 				t.Fatal("expected utterance")
 			}
-			if out.FixedPresentation != textOnly {
-				t.Fatalf("expected FixedPresentation=%v, got %v", textOnly, out.FixedPresentation)
+			if out.SuppressAutoCard != textOnly {
+				t.Fatalf("expected SuppressAutoCard=%v, got %v", textOnly, out.SuppressAutoCard)
+			}
+			if out.FixedPresentation {
+				t.Fatal("text-only preference must not claim the presentation is already fixed")
 			}
 		})
 	}
@@ -407,12 +427,22 @@ func TestCortex_RenderFileContext(t *testing.T) {
 			Name:     "Dockerfile",
 			MimeType: "application/octet-stream",
 		}
-		result := c.renderFileContext(context.Background(), event, []*core.Attachment{textAttachment}, false, 0)
-		if !strings.Contains(result, "【文件附件内容】") {
-			t.Fatalf("expected inlined file header, got: %s", result)
+		event.Content = "总结这个文件"
+		event.Files = []*core.Attachment{textAttachment}
+		input, err := c.buildChatInput(context.Background(), event)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if !strings.Contains(result, "Hello, this is a plain text file without standard extension!") {
-			t.Fatalf("expected text content inlined, got: %s", result)
+		var request chatRequestContext
+		if err := json.Unmarshal([]byte(input.messages[len(input.messages)-1].Content), &request); err != nil {
+			t.Fatal(err)
+		}
+		if request.CurrentRequest != event.Content {
+			t.Fatalf("attachment content leaked into current request: %q", request.CurrentRequest)
+		}
+		files := request.Files
+		if len(files) != 1 || files[0].Status != "text" || files[0].Text != "Hello, this is a plain text file without standard extension!" {
+			t.Fatalf("expected inlined file content, got: %+v", files)
 		}
 		if len(event.ProcessedAttachments) != 1 || event.ProcessedAttachments[0] != textAttachment {
 			t.Fatalf("expected attachment in ProcessedAttachments, got: %v", event.ProcessedAttachments)
@@ -427,12 +457,9 @@ func TestCortex_RenderFileContext(t *testing.T) {
 			Name:     "app.bin",
 			MimeType: "application/octet-stream",
 		}
-		result := c.renderFileContext(context.Background(), event, []*core.Attachment{binAttachment}, false, 0)
-		if strings.Contains(result, "【文件附件内容】") {
-			t.Fatalf("binary file should not be rendered as text, got: %s", result)
-		}
-		if !strings.Contains(result, "二进制数据，无法直接作为纯文本阅读") {
-			t.Fatalf("expected binary notice, got: %s", result)
+		files := c.readFileContext(context.Background(), event, []*core.Attachment{binAttachment}, false)
+		if len(files) != 1 || files[0].Status != "binary" || files[0].Text != "" {
+			t.Fatalf("expected binary status without inline data, got: %+v", files)
 		}
 		if len(event.ProcessedAttachments) != 0 {
 			t.Fatalf("binary file should not be in ProcessedAttachments, got: %v", event.ProcessedAttachments)
@@ -447,9 +474,9 @@ func TestCortex_RenderFileContext(t *testing.T) {
 			Name:     "access.log",
 			MimeType: "text/plain",
 		}
-		result := c.renderFileContext(context.Background(), event, []*core.Attachment{largeAttachment}, false, 0)
-		if !strings.Contains(result, "文件较大") || !strings.Contains(result, "已流式截取") {
-			t.Fatalf("expected large file truncation notice, got: %s", result)
+		files := c.readFileContext(context.Background(), event, []*core.Attachment{largeAttachment}, false)
+		if len(files) != 1 || !files[0].Truncated || len(files[0].Text) != 15000 {
+			t.Fatal("large text attachment was not marked and bounded as expected")
 		}
 		if len(event.ProcessedAttachments) != 1 || event.ProcessedAttachments[0] != largeAttachment {
 			t.Fatalf("expected large attachment in ProcessedAttachments, got: %v", event.ProcessedAttachments)
@@ -489,9 +516,9 @@ func (m *mockFixedToolLLM) ChatWithTools(ctx context.Context, messages []core.Ch
 
 type mockFixedTool struct{}
 
-func (t *mockFixedTool) Name() string                                                { return "fixed_tool" }
-func (t *mockFixedTool) Description() string                                         { return "fixed presentation tool" }
-func (t *mockFixedTool) Parameters() map[string]any                                  { return map[string]any{"type": "object"} }
+func (t *mockFixedTool) Name() string               { return "fixed_tool" }
+func (t *mockFixedTool) Description() string        { return "fixed presentation tool" }
+func (t *mockFixedTool) Parameters() map[string]any { return map[string]any{"type": "object"} }
 func (t *mockFixedTool) Execute(ctx context.Context, args json.RawMessage) (*core.ToolResult, error) {
 	return &core.ToolResult{
 		Text:              "vless://uuid@1.2.3.4:443",
@@ -526,5 +553,31 @@ func TestCortex_ToolFixedPresentationPropagatesToUtterance(t *testing.T) {
 	}
 	if !out.FixedPresentation {
 		t.Fatalf("expected FixedPresentation=true when tool requested it, got false")
+	}
+}
+
+func TestProcessedAttachmentClearedOnlyAfterDelivery(t *testing.T) {
+	inbox, err := media.NewInbox(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := &entity.SensoryEvent{Platform: "qq", ChannelID: "chat", SenderID: "owner", Content: "总结这份资料"}
+	scope := media.AttachmentScope(event.Platform, event.IsGroup, event.ChannelID, event.SenderID)
+	attachment := &core.Attachment{Kind: core.AttachmentFile, URL: "https://example.invalid/file", SourceMessageID: "source"}
+	inbox.RememberPending(scope, []*core.Attachment{attachment})
+	event.ProcessedAttachments = []*core.Attachment{attachment}
+	cortex := NewCortex(CortexConfig{Inbox: inbox, LLM: &intentTestLLM{}})
+	ctx := context.Background()
+	reply, err := cortex.Think(ctx, event)
+	if err != nil || reply == nil || reply.OnDelivered == nil {
+		t.Fatalf("reply missing delivery callback: %v", err)
+	}
+	cortex.CommitDeliveredReply(ctx, event, "已送达的前半段")
+	if pending, _ := inbox.Pending(scope); len(pending) != 1 {
+		t.Fatal("recording partial delivery cleared the attachment")
+	}
+	reply.OnDelivered(ctx)
+	if pending, _ := inbox.Pending(scope); len(pending) != 0 {
+		t.Fatal("full delivery left the attachment pending")
 	}
 }
