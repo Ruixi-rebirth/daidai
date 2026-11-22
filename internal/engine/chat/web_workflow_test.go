@@ -88,13 +88,13 @@ func TestWebToolBudgetUsesNormalizedTargets(t *testing.T) {
 	}
 }
 
-func TestWebToolBudgetIgnoresSearchURLsRemovedBeforeExecution(t *testing.T) {
-	query := strings.Repeat("技", 1000) + " https://a.example https://b.example https://c.example"
-	args, err := json.Marshal(map[string]string{"query": query})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if urls := extractToolURLs("search_web", string(args)); len(urls) != 0 {
-		t.Fatalf("URLs outside the submitted query consumed budget: %v", urls)
+func TestWebSearchDoesNotConsumePageBudget(t *testing.T) {
+	processed := map[string]struct{}{"https://example.com/a": {}, "https://example.com/b": {}}
+	var result toolBatchResult
+	call := core.ToolCall{Function: core.ToolCallFunction{
+		Name: "search_web", Arguments: `{"query":"NixOS Telegram bot release notes"}`,
+	}}
+	if !allowToolLinks(call, processed, &result) || len(processed) != 2 || len(result.messages) != 0 {
+		t.Fatal("keyword search should be allowed even when the page budget is full")
 	}
 }

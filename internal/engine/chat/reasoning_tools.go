@@ -183,61 +183,29 @@ func (r *toolBatchResult) appendToolMessage(call core.ToolCall, content string, 
 }
 
 func allowToolLinks(call core.ToolCall, processedLinks map[string]struct{}, result *toolBatchResult) bool {
-	links := extractToolURLs(call.Function.Name, call.Function.Arguments)
-	if len(links) == 0 {
+	switch call.Function.Name {
+	case "screenshot_web", "read_link":
+	default:
 		return true
 	}
-	newLinks := make([]string, 0, len(links))
-	for _, link := range links {
-		if _, seen := processedLinks[link]; !seen {
-			newLinks = append(newLinks, link)
-		}
+	var args struct {
+		URL string `json:"url"`
 	}
-	if len(processedLinks)+len(newLinks) > 2 {
+	if json.Unmarshal([]byte(call.Function.Arguments), &args) != nil {
+		return true
+	}
+	target, err := core.ExternalURLBudgetKey(args.URL)
+	if err != nil {
+		return true
+	}
+	if _, seen := processedLinks[target]; seen {
+		return true
+	}
+	if len(processedLinks) >= 2 {
 		slog.Info("cortex: 拦截超限的网页处理调用", "name", call.Function.Name, "uniqueLinks", len(processedLinks))
 		result.appendToolMessage(call, fmt.Sprintf("本轮最多处理两个不同网页链接，已跳过本次 %s 调用。", call.Function.Name))
 		return false
 	}
-	for _, link := range newLinks {
-		processedLinks[link] = struct{}{}
-	}
+	processedLinks[target] = struct{}{}
 	return true
-}
-func extractToolURLs(toolName, arguments string) []string {
-	switch toolName {
-	case "screenshot_web", "read_link":
-		var args struct {
-			URL string `json:"url"`
-		}
-		if json.Unmarshal([]byte(arguments), &args) == nil {
-			if target, err := core.ExternalURLBudgetKey(args.URL); err == nil {
-				return []string{target}
-			}
-		}
-		return nil
-	case "search_web":
-	default:
-		return nil
-	}
-	var args struct {
-		Query string `json:"query"`
-	}
-	if json.Unmarshal([]byte(arguments), &args) != nil {
-		return nil
-	}
-	seen := make(map[string]struct{})
-	var urls []string
-	for _, part := range strings.Fields(core.NormalizeWebSearchQuery(args.Query)) {
-		candidate := strings.TrimRight(part, "\"'`.,;:!?)]}>")
-		key, err := core.ExternalURLBudgetKey(candidate)
-		if err != nil {
-			continue
-		}
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-		urls = append(urls, key)
-	}
-	return urls
 }
