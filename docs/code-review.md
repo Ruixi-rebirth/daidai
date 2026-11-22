@@ -180,5 +180,6 @@ config、QQ 测试及 config/启动入口静态检查、构建通过。已进一
 
 35. 首次 Nix 包构建使用 Git 源码快照时，未跟踪的职责拆分文件不会进入构建输入，导致空数据库包及未定义符号。将本轮源码纳入 Git 后，Nix 包构建通过。部署启动时又发现现有 QQ/TG 数据库的 `pending_notifications` 仅缺少 `delivery_state`；检查确认其他既有表字段与当前 schema 一致。对两库各补该列并保留消息、记忆及通知数据，没有加入迁移记录表或应用迁移框架。
 36. Telegram `setMyCommands` 返回 400，原因是共享帮助目录把 `/continue … · 继续` 中的自然语言别名也作为平台命令注册。菜单现只登记以 `/` 开头的别名，帮助中仍显示“继续”。
+37. Telegram 命令菜单只是平台快捷入口；注册失败此前会中止 Telegram 通道并触发全局启动回滚。现在非取消类菜单注册错误只记警告并继续轮询，只有 Telegram 身份校验、Webhook 冲突、数据库初始化等实际启动必需项失败才中止通道。
 
 最终源码通过 `go build ./...`、`go vet ./...`、golangci-lint（0 issues）及 Nix 包构建；提交 `8516ab8`、`b05899d` 已推送，flakes 提交 `143453e` 已推送并锁定到 `b05899d`。`nixos-rebuild switch --flake /home/ruixi/flakes#oci` 完成；systemd 服务运行，`/readyz` 返回 `ready:true`，QQ、Telegram、模型路由、早报和 OCI 调度均就绪。没有清空生产聊天或记忆数据库。

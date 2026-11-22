@@ -31,7 +31,10 @@ func (c *Channel) Start(ctx context.Context, handler func(*entity.SensoryEvent))
 		return fmt.Errorf("telegram bot has an existing webhook; polling cannot start")
 	}
 	if err := c.jsonCall(ctx, "setMyCommands", map[string]any{"commands": entity.CommandMenu("telegram")}, nil); err != nil {
-		return fmt.Errorf("register Telegram command menu: %w", err)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		slog.Warn("telegram: command menu registration failed; continue polling", "err", err)
 	}
 	if err := c.initQuotes(ctx); err != nil {
 		return err
