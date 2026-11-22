@@ -249,11 +249,11 @@ func extractHTMLContent(raw []byte) (string, error) {
 					title = strings.TrimSpace(n.FirstChild.Data)
 				}
 			case "article", "main":
-				if articleNode == nil {
+				if articleNode == nil && !insideHiddenHTML(n) {
 					articleNode = n
 				}
 			case "body":
-				if bodyNode == nil {
+				if bodyNode == nil && !insideHiddenHTML(n) {
 					bodyNode = n
 				}
 			}
@@ -281,8 +281,11 @@ func extractHTMLContent(raw []byte) (string, error) {
 			return
 		}
 		if n.Type == html.ElementNode {
+			if hasHiddenHTMLAttribute(n) {
+				return
+			}
 			switch n.Data {
-			case "script", "style", "nav", "footer", "header", "form", "svg", "noscript", "iframe":
+			case "script", "style", "nav", "footer", "header", "form", "svg", "noscript", "iframe", "template":
 				return
 			case "p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li", "tr", "br":
 				defer sb.WriteString("\n")
@@ -322,4 +325,22 @@ func extractHTMLContent(raw []byte) (string, error) {
 		return "", fmt.Errorf("extracted content too short")
 	}
 	return res, nil
+}
+
+func hasHiddenHTMLAttribute(node *html.Node) bool {
+	for _, attr := range node.Attr {
+		if attr.Namespace == "" && attr.Key == "hidden" {
+			return true
+		}
+	}
+	return false
+}
+
+func insideHiddenHTML(node *html.Node) bool {
+	for current := node; current != nil; current = current.Parent {
+		if hasHiddenHTMLAttribute(current) {
+			return true
+		}
+	}
+	return false
 }

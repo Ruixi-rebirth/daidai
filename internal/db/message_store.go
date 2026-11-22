@@ -161,6 +161,7 @@ type StoredMessage struct {
 	Name           string
 	Text           string
 	IsBot          bool
+	ReplyToUID     string
 	Embedding      []float32
 	EmbeddingModel string
 	CreatedAt      time.Time

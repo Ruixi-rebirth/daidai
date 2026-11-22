@@ -61,3 +61,12 @@ printf '%s' '{"status":"SUCCESS","response":"{\"read\":true,\"answer\":\"网页�
 		t.Fatalf("tool response echoes full input instead of result: %s", result.Text)
 	}
 }
+
+func TestExtractHTMLContentSkipsHiddenErrorPlaceholders(t *testing.T) {
+	const visible = "Pinned repository: this visible project description should remain in the page output."
+	source := `<main><p>` + visible + `</p><div hidden data-show-on-error><p>There was an error while loading.</p></div></main>`
+	text, err := extractHTMLContent([]byte(source))
+	if err != nil || !strings.Contains(text, visible) || strings.Contains(text, "error while loading") {
+		t.Fatalf("extracted wrong page content: %q, %v", text, err)
+	}
+}

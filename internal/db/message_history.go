@@ -87,15 +87,16 @@ func (m *Manager) RecentMessagesBefore(ctx context.Context, platform, chatType, 
 		}
 
 		list = append(list, StoredMessage{
-			ID:        id,
-			Platform:  plat,
-			IsGroup:   cType == "group",
-			ConvID:    cID,
-			UserID:    uID,
-			Name:      name,
-			Text:      core.TruncateRunes(text, core.MaxUserMessageRunes, "…[消息已截断]"),
-			IsBot:     isBotInt == 1,
-			CreatedAt: time.UnixMilli(createdMs),
+			ID:         id,
+			Platform:   plat,
+			IsGroup:    cType == "group",
+			ConvID:     cID,
+			UserID:     uID,
+			Name:       name,
+			Text:       core.TruncateRunes(text, core.MaxUserMessageRunes, "…[消息已截断]"),
+			IsBot:      isBotInt == 1,
+			ReplyToUID: replyToUID,
+			CreatedAt:  time.UnixMilli(createdMs),
 		})
 	}
 	if err := rows.Err(); err != nil {

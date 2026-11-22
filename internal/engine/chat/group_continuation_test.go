@@ -14,7 +14,7 @@ type continuationModel struct {
 }
 
 func (m *continuationModel) Chat(_ context.Context, messages []core.ChatMessage, options *core.ChatOptions) (string, error) {
-	if options == nil || !options.ReadOnly || !strings.Contains(messages[1].Content, "这是上一条机器人回复") {
+	if options == nil || !options.ReadOnly || !strings.Contains(messages[1].Content, "[这条回复的对象：当前发言人] 这是上一条机器人回复") {
 		return "skip", nil
 	}
 	return m.target, nil

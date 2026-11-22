@@ -63,6 +63,13 @@ func (m *MemoryEngine) WorkingContext(ctx context.Context, event *entity.Sensory
 		content := h.Text
 		if h.IsBot {
 			role = core.RoleAssistant
+			if h.IsGroup && h.ReplyToUID != "" {
+				addressee := "其他群友"
+				if h.ReplyToUID == event.SenderID {
+					addressee = "当前发言人"
+				}
+				content = fmt.Sprintf("[这条回复的对象：%s] %s", addressee, content)
+			}
 		} else if h.IsGroup {
 			speaker := h.Name
 			if speaker == "" {
