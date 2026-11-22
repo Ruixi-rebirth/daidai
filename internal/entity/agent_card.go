@@ -80,16 +80,8 @@ func (a *SuperAgent) renderAutomaticReplyCard(ctx context.Context, event *Sensor
 	for len(utterance.ImageSources) < len(images) {
 		utterance.ImageSources = append(utterance.ImageSources, "")
 	}
-	historyContent := replyContent
-	fallbackContent := replyContent
-	for _, asset := range utterance.InlineAssets {
-		fallback := asset.Fallback
-		if fallback == "" {
-			fallback = "[流程图]"
-		}
-		historyContent = strings.Replace(historyContent, asset.Placeholder, fallback+"\n"+asset.SemanticText, 1)
-		fallbackContent = strings.Replace(fallbackContent, asset.Placeholder, fallback, 1)
-	}
+	historyContent := core.InlineAssetText(replyContent, utterance.InlineAssets, true)
+	fallbackContent := core.InlineAssetText(replyContent, utterance.InlineAssets, false)
 	for range pages {
 		utterance.ImageSources = append(utterance.ImageSources, historyContent)
 	}
@@ -100,6 +92,7 @@ func (a *SuperAgent) renderAutomaticReplyCard(ctx context.Context, event *Sensor
 	utterance.Text = ""
 	utterance.CardData = nil
 	utterance.Images = images
+	utterance.ReplyCardPages = len(pages)
 	utterance.InlineImages = true
 	utterance.InlineAssets = nil
 	slog.Info("superagent: 长回复已分页渲染为图文消息", "platform", event.Platform, "channel", event.ChannelID, "pages", len(pages), "images", len(images), "textBytes", len(replyContent))

@@ -51,6 +51,7 @@ func (u *Utterance) WithoutEmptyImages() *Utterance {
 		filtered.Images = nil
 		filtered.ImageSources = nil
 		filtered.InlineNonTextImageCount = 0
+		filtered.ReplyCardPages = 0
 		for index, data := range u.Images {
 			if len(data) == 0 {
 				continue
@@ -61,6 +62,9 @@ func (u *Utterance) WithoutEmptyImages() *Utterance {
 			}
 			if index < u.InlineNonTextImageCount {
 				filtered.InlineNonTextImageCount++
+			}
+			if index >= len(u.Images)-u.ReplyCardPages {
+				filtered.ReplyCardPages++
 			}
 		}
 		filtered.InlineImages = len(filtered.Images) > 0 && u.InlineImages

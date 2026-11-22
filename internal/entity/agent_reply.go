@@ -18,6 +18,12 @@ func (a *SuperAgent) deliverCognitionReply(thinkCtx, requestCtx context.Context,
 	}
 
 	addressReply(utterance, event)
+	if !event.IsPartnerPrivate() {
+		for i := range utterance.InlineAssets {
+			asset := &utterance.InlineAssets[i]
+			asset.SemanticText = core.RedactSensitiveIPs(asset.SemanticText)
+		}
+	}
 	a.renderAutomaticReplyCard(thinkCtx, event, utterance)
 	if !event.IsPartnerPrivate() {
 		utterance.Text = core.RedactSensitiveIPs(utterance.Text)

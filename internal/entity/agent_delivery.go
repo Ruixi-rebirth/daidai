@@ -127,7 +127,7 @@ func textForFallback(utterance *Utterance) string {
 	if body == "" {
 		body, _ = ImageDeliveryText(utterance.ImageSources, len(utterance.ImageSources))
 	}
-	caption := strings.TrimSpace(utterance.Text)
+	caption := strings.TrimSpace(core.InlineAssetText(utterance.Text, utterance.InlineAssets, false))
 	if body == "" {
 		return caption
 	}
@@ -163,6 +163,9 @@ func (a *SuperAgent) transmitTextFallbackWithContinuationContext(ctx, continuati
 	fallback.FallbackText = ""
 	fallback.CardData = nil
 	fallback.Images = nil
+	fallback.InlineAssets = nil
+	fallback.QuoteText = ""
+	fallback.ReplyCardPages = 0
 	fallback.ImageSources = nil
 	fallback.InlineImages = false
 	fallback.InlineNonTextImageCount = 0

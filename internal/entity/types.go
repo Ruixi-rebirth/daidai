@@ -116,6 +116,7 @@ type Utterance struct {
 	ImageSources            []string           // 与 Images 对齐；文字渲染图保留正文，真实图片留空
 	InlineImages            bool               // 将多张图片作为 Markdown 图片引用放进同一条消息
 	InlineNonTextImageCount int                // InlineImages 中非正文分页渲染图的数量
+	ReplyCardPages          int                // Images 末尾的长回复分页图数量
 	SuppressAutoCard        bool               // 用户要求纯文字时，跳过自动长图排版
 	OnDelivered             func(context.Context)
 	FixedPresentation       bool // 已由结构化视图完成排版，不再次把索引或文字回退转成图

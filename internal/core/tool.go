@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"strings"
 )
 
 // ToolResult 工具执行返回的结果
@@ -21,9 +22,7 @@ type ToolResult struct {
 	OnDeliveryFailed  func(context.Context, error)
 }
 
-// InlineAsset is a tool-rendered image that the model can place inside its
-// Markdown answer. Placeholder is the exact Markdown image node returned to
-// the model; Reference identifies the local asset without exposing a URL.
+// InlineAsset is a rendered image placed at a specific point in a Markdown reply.
 type InlineAsset struct {
 	Placeholder  string
 	Reference    string
@@ -31,6 +30,18 @@ type InlineAsset struct {
 	Fallback     string
 	SemanticText string
 	Data         []byte
+}
+
+// InlineAssetText replaces local image references with text for quotes or fallback.
+func InlineAssetText(markdown string, assets []InlineAsset, semantic bool) string {
+	for _, asset := range assets {
+		replacement := asset.Fallback
+		if semantic && asset.SemanticText != "" {
+			replacement += "\n" + asset.SemanticText
+		}
+		markdown = strings.ReplaceAll(markdown, asset.Placeholder, replacement)
+	}
+	return markdown
 }
 
 // Tool 统一的原子功能工具接口

@@ -85,12 +85,9 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 			replyWindow = 5 * time.Minute
 		}
 	}
-	if len(u.InlineAssets) > 0 {
-		return q.transmitInlineAssets(ctx, u)
-	}
 	// Mentions are Markdown markup. Keep the mention and image in the same
 	// Markdown message rather than dropping it on the rich-media branch.
-	if len(images) > 0 && (u.InlineImages || (u.IsGroup && len(u.MentionUserIDs) > 0)) {
+	if len(u.InlineAssets) > 0 || (len(images) > 0 && (u.InlineImages || (u.IsGroup && len(u.MentionUserIDs) > 0))) {
 		return q.transmitInlineImages(ctx, u, images, content, partLimit, replyWindow)
 	}
 
@@ -162,11 +159,7 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 			reservedCount--
 		}
 		if len(part.image) == 0 {
-			metadata := QuoteMetadata{Text: part.text, Kind: qqQuoteText, TextComplete: true}
-			if u.QuoteText != "" {
-				metadata = QuoteMetadata{Text: u.QuoteText, Kind: qqQuoteTextCard, TextComplete: true}
-			}
-			return q.client.sendMessageWithContext(ctx, targetType, u.ChannelID, wireText, u.QuoteMsgID, metadata)
+			return q.client.sendMessageWithContext(ctx, targetType, u.ChannelID, wireText, u.QuoteMsgID, QuoteMetadata{Text: part.text, Kind: qqQuoteText, TextComplete: true})
 		}
 		metadata := mediaQuoteMetadata(part.text)
 		if source := strings.TrimSpace(part.source); source != "" {

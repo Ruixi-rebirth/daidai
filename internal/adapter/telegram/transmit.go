@@ -34,9 +34,6 @@ func (c *Channel) Transmit(ctx context.Context, u *entity.Utterance) error {
 		images = [][]byte{u.CardData}
 		sources = []string{u.FallbackText}
 	}
-	if len(u.InlineAssets) > 0 && len(images) == 0 {
-		return c.transmitInlineAssets(ctx, u, reply)
-	}
 	for len(sources) < len(images) {
 		sources = append(sources, "")
 	}
@@ -56,7 +53,7 @@ func (c *Channel) Transmit(ctx context.Context, u *entity.Utterance) error {
 	}
 	text := u.Text
 	caption := ""
-	if len(images) > 0 && len([]rune(text)) <= 500 {
+	if len(u.InlineAssets) == 0 && len(images) > 0 && len([]rune(text)) <= 500 {
 		caption, text = text, ""
 	}
 	delivered := ""
@@ -68,8 +65,12 @@ func (c *Channel) Transmit(ctx context.Context, u *entity.Utterance) error {
 			DeliveredText:   joinDeliveryText(completeSources, delivered),
 			UndeliveredText: joinDeliveryText(pendingSources, remainingText)}
 	}
-	for start := 0; start < len(images); start += 10 {
-		end := min(start+10, len(images))
+	firstPage := len(images) - min(u.ReplyCardPages, len(images))
+	for start := 0; start < len(images); {
+		end := min(start+10, firstPage)
+		if start >= firstPage {
+			end = start + 1
+		}
 		batchCaption := ""
 		if start == 0 {
 			batchCaption = caption
@@ -78,9 +79,9 @@ func (c *Channel) Transmit(ctx context.Context, u *entity.Utterance) error {
 		if err != nil {
 			var receiptErr *entity.PartialDeliveryError
 			if sent || errors.As(err, &receiptErr) {
-				remaining := text
+				remaining := core.InlineAssetText(text, u.InlineAssets, false)
 				if !sent {
-					remaining = joinDeliveryText(caption, text)
+					remaining = joinDeliveryText(caption, remaining)
 				}
 				return partial(err, remaining)
 			}
@@ -106,6 +107,22 @@ func (c *Channel) Transmit(ctx context.Context, u *entity.Utterance) error {
 				slog.Warn("telegram: image source persistence failed", "err", err)
 			}
 		}
+		start = end
+	}
+	if len(u.InlineAssets) > 0 {
+		replyText, err := c.transmitInlineAssets(ctx, u, reply)
+		var receiptErr *entity.PartialDeliveryError
+		switch {
+		case err == nil:
+			body, _ := imageDeliveryText(sources, deliveredImages)
+			u.QuoteText = joinDeliveryText(body, replyText)
+		case errors.As(err, &receiptErr):
+			delivered = receiptErr.DeliveredText
+			return partial(err, receiptErr.UndeliveredText)
+		case sent:
+			return partial(err, core.InlineAssetText(text, u.InlineAssets, false))
+		}
+		return err
 	}
 	formattedChunks := splitFormatted(formatMarkdown(text), 1800)
 	chunks := make([]string, len(formattedChunks))

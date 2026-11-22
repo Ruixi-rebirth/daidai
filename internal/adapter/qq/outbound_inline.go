@@ -3,6 +3,7 @@ package qq
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"html"
 	"image/png"
@@ -23,12 +24,13 @@ func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utteranc
 			sendErr = &entity.UnsentError{Err: sendErr}
 		}
 	}()
-	if len(images) == 0 {
+	if len(images) == 0 && len(u.InlineAssets) == 0 {
 		return fmt.Errorf("inline image message has no images")
 	}
 	type inlinePart struct {
 		content, source, caption string
 		imageEnd                 int
+		image                    []byte
 		hasImages                bool
 		hasNonTextImages         bool
 	}
@@ -76,11 +78,10 @@ func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utteranc
 		markdown.Reset()
 		firstImage = end
 	}
-	for i, data := range images {
+	upload := func(data []byte, alt string) (string, error) {
 		dimensions, err := png.DecodeConfig(bytes.NewReader(data))
 		if err != nil {
-			cleanup()
-			return fmt.Errorf("read inline image %d dimensions: %w", i+1, err)
+			return "", err
 		}
 		imageID, imageURL, err := q.client.UploadMarkdownImage(ctx, data)
 		if err != nil && strings.Contains(err.Error(), "40035007") {
@@ -91,10 +92,28 @@ func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utteranc
 			}
 		}
 		if err != nil {
-			return fmt.Errorf("upload inline image %d: %w", i+1, err)
+			return "", err
 		}
 		imageIDs = append(imageIDs, imageID)
-		markup := fmt.Sprintf("![第 %d 页 #%dpx #%dpx](%s)", i+1, dimensions.Width, dimensions.Height, imageURL)
+		return fmt.Sprintf("![%s #%dpx #%dpx](%s)", alt, dimensions.Width, dimensions.Height, imageURL), nil
+	}
+	for i, data := range images {
+		markup, err := upload(data, fmt.Sprintf("第 %d 页", i+1))
+		if err != nil {
+			if len(u.InlineAssets) == 0 || ctx.Err() != nil {
+				return fmt.Errorf("prepare inline image %d: %w", i+1, err)
+			}
+			// Tool images may be JPEG or exceed the Markdown material limit.
+			if firstImage < i {
+				flushImages(i)
+			}
+			parts = append(parts, inlinePart{
+				source: imageSources[i], imageEnd: i + 1,
+				hasImages: true, hasNonTextImages: true, image: data,
+			})
+			firstImage = i + 1
+			continue
+		}
 		if len(markup) > 4000 {
 			return fmt.Errorf("QQ image reference exceeds message length limit")
 		}
@@ -109,15 +128,47 @@ func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utteranc
 		}
 		markdown.WriteString(markup)
 	}
-	flushImages(len(images))
+	if firstImage < len(images) {
+		flushImages(len(images))
+	}
+	var replacements []string
+	quoteAssets := append([]core.InlineAsset(nil), u.InlineAssets...)
+	for index, asset := range u.InlineAssets {
+		if !strings.Contains(content, asset.Placeholder) {
+			continue
+		}
+		markup, err := upload(asset.Data, asset.Alt)
+		if err != nil {
+			slog.Warn("qq_channel: diagram image upload failed", "err", err)
+			markup = "[流程图未能发送]"
+			quoteAssets[index].Fallback = markup
+			quoteAssets[index].SemanticText = ""
+		}
+		replacements = append(replacements, asset.Placeholder, markup)
+	}
+	wire := strings.NewReplacer(replacements...)
 	if strings.TrimSpace(content) != "" {
-		last := &parts[len(parts)-1]
-		if len(last.content)+2+len(content) <= 4000 {
-			last.content += "\n\n" + content
-			last.caption = content
+		rendered := wire.Replace(content)
+		last := len(parts) - 1
+		if last >= 0 && parts[last].image == nil && len(parts[last].content)+2+len(rendered) <= 4000 {
+			parts[last].content += "\n\n" + rendered
+			parts[last].caption = content
+		} else if len(u.InlineAssets) > 0 && markdown.Len()+len(rendered) <= 4000 {
+			parts = append(parts, inlinePart{content: markdown.String() + rendered, caption: content, imageEnd: len(images)})
 		} else {
-			for _, chunk := range core.SplitMarkdownChunks(content, 1200) {
-				parts = append(parts, inlinePart{content: chunk, source: chunk, caption: chunk, imageEnd: len(images)})
+			chunkLimit := 1200
+			if len(u.InlineAssets) > 0 {
+				chunkLimit = 900
+			}
+			for index, chunk := range core.SplitMarkdownChunks(content, chunkLimit) {
+				rendered := wire.Replace(chunk)
+				if index == 0 {
+					rendered = markdown.String() + rendered
+				}
+				if len(rendered) > 4000 && len(u.InlineAssets) > 0 {
+					return fmt.Errorf("%w: QQ 图文消息超过长度限制", entity.ErrMessageTooLong)
+				}
+				parts = append(parts, inlinePart{content: rendered, caption: chunk, imageEnd: len(images)})
 			}
 		}
 	}
@@ -136,65 +187,67 @@ func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utteranc
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	for index, part := range parts[:partsToSend] {
-		if budget != nil {
-			q.commitPassiveReplyAttempt(budget)
-			reservedCount--
-		}
-		metadata := QuoteMetadata{Text: part.source, Kind: qqQuoteText, TextComplete: true}
-		if part.hasImages {
-			metadata.Kind = qqQuoteTextCard
-			metadata.TextComplete = part.source != ""
-			if part.hasNonTextImages {
-				metadata.Kind = qqQuoteMixed
-			}
-			metadata.Text = strings.TrimSpace(part.source + "\n\n" + part.caption)
-		}
-		attempted = true
-		if u.IsGroup {
-			err = q.client.SendGroupMessageWithContext(ctx, u.ChannelID, part.content, u.QuoteMsgID, metadata)
-		} else {
-			err = q.client.SendC2CMessageWithContext(ctx, u.ChannelID, part.content, u.QuoteMsgID, metadata)
-		}
-		if err != nil {
-			if index == 0 {
-				return fmt.Errorf("send QQ Markdown message with inline images: %w", err)
-			}
-			done, pending := entity.ImageDeliveryText(imageSources, parts[index-1].imageEnd)
-			var sentCaptions, pendingCaptions []string
-			for n, p := range parts {
-				if p.caption == "" {
-					continue
-				}
-				if n < index {
-					sentCaptions = append(sentCaptions, p.caption)
-				} else {
-					pendingCaptions = append(pendingCaptions, p.caption)
-				}
-			}
-			return &entity.PartialDeliveryError{Err: err,
-				DeliveredText:   strings.TrimSpace(done + "\n\n" + strings.Join(sentCaptions, "\n\n")),
-				UndeliveredText: strings.TrimSpace(pending + "\n\n" + strings.Join(pendingCaptions, "\n\n"))}
-		}
+	targetType := "users"
+	if u.IsGroup {
+		targetType = "groups"
 	}
-	if limitedByBudget {
-		done, pending := entity.ImageDeliveryText(imageSources, parts[partsToSend-1].imageEnd)
+	partial := func(err error, sent int) error {
+		done, pending := entity.ImageDeliveryText(imageSources, parts[sent-1].imageEnd)
 		var sentCaptions, pendingCaptions []string
 		for index, part := range parts {
 			if part.caption == "" {
 				continue
 			}
-			if index < partsToSend {
-				sentCaptions = append(sentCaptions, part.caption)
+			if index < sent {
+				sentCaptions = append(sentCaptions, core.InlineAssetText(part.caption, quoteAssets, true))
 			} else {
-				pendingCaptions = append(pendingCaptions, part.caption)
+				pendingCaptions = append(pendingCaptions, core.InlineAssetText(part.caption, u.InlineAssets, false))
 			}
 		}
 		return &entity.PartialDeliveryError{
-			Err:             fmt.Errorf("QQ 被动回复额度仅剩 %d 条，已发送前 %d 条；剩余内容等待续发", partsToSend, partsToSend),
+			Err:             err,
 			DeliveredText:   strings.TrimSpace(done + "\n\n" + strings.Join(sentCaptions, "\n\n")),
 			UndeliveredText: strings.TrimSpace(pending + "\n\n" + strings.Join(pendingCaptions, "\n\n")),
 		}
+	}
+	for index, part := range parts[:partsToSend] {
+		if budget != nil {
+			q.commitPassiveReplyAttempt(budget)
+			reservedCount--
+		}
+		caption := core.InlineAssetText(part.caption, quoteAssets, true)
+		metadata := QuoteMetadata{Text: strings.TrimSpace(part.source + "\n\n" + caption), Kind: qqQuoteText, TextComplete: true}
+		if part.hasImages || caption != part.caption {
+			metadata.Kind = qqQuoteTextCard
+			metadata.TextComplete = metadata.Text != ""
+			if part.hasNonTextImages {
+				metadata.Kind = qqQuoteMixed
+			}
+		}
+		attempted = true
+		if len(part.image) > 0 {
+			err = q.client.sendMediaMessage(ctx, targetType, u.ChannelID, part.content, part.image, u.QuoteMsgID, metadata)
+		} else {
+			err = q.client.sendMessageWithContext(ctx, targetType, u.ChannelID, part.content, u.QuoteMsgID, metadata)
+		}
+		if err != nil {
+			var unsent *entity.UnsentError
+			if budget != nil && errors.As(err, &unsent) {
+				q.restoreUnsentPassiveReply(budget)
+				reservedCount++
+			}
+			if index == 0 {
+				return fmt.Errorf("send QQ Markdown message with inline images: %w", err)
+			}
+			return partial(err, index)
+		}
+	}
+	if limitedByBudget {
+		return partial(fmt.Errorf("QQ 被动回复额度仅剩 %d 条，已发送前 %d 条；剩余内容等待续发", partsToSend, partsToSend), partsToSend)
+	}
+	if len(u.InlineAssets) > 0 {
+		source, _ := entity.ImageDeliveryText(imageSources, len(images))
+		u.QuoteText = strings.TrimSpace(source + "\n\n" + core.InlineAssetText(content, quoteAssets, true))
 	}
 	slog.Info("qq_channel: 多图 Markdown 消息已接受，已释放临时素材", "channelID", u.ChannelID, "pages", len(images), "messages", len(parts))
 	return nil

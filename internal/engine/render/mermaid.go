@@ -52,13 +52,13 @@ func RenderMermaidBlocks(ctx context.Context, markdown string) (string, []core.I
 		output.WriteString(markdown[position:block.start])
 		asset, err := renderMermaid(ctx, block.source)
 		if err != nil {
-			output.WriteString("[流程图生成失败，源码已省略]")
+			output.WriteString("\n[流程图生成失败，源码已省略]\n\n")
 			renderErrors = append(renderErrors, fmt.Sprintf("diagram %d: %v", index+1, err))
 			position = block.end
 			continue
 		}
 		assets = append(assets, asset)
-		output.WriteString(asset.Placeholder)
+		output.WriteString("\n" + asset.Placeholder + "\n\n")
 		position = block.end
 	}
 	output.WriteString(markdown[position:])
@@ -210,7 +210,7 @@ func replaceFailedMermaidBlocks(markdown string, blocks []mermaidBlock) string {
 	position := 0
 	for _, block := range blocks {
 		output.WriteString(markdown[position:block.start])
-		output.WriteString("[流程图生成失败，源码已省略]")
+		output.WriteString("\n[流程图生成失败，源码已省略]\n\n")
 		position = block.end
 	}
 	output.WriteString(markdown[position:])

@@ -2,7 +2,7 @@ package telegram
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"log/slog"
 	"strings"
 
@@ -10,111 +10,81 @@ import (
 	"daidai/internal/entity"
 )
 
-func (c *Channel) transmitInlineAssets(ctx context.Context, utterance *entity.Utterance, reply int64) error {
-	content := utterance.Text
-	visibleContent := utterance.Text
-	quoteText := utterance.Text
-	for _, asset := range utterance.InlineAssets {
-		fallback := asset.Fallback
-		if fallback == "" {
-			fallback = "[流程图]"
-		}
-		if strings.Contains(visibleContent, asset.Placeholder) {
-			visibleContent = strings.Replace(visibleContent, asset.Placeholder, fallback, 1)
-		} else {
-			visibleContent += "\n\n" + fallback
-		}
-		semantic := fallback
-		if asset.SemanticText != "" {
-			semantic += "\n" + asset.SemanticText
-		}
-		if strings.Contains(quoteText, asset.Placeholder) {
-			quoteText = strings.Replace(quoteText, asset.Placeholder, semantic, 1)
-		} else {
-			quoteText += "\n\n" + semantic
+type inlineReplyPart struct {
+	text   formattedText
+	source string
+	asset  *core.InlineAsset
+}
+
+func (c *Channel) transmitInlineAssets(ctx context.Context, u *entity.Utterance, reply int64) (string, error) {
+	var parts []inlineReplyPart
+	addText := func(markdown string) {
+		for _, chunk := range splitFormatted(formatMarkdown(markdown), 1800) {
+			if source := chunk.continuationText(); strings.TrimSpace(source) != "" {
+				parts = append(parts, inlineReplyPart{text: chunk, source: source})
+			}
 		}
 	}
-	utterance.Text = visibleContent
-	utterance.FallbackText = visibleContent
-	utterance.QuoteText = quoteText
-	sent := false
-	delivered := ""
-	sendText := func(source string) error {
-		chunks := splitFormatted(formatMarkdown(source), 1800)
-		for _, chunk := range chunks {
-			text := chunk.continuationText()
-			if strings.TrimSpace(text) == "" {
-				continue
-			}
-			if err := c.sendFormattedText(ctx, utterance.ChannelID, chunk, reply, text); err != nil {
-				if sent {
-					return &entity.PartialDeliveryError{Err: err, DeliveredText: delivered, UndeliveredText: source}
-				}
-				return err
-			}
-			sent = true
-			delivered = joinDeliveryText(delivered, text)
-		}
-		return nil
-	}
-	for _, asset := range utterance.InlineAssets {
-		position := strings.Index(content, asset.Placeholder)
-		if position < 0 {
-			position = len(content)
-			content += asset.Placeholder
-		}
-		before := content[:position]
-		if err := sendText(before); err != nil {
-			return err
-		}
-		content = content[position+len(asset.Placeholder):]
-		if len(asset.Data) == 0 || len(asset.Data) > core.MaxImageBytes {
-			fallback := asset.Fallback
-			if fallback == "" {
-				fallback = "[流程图无法发送]"
-			}
-			content = fallback + content
+	text := u.Text
+	for i := range u.InlineAssets {
+		asset := &u.InlineAssets[i]
+		before, after, found := strings.Cut(text, asset.Placeholder)
+		if !found {
 			continue
 		}
-		caption := asset.Alt
-		if caption == "" {
-			caption = "流程图"
-		}
-		results, err := c.sendImages(ctx, utterance.ChannelID, reply, [][]byte{asset.Data}, caption)
-		if err != nil {
-			fallback := asset.Fallback
-			if fallback == "" {
-				fallback = "[流程图暂时无法发送]"
-			}
-			if sent {
-				return &entity.PartialDeliveryError{Err: err, DeliveredText: delivered, UndeliveredText: fallback + content}
-			}
-			return err
-		}
-		sent = true
-		if len(results) > 0 {
-			for _, result := range results {
-				source := asset.SemanticText
-				if source == "" {
-					source = "[流程图]"
-				} else {
-					source = "[流程图]\n" + source
-				}
-				if err := c.storeQuote(ctx, utterance.ChannelID, result.ID, &quoteRecord{
-					Content: source, Kind: "text_card", Complete: true, SenderName: c.bot.FirstName,
-				}); err != nil {
-					// Delivery succeeded; history enrichment must not turn it into a failed send.
-					slog.Warn("telegram: Mermaid quote history persistence failed", "messageID", result.ID, "err", err)
-				}
-			}
-		}
-		delivered = joinDeliveryText(delivered, asset.Fallback)
+		addText(before)
+		parts = append(parts, inlineReplyPart{source: asset.Fallback, asset: asset})
+		text = after
 	}
-	if err := sendText(content); err != nil {
-		return err
+	addText(text)
+
+	var delivered []string
+	for i, part := range parts {
+		source, err := c.sendInlineReplyPart(ctx, u, reply, part)
+		if err == nil {
+			delivered = append(delivered, source)
+			continue
+		}
+		var receiptErr *entity.PartialDeliveryError
+		if i == 0 && !errors.As(err, &receiptErr) {
+			return "", err
+		}
+		next := i
+		if part.asset == nil && errors.As(err, &receiptErr) {
+			// Telegram accepted the text but did not return its message ID.
+			next++
+		}
+		var remaining []string
+		for _, pending := range parts[next:] {
+			remaining = append(remaining, pending.source)
+		}
+		return "", &entity.PartialDeliveryError{
+			Err: err, DeliveredText: joinDeliveryText(delivered...), UndeliveredText: joinDeliveryText(remaining...),
+		}
 	}
-	if !sent && strings.TrimSpace(content) == "" {
-		return fmt.Errorf("inline diagram reply had no deliverable content")
+	return joinDeliveryText(delivered...), nil
+}
+
+func (c *Channel) sendInlineReplyPart(ctx context.Context, u *entity.Utterance, reply int64, part inlineReplyPart) (string, error) {
+	if part.asset == nil {
+		return part.source, c.sendFormattedText(ctx, u.ChannelID, part.text, reply, part.source)
 	}
-	return nil
+	asset := part.asset
+	results, err := c.sendImages(ctx, u.ChannelID, reply, [][]byte{asset.Data}, asset.Alt)
+	if err != nil {
+		var unsent *entity.UnsentError
+		var rejected *entity.DeliveryRejection
+		if errors.As(err, &unsent) || (errors.As(err, &rejected) && rejected.After <= 0) {
+			text := "[流程图未能发送]"
+			return text, c.sendText(ctx, u.ChannelID, text, reply, text)
+		}
+		return "", err
+	}
+	source := strings.TrimSpace(asset.Fallback + "\n" + asset.SemanticText)
+	if err := c.storeQuote(ctx, u.ChannelID, results[0].ID, &quoteRecord{
+		Content: source, Kind: "text_card", Complete: true, SenderName: c.bot.FirstName,
+	}); err != nil {
+		slog.Warn("telegram: diagram quote persistence failed", "messageID", results[0].ID, "err", err)
+	}
+	return source, nil
 }
