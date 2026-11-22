@@ -102,11 +102,9 @@ func (q *QQChannel) evaluateGroupContinuation(
 
 	// 【第一层：绝对硬规则过滤 (0ms / 0 Token)】
 	// 1. @ 了别人，但没有 @ 呆呆 -> 明确转移交流目标，立即销毁会话并闭嘴
-	if mentions, ok := eventData["mentions"].([]any); ok && len(mentions) > 0 {
-		if !qqMessageMentionsBot(eventData) {
-			delete(q.groupActiveSessions, groupID)
-			return false
-		}
+	if qqDirectedAtOtherMember(eventData, trimmed) {
+		delete(q.groupActiveSessions, groupID)
+		return false
 	}
 	// 2. 引用了别人（非呆呆）的消息 -> 明确与他人对话，立即销毁会话
 	if replyCtx != nil && !quotedBot {
@@ -169,6 +167,14 @@ func (q *QQChannel) evaluateGroupContinuation(
 	// 模糊歧义发言（中间有人插话且不带追问特征），不冒然插话，销毁会话退回静默
 	delete(q.groupActiveSessions, groupID)
 	return false
+}
+
+func qqDirectedAtOtherMember(data map[string]any, text string) bool {
+	if qqMessageMentionsBot(data) {
+		return false
+	}
+	mentions, _ := data["mentions"].([]any)
+	return len(mentions) > 0 || strings.HasPrefix(strings.TrimSpace(text), "@") || strings.HasPrefix(strings.TrimSpace(text), "＠")
 }
 
 // isPurePunctuationNoise 判断是否为纯无意义符号/标点噪声（但保留问号问询）

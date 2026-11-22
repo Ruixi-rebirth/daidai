@@ -102,8 +102,9 @@ func (t *ScreenshotTool) Execute(ctx context.Context, rawArgs json.RawMessage) (
 		slog.Info("screenshot_web: Chromium 网页截图成功", "host", safeLogURL(targetURL), "size", len(pngBytes))
 
 		return &core.ToolResult{
-			ImageData: pngBytes,
-			ImageOnly: true,
+			ImageData:    pngBytes,
+			ImageOnly:    true,
+			MediaHistory: "[已发送网页截图]",
 		}, nil
 	}
 

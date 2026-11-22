@@ -11,6 +11,7 @@ type toolMediaDelivery struct {
 	images       [][]byte
 	imageSources []string
 	fallbackText string
+	mediaHistory string
 }
 
 func (m *toolMediaDelivery) absorb(toolName string, result *core.ToolResult, presentation *thinkPresentation) (hasDelivery bool) {
@@ -32,6 +33,7 @@ func (m *toolMediaDelivery) absorb(toolName string, result *core.ToolResult, pre
 		m.imageSources = append(m.imageSources, source)
 	}
 	if len(m.images) > firstImage {
+		m.mediaHistory = strings.TrimSpace(m.mediaHistory + "\n" + result.MediaHistory)
 		fallback := strings.TrimSpace(result.FallbackText)
 		if fallback == "" {
 			fallback = strings.TrimSpace(result.Text)
@@ -72,6 +74,7 @@ func (m *toolMediaDelivery) utterance(event *entity.SensoryEvent, text string) *
 		ChannelID:    event.ChannelID,
 		QuoteMsgID:   event.RawMessageID,
 		Text:         text,
+		MediaHistory: m.mediaHistory,
 		FallbackText: m.fallbackText,
 		Images:       m.images,
 		ImageSources: m.imageSources,

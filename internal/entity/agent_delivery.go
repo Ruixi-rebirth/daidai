@@ -61,19 +61,7 @@ func (a *SuperAgent) transmitUtteranceWithContinuationContext(ctx, continuationC
 	utterance = utterance.WithoutEmptyImages()
 	var partialErr *PartialDeliveryError
 	if err := a.Channels.Transmit(ctx, utterance); err == nil {
-		if utterance.QuoteText != "" {
-			return utterance.QuoteText, nil
-		}
-		if utterance.HasMedia() && len(utterance.ImageSources) > 0 {
-			sources := append(append([]string(nil), utterance.ImageSources...), utterance.Text)
-			if text, _ := ImageDeliveryText(sources, len(sources)); text != "" {
-				return text, nil
-			}
-		}
-		if utterance.Text == "" && utterance.HasMedia() && strings.TrimSpace(utterance.FallbackText) != "" {
-			return utterance.FallbackText, nil
-		}
-		return utterance.Text, nil
+		return deliveredReplyText(utterance), nil
 	} else if errors.As(err, &partialErr) {
 		slog.Warn("superagent: 消息部分送达，不重复发送正文", "channel", utterance.ChannelID, "err", err)
 		if !utterance.FixedPresentation {
@@ -113,6 +101,24 @@ func (a *SuperAgent) transmitUtteranceWithContinuationContext(ctx, continuationC
 		}
 		return deliveredText, nil
 	}
+}
+
+func deliveredReplyText(u *Utterance) string {
+	text := u.QuoteText
+	if text == "" && u.HasMedia() && len(u.ImageSources) > 0 {
+		sources := append(append([]string(nil), u.ImageSources...), u.Text)
+		text, _ = ImageDeliveryText(sources, len(sources))
+	}
+	if text == "" {
+		text = u.Text
+	}
+	if text == "" && u.HasMedia() {
+		text = u.FallbackText
+	}
+	if u.HasMedia() && u.MediaHistory != "" {
+		return strings.TrimSpace(u.MediaHistory + "\n\n" + text)
+	}
+	return text
 }
 
 func canFallbackToText(err error) bool {

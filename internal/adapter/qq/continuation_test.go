@@ -7,6 +7,17 @@ import (
 	"daidai/internal/entity"
 )
 
+func TestPlainMentionEndsGroupContinuation(t *testing.T) {
+	channel := &QQChannel{}
+	channel.recordGroupActiveSession("group", "speaker")
+	if channel.evaluateGroupContinuation("group", "speaker", "@另一位群友", nil, nil, false) {
+		t.Fatal("an unstructured mention of another member must not continue the bot's conversation")
+	}
+	if !qqDirectedAtOtherMember(nil, "@另一位群友") {
+		t.Fatal("an unstructured mention must also be ineligible for unsolicited interjection")
+	}
+}
+
 func TestEvaluateGroupContinuation_FullLifecycle(t *testing.T) {
 	q := &QQChannel{
 		groupActiveSessions: make(map[string]*groupActiveSession),

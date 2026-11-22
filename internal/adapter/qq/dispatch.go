@@ -130,7 +130,8 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 			historyAttachmentNote := attachmentHistoryNote(currentImageCount, currentOmittedImages, currentFileCount, currentOmittedFiles)
 			// Ordinary group messages are saved to formal group history. Attachments
 			// stay pending and slash commands never execute without an @ mention.
-			canInterject := len(images) == 0 && omittedImages == 0 && len(files) == 0 && omittedFiles == 0 && !strings.HasPrefix(content, "/") && content != "继续"
+			canInterject := replyCtx == nil && !qqDirectedAtOtherMember(d, content) &&
+				len(images) == 0 && omittedImages == 0 && len(files) == 0 && omittedFiles == 0 && !strings.HasPrefix(content, "/") && content != "继续"
 			observedEvent := &entity.SensoryEvent{
 				Platform:              "qq",
 				ChannelID:             convID,

@@ -109,6 +109,7 @@ type Utterance struct {
 	MentionUserIDs          []string           // QQ 群聊消息要点名的成员 OpenID；主动插话由模型决定是否填写
 	Text                    string             // 纯净人话
 	QuoteText               string             // 内嵌媒体的可引用语义正文，不含临时平台素材 URL
+	MediaHistory            string             // 媒体确认送达后写入聊天历史，不随消息发送
 	FallbackText            string             // 媒体发送失败时替代图片的文字内容
 	CardData                []byte             // 美学卡片长图 (Maple Mono 排版图卷)
 	Images                  [][]byte           // 一条表达携带的多张图片；CardData 保留用于兼容单图调用
