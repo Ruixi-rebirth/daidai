@@ -89,11 +89,12 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 			q.handleUnprivilegedPrivateMessage(userID, senderName, msgID, content, currentImageCount, currentOmittedImages, currentFileCount, currentOmittedFiles)
 			return true
 		}
-		botAddressed := botMentioned || quotedBot || (isGroup && !strings.HasPrefix(strings.TrimSpace(content), "/") && strings.Contains(content, config.BotName()))
+		directedElsewhere := isGroup && (replyCtx != nil || qqDirectedAtOtherMember(d, content))
+		namedBot := config.BotName() != "" && strings.Contains(content, config.BotName())
+		botAddressed := botMentioned || quotedBot || (isGroup && !directedElsewhere && namedBot && !strings.HasPrefix(strings.TrimSpace(content), "/"))
+		groupContinuation := false
 		if isGroup && !botAddressed {
-			if q.evaluateGroupContinuation(convID, userID, content, d, replyCtx, quotedBot) {
-				botAddressed = true
-			}
+			groupContinuation = q.evaluateGroupContinuation(convID, userID, content, d, replyCtx, quotedBot)
 		}
 		if isGroup && entity.IsAdapterSlashCommand("qq", content) {
 			q.handleGroupBotRegistryCommand(convID, msgID, userID, role, content, d)
@@ -126,11 +127,11 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 				q.inbox.RememberPending(attachmentScope, files)
 			}
 		}
-		if isGroup && !botAddressed {
+		if isGroup && !botAddressed && !groupContinuation {
 			historyAttachmentNote := attachmentHistoryNote(currentImageCount, currentOmittedImages, currentFileCount, currentOmittedFiles)
 			// Ordinary group messages are saved to formal group history. Attachments
 			// stay pending and slash commands never execute without an @ mention.
-			canInterject := replyCtx == nil && !qqDirectedAtOtherMember(d, content) &&
+			canInterject := !directedElsewhere &&
 				len(images) == 0 && omittedImages == 0 && len(files) == 0 && omittedFiles == 0 && !strings.HasPrefix(content, "/") && content != "继续"
 			observedEvent := &entity.SensoryEvent{
 				Platform:              "qq",
@@ -153,6 +154,9 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 			if botMentioned || quotedBot || (config.BotName() != "" && strings.Contains(content, config.BotName())) {
 				q.recordGroupActiveSession(convID, userID)
 			}
+		}
+		if groupContinuation {
+			q.cancelPendingGroupInterjection(convID)
 		}
 		if replyCtx != nil {
 			quotedFiles, omittedQuotedFiles := qqQuotedFiles(replyCtx)
@@ -191,6 +195,8 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 			ReplyContext:          replyCtx,
 			RawMessageID:          msgID,
 			OccurredAt:            time.Now(),
+			GroupMessageObserved:  groupContinuation,
+			GroupContinuation:     groupContinuation,
 		})
 		if !accepted {
 			return false

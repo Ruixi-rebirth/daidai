@@ -88,6 +88,12 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (out *en
 	if event.GroupInterjection {
 		return c.thinkGroupInterjection(ctx, event)
 	}
+	if event.GroupContinuation {
+		if !c.addressedGroupContinuation(ctx, event) {
+			return nil, nil
+		}
+		event.GroupMessageObserved = false
+	}
 	if prepared := c.prepareAttachments(ctx, event); prepared != nil {
 		return prepared, nil
 	}
