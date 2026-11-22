@@ -15,7 +15,7 @@ const (
 )
 
 type automaticCardRenderer interface {
-	ShouldAutoRenderReply(string) bool
+	ShouldRenderCard(context.Context, string) bool
 	RenderCardPages(context.Context, *SensoryEvent, string, int) ([][]byte, error)
 }
 
@@ -35,7 +35,7 @@ func (a *SuperAgent) renderAutomaticReplyCard(ctx context.Context, event *Sensor
 	if !event.IsPartnerPrivate() {
 		replyContent = core.RedactSensitiveIPs(replyContent)
 	}
-	if !renderer.ShouldAutoRenderReply(replyContent) {
+	if !renderer.ShouldRenderCard(ctx, replyContent) {
 		return
 	}
 

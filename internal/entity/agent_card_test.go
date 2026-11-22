@@ -16,7 +16,7 @@ func (*cardTestCognition) Think(context.Context, *SensoryEvent) (*Utterance, err
 func (*cardTestCognition) MindStatus() string                                       { return "" }
 func (*cardTestCognition) ModelList() string                                        { return "" }
 func (*cardTestCognition) ModelUsage() string                                       { return "" }
-func (c *cardTestCognition) ShouldAutoRenderReply(string) bool                      { return c.shouldRender }
+func (c *cardTestCognition) ShouldRenderCard(context.Context, string) bool          { return c.shouldRender }
 func (c *cardTestCognition) RenderCardPages(_ context.Context, _ *SensoryEvent, _ string, pages int) ([][]byte, error) {
 	c.renderCalls++
 	c.pageCount = pages
