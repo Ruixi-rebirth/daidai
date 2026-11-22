@@ -153,6 +153,7 @@ func (p *AGYMindProvider) ChatWithTools(
 	args := []string{
 		"-p", prompt,
 		"--output-format", "json",
+		"--dangerously-skip-permissions",
 	}
 	if currentModel != "" {
 		args = append(args, "--model", currentModel)
