@@ -42,7 +42,6 @@ func (c *Cortex) runConversation(ctx context.Context, event *entity.SensoryEvent
 		}
 		return nil, false
 	}
-	processedLinks := make(map[string]struct{})
 	seenToolCalls := make(map[string]struct{})
 	toolCallsUsed := 0
 	var checkpoint []core.ChatMessage
@@ -171,7 +170,7 @@ func (c *Cortex) runConversation(ctx context.Context, event *entity.SensoryEvent
 			ToolCalls: toolCallsForTranscript(resp.ToolCalls),
 		})
 
-		batch, err := c.executeToolBatch(toolCtx, activeTools, resp.ToolCalls, toolCallsUsed, processedLinks, seenToolCalls, &media, presentation)
+		batch, err := c.executeToolBatch(toolCtx, activeTools, resp.ToolCalls, toolCallsUsed, seenToolCalls, &media, presentation)
 		if err != nil {
 			if batch.hasToolResult {
 				for _, call := range resp.ToolCalls[len(batch.messages):] {

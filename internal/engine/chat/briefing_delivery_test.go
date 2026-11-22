@@ -184,7 +184,7 @@ func TestPreparedViewRecoveryKeepsLinkIndexAfterLongBody(t *testing.T) {
 	}}
 	cortex := NewCortex(CortexConfig{Hands: hands})
 	call := core.ToolCall{ID: "view", Function: core.ToolCallFunction{Name: "get_geek_briefing", Arguments: "{}"}}
-	batch, err := cortex.executeToolBatch(context.Background(), hands.Definitions(), []core.ToolCall{call}, 0, nil, nil, &toolMediaDelivery{}, &thinkPresentation{})
+	batch, err := cortex.executeToolBatch(context.Background(), hands.Definitions(), []core.ToolCall{call}, 0, nil, &toolMediaDelivery{}, &thinkPresentation{})
 	if err != nil || len(batch.messages) != 1 || !strings.HasSuffix(batch.messages[0].RecoveryContent, index) || strings.Contains(batch.messages[0].Content, index) {
 		t.Fatalf("prepared view index was lost or exposed in the active model prompt: %v", err)
 	}

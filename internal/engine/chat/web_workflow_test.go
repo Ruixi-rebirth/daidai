@@ -68,33 +68,18 @@ func TestScreenshotDoesNotPreventLaterPageReadingAndAnswer(t *testing.T) {
 	}
 }
 
-func TestWebToolBudgetUsesNormalizedTargets(t *testing.T) {
-	processed := make(map[string]struct{})
-	var result toolBatchResult
-	for index, target := range []string{"example.com/a!", "https://example.com/a!", "example.com/b", "example.com/c"} {
-		arguments, err := json.Marshal(map[string]string{"url": target})
-		if err != nil {
-			t.Fatal(err)
-		}
-		call := core.ToolCall{
-			Function: core.ToolCallFunction{Name: "read_link", Arguments: string(arguments)},
-		}
-		if allowed := allowToolLinks(call, processed, &result); allowed != (index < 3) {
-			t.Fatalf("unexpected budget decision for %q: %v", target, allowed)
-		}
+func TestWebToolsCanReadMoreThanTwoPagesInOneBatch(t *testing.T) {
+	hands := &sequentialWebHands{}
+	cortex := NewCortex(CortexConfig{Hands: hands})
+	ctx := entity.WithSensoryEvent(context.Background(), &entity.SensoryEvent{Role: entity.RolePartner})
+	var calls []core.ToolCall
+	for i, path := range []string{"a", "b", "c"} {
+		calls = append(calls, core.ToolCall{ID: fmt.Sprint(i), Function: core.ToolCallFunction{
+			Name: "read_link", Arguments: fmt.Sprintf(`{"url":"https://example.com/%s"}`, path),
+		}})
 	}
-	if _, ok := processed["https://example.com/a!"]; !ok {
-		t.Fatal("budget discarded punctuation from the actual URL")
-	}
-}
-
-func TestWebSearchDoesNotConsumePageBudget(t *testing.T) {
-	processed := map[string]struct{}{"https://example.com/a": {}, "https://example.com/b": {}}
-	var result toolBatchResult
-	call := core.ToolCall{Function: core.ToolCallFunction{
-		Name: "search_web", Arguments: `{"query":"NixOS Telegram bot release notes"}`,
-	}}
-	if !allowToolLinks(call, processed, &result) || len(processed) != 2 || len(result.messages) != 0 {
-		t.Fatal("keyword search should be allowed even when the page budget is full")
+	_, err := cortex.executeToolBatch(ctx, hands.Definitions(), calls, 0, nil, &toolMediaDelivery{}, &thinkPresentation{})
+	if err != nil || len(hands.calls) != len(calls) {
+		t.Fatalf("expected all %d calls to run, got %v with error %v", len(calls), hands.calls, err)
 	}
 }

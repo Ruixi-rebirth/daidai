@@ -68,7 +68,6 @@ func (c *Cortex) executeToolBatch(
 	activeTools []core.ToolDefinition,
 	calls []core.ToolCall,
 	used int,
-	processedLinks map[string]struct{},
 	seenCalls map[string]struct{},
 	media *toolMediaDelivery,
 	presentation *thinkPresentation,
@@ -101,9 +100,6 @@ func (c *Cortex) executeToolBatch(
 		}
 		if !toolAvailable(activeTools, call.Function.Name) {
 			result.appendToolMessage(call, fmt.Sprintf("工具 %s 未在当前推理轮次开放，调用已拒绝。", call.Function.Name))
-			continue
-		}
-		if !allowToolLinks(call, processedLinks, &result) {
 			continue
 		}
 		if c.hands == nil {
@@ -180,32 +176,4 @@ func (r *toolBatchResult) appendToolMessage(call core.ToolCall, content string, 
 		Name:       call.Function.Name,
 		Content:    content,
 	})
-}
-
-func allowToolLinks(call core.ToolCall, processedLinks map[string]struct{}, result *toolBatchResult) bool {
-	switch call.Function.Name {
-	case "screenshot_web", "read_link":
-	default:
-		return true
-	}
-	var args struct {
-		URL string `json:"url"`
-	}
-	if json.Unmarshal([]byte(call.Function.Arguments), &args) != nil {
-		return true
-	}
-	target, err := core.ExternalURLBudgetKey(args.URL)
-	if err != nil {
-		return true
-	}
-	if _, seen := processedLinks[target]; seen {
-		return true
-	}
-	if len(processedLinks) >= 2 {
-		slog.Info("cortex: 拦截超限的网页处理调用", "name", call.Function.Name, "uniqueLinks", len(processedLinks))
-		result.appendToolMessage(call, fmt.Sprintf("本轮最多处理两个不同网页链接，已跳过本次 %s 调用。", call.Function.Name))
-		return false
-	}
-	processedLinks[target] = struct{}{}
-	return true
 }

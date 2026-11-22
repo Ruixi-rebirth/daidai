@@ -203,39 +203,6 @@ func NormalizeExternalURL(raw string) (string, error) {
 	return u.String(), nil
 }
 
-// ExternalURLBudgetKey identifies equivalent HTTP targets for per-turn tool
-// budgets without changing the URL used for the actual request. Fragments are
-// client-side only; host casing, default ports, and an empty path do not change
-// the HTTP origin or request target.
-func ExternalURLBudgetKey(raw string) (string, error) {
-	target, err := NormalizeExternalURL(raw)
-	if err != nil {
-		return "", err
-	}
-	u, err := url.Parse(target)
-	if err != nil {
-		return "", err
-	}
-	host := strings.ToLower(u.Hostname())
-	port := u.Port()
-	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
-		port = ""
-	}
-	if port != "" {
-		u.Host = net.JoinHostPort(host, port)
-	} else if strings.Contains(host, ":") {
-		u.Host = "[" + host + "]"
-	} else {
-		u.Host = host
-	}
-	if u.Path == "" {
-		u.Path = "/"
-	}
-	u.Fragment = ""
-	u.RawFragment = ""
-	return u.String(), nil
-}
-
 // NormalizeWebSearchQuery prepares the query sent to the search provider.
 func NormalizeWebSearchQuery(raw string) string {
 	var sb strings.Builder
