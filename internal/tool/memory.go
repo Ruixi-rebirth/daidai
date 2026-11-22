@@ -43,7 +43,7 @@ func (t *MemoryTool) Name() string {
 }
 
 func (t *MemoryTool) Description() string {
-	return "管理当前会话可见的个人记忆，支持增删改、搜索、分页查看、生成提问者画像和查证记忆来源。私聊与群聊记忆按会话范围隔离。"
+	return "查看和管理当前会话可见的个人记忆。用户问你对本人有什么印象、是否记得本人或记得本人的哪些事，调用 profile 交付印象与记忆卡片，即使用户没有提到卡片。想核对具体的一条记忆时用 search 或 source。私聊和各群的记忆按会话隔离。"
 }
 
 func (t *MemoryTool) Parameters() map[string]any {
@@ -53,7 +53,7 @@ func (t *MemoryTool) Parameters() map[string]any {
 			"action": map[string]any{
 				"type":        "string",
 				"enum":        []string{"add", "update", "delete", "search", "list", "profile", "source"},
-				"description": "profile 仅生成当前提问者本人的画像，不用于第三方；source 查看来源，search 检索，list 列出，add/update/delete 修改当前会话范围记忆。分页通过 page 或 page_direction 指定",
+				"description": "profile：本人印象或整体回忆，例如“对我的印象是什么”“你记得我什么”“你还记得我吗”。只用于当前提问者。list：明确要求查阅原始记忆列表。search：查找具体记忆。source：查看一条记忆的依据。add/update/delete：修改当前会话可见的记忆。需要翻页时传 page 或 page_direction。",
 			},
 			"fact": map[string]any{
 				"type":        "string",
