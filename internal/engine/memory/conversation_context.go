@@ -61,14 +61,14 @@ func (m *MemoryEngine) WorkingContext(ctx context.Context, event *entity.Sensory
 		h := recents[i]
 		role := core.RoleUser
 		content := h.Text
+		replyTarget := ""
 		if h.IsBot {
 			role = core.RoleAssistant
 			if h.IsGroup && h.ReplyToUID != "" {
-				addressee := "其他群友"
+				replyTarget = "other_member"
 				if h.ReplyToUID == event.SenderID {
-					addressee = "当前发言人"
+					replyTarget = "current_speaker"
 				}
-				content = fmt.Sprintf("[这条回复的对象：%s] %s", addressee, content)
 			}
 		} else if h.IsGroup {
 			speaker := h.Name
@@ -84,8 +84,7 @@ func (m *MemoryEngine) WorkingContext(ctx context.Context, event *entity.Sensory
 		}
 		totalChars += cLen
 		selected = append(selected, core.ChatMessage{
-			Role:    role,
-			Content: content,
+			Role: role, Content: content, GroupReplyTarget: replyTarget,
 		})
 	}
 

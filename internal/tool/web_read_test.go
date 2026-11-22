@@ -3,11 +3,14 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"daidai/internal/core"
 	"daidai/internal/provider/llm"
 )
 
@@ -68,5 +71,59 @@ func TestExtractHTMLContentSkipsHiddenErrorPlaceholders(t *testing.T) {
 	text, err := extractHTMLContent([]byte(source))
 	if err != nil || !strings.Contains(text, visible) || strings.Contains(text, "error while loading") {
 		t.Fatalf("extracted wrong page content: %q, %v", text, err)
+	}
+}
+
+func TestReadPageWaitsForAGYWhenFallbackHasNoBody(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	fallback := make(chan struct{})
+	result, err := readPageWithFallback(ctx, time.Millisecond, func(ctx context.Context) (*core.ToolResult, error) {
+		select {
+		case <-fallback:
+			return &core.ToolResult{Text: "AGY 正文"}, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}, func(context.Context) (*core.ToolResult, error) {
+		close(fallback)
+		return nil, errors.New("login page with no article")
+	})
+	if err != nil || result == nil || result.Text != "AGY 正文" {
+		t.Fatalf("a failed fallback discarded the AGY result: %v, %v", result, err)
+	}
+}
+
+func TestReadPageCancelsAGYWhenFallbackHasBody(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	cancelled := make(chan struct{})
+	result, err := readPageWithFallback(ctx, time.Millisecond, func(ctx context.Context) (*core.ToolResult, error) {
+		<-ctx.Done()
+		close(cancelled)
+		return nil, ctx.Err()
+	}, func(context.Context) (*core.ToolResult, error) {
+		return &core.ToolResult{Text: "Go 正文"}, nil
+	})
+	if err != nil || result == nil || result.Text != "Go 正文" {
+		t.Fatalf("usable fallback did not return first: %v, %v", result, err)
+	}
+	select {
+	case <-cancelled:
+	case <-ctx.Done():
+		t.Fatal("AGY kept running after the fallback returned")
+	}
+}
+
+func TestReadPageFallsBackImmediatelyOnAGYFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result, err := readPageWithFallback(ctx, time.Hour, func(context.Context) (*core.ToolResult, error) {
+		return nil, errors.New("AGY could not access the page")
+	}, func(context.Context) (*core.ToolResult, error) {
+		return &core.ToolResult{Text: "Go 正文"}, nil
+	})
+	if err != nil || result == nil {
+		t.Fatalf("fallback did not start after AGY failed: %v, %v", result, err)
 	}
 }

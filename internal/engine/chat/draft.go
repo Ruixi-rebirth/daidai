@@ -187,13 +187,40 @@ func (c *Cortex) checkpointTruncatedReply(ctx context.Context, event *entity.Sen
 }
 
 func (c *Cortex) checkpointToolResults(ctx context.Context, event *entity.SensoryEvent, messages []core.ChatMessage) (text, draftID string) {
-	const summary = "工具已返回信息，但我没能完成回答。"
+	summary := "工具已返回信息，但我没能完成回答。"
+	progress := pageReadProgressSummary(messages)
 	id, err := c.saveDraft(ctx, event, messages)
 	if err != nil {
 		slog.Error("cortex: 保存已有工具结果失败", "err", err)
-		return summary + "草稿未能保存。", ""
+		return summary + "草稿未能保存。" + progress, ""
 	}
-	return summary + "已保存结果，回复“/continue " + id + "”接着写。", id
+	return summary + "已保存结果，回复“/continue " + id + "”接着写。" + progress, id
+}
+
+func pageReadProgressSummary(messages []core.ChatMessage) string {
+	var urls []string
+	statuses := make(map[string]string)
+	for _, message := range messages {
+		if p := message.PageProgress; p != nil {
+			if _, seen := statuses[p.URL]; !seen {
+				urls = append(urls, p.URL)
+			}
+			if previous := statuses[p.URL]; strings.HasPrefix(previous, "已读") && !strings.HasPrefix(p.Status, "已读") {
+				statuses[p.URL] = "已读部分正文，本次接续未完成"
+			} else {
+				statuses[p.URL] = p.Status
+			}
+		}
+	}
+	if len(urls) == 0 {
+		return ""
+	}
+	var summary strings.Builder
+	summary.WriteString("\n\n网页进度")
+	for _, target := range urls {
+		fmt.Fprintf(&summary, "\n- %s · %s", statuses[target], core.TruncateRunes(target, 120, "…"))
+	}
+	return summary.String()
 }
 
 func quotedMessageContextFromEvent(event *entity.SensoryEvent, depth int, remaining *int) *quotedMessageContext {

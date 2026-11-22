@@ -21,7 +21,7 @@ func (a *SuperAgent) notifyCognitionDeadline(event *SensoryEvent, deadlineErr, d
 	case errors.As(detailErr, &uncertain):
 		message = "AGY 任务超时，可能已经执行了部分操作，但最终结果无法确认。我没有自动重试以免重复操作；请先检查当前状态，再告诉我下一步。"
 	case errors.As(detailErr, &checkpoint):
-		message = "这次处理超过时限，已有工具结果已保存。回复“/continue " + checkpoint.DraftID + "”接着写。"
+		message = "这次处理超过时限，已有工具结果已保存。回复“/continue " + checkpoint.DraftID + "”接着写。" + checkpoint.Progress
 	}
 
 	notifyCtx, notifyCancel := context.WithTimeout(context.Background(), 10*time.Second)

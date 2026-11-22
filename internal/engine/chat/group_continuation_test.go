@@ -14,7 +14,7 @@ type continuationModel struct {
 }
 
 func (m *continuationModel) Chat(_ context.Context, messages []core.ChatMessage, options *core.ChatOptions) (string, error) {
-	if options == nil || !options.ReadOnly || !strings.Contains(messages[1].Content, "[这条回复的对象：当前发言人] 这是上一条机器人回复") {
+	if options == nil || !options.ReadOnly || !strings.Contains(messages[1].Content, `"text":"这是上一条机器人回复","reply_target":"current_speaker"`) {
 		return "skip", nil
 	}
 	return m.target, nil
@@ -39,5 +39,10 @@ func TestGroupContinuationChecksAddresseeBeforeAnswering(t *testing.T) {
 	out, err = cortex.Think(ctx, event)
 	if out == nil || err != nil || model.calls != 1 || out.Text != "接上这句。" {
 		t.Fatalf("a confirmed continuation did not reach normal answering: %v %v", out, err)
+	}
+	for _, msg := range model.messages {
+		if strings.Contains(msg.Content, "reply_target") || strings.Contains(msg.Content, "这条回复的对象") {
+			t.Fatal("the normal reply model saw continuation-only metadata")
+		}
 	}
 }

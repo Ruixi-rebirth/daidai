@@ -78,10 +78,18 @@ func (t *WebSearchTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*
 	if query == "" {
 		return &core.ToolResult{Text: "搜索关键词不能为空。"}, nil
 	}
-	parsed, err := t.run(ctx, webRequest{Query: query})
+	if ctx == nil {
+		return nil, fmt.Errorf("网页处理需要有效的请求上下文")
+	}
+	searchCtx, cancel := context.WithTimeout(ctx, t.timeout)
+	defer cancel()
+	parsed, err := t.run(searchCtx, webRequest{Query: query})
 	if err != nil {
-		if ctx != nil && ctx.Err() != nil {
+		if ctx.Err() != nil {
 			return nil, ctx.Err()
+		}
+		if searchCtx.Err() == context.DeadlineExceeded {
+			return &core.ToolResult{Text: "联网检索超时，请稍后再试。"}, nil
 		}
 		return &core.ToolResult{Text: err.Error()}, nil
 	}
@@ -122,9 +130,6 @@ func (t *WebSearchTool) run(ctx context.Context, request webRequest) (llm.AGYRes
 		return empty, fmt.Errorf("联网检索失败：%w", err)
 	}
 
-	execCtx, cancel := context.WithTimeout(ctx, t.timeout)
-	defer cancel()
-
 	cmdArgs := []string{
 		"-p", prompt,
 		"--output-format", "json",
@@ -148,7 +153,7 @@ func (t *WebSearchTool) run(ctx context.Context, request webRequest) (llm.AGYRes
 
 	slog.Info("web_search_tool: 启动受控沙箱联网检索", "inputBytes", len(input))
 
-	cmd := core.CommandProcessGroup(execCtx, t.command, cmdArgs...)
+	cmd := core.CommandProcessGroup(ctx, t.command, cmdArgs...)
 	cmd.Dir = tmpDir
 	cmd.WaitDelay = 2 * time.Second
 
@@ -158,11 +163,8 @@ func (t *WebSearchTool) run(ctx context.Context, request webRequest) (llm.AGYRes
 	cmd.Stderr = stderrBuf
 
 	if err := cmd.Run(); err != nil {
-		if execCtx.Err() == context.Canceled {
-			return empty, context.Canceled
-		}
-		if execCtx.Err() == context.DeadlineExceeded {
-			return empty, fmt.Errorf("联网检索超时，请稍后再试")
+		if err := ctx.Err(); err != nil {
+			return empty, err
 		}
 		slog.Warn("web_search_tool: 受控联网检索执行失败", "inputBytes", len(input), "err", err)
 		return empty, fmt.Errorf("联网检索暂时不可用")

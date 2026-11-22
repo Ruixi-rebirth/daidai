@@ -145,6 +145,7 @@ func (c *Cortex) executeToolBatch(
 			result.directReply = toolResult.Text
 		}
 		result.appendToolMessage(call, truncateToolOutput(call.Function.Name, output), !prepared)
+		result.messages[len(result.messages)-1].PageProgress = toolResult.PageProgress
 		if prepared {
 			evidence := strings.TrimSpace(toolResult.FallbackText)
 			if evidence == "" {

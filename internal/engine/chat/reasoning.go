@@ -59,7 +59,7 @@ func (c *Cortex) runConversation(ctx context.Context, event *entity.SensoryEvent
 			slog.Error("cortex: 对话超时后保存工具结果失败", "err", err)
 			return
 		}
-		replyErr = &entity.ReplyDeadlineWithDraft{DraftID: id}
+		replyErr = &entity.ReplyDeadlineWithDraft{DraftID: id, Progress: pageReadProgressSummary(messages)}
 	}()
 
 	// 单次心智推理与多轮工具调用循环

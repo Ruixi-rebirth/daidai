@@ -16,11 +16,17 @@ type ToolResult struct {
 	ImageOnly         bool     // 已准备视图交付时不附加模型正文，Caption 仍照常发送
 	ImageSources      []string // 与 Images 对齐的逐图语义正文
 	MediaHistory      string   // 仅在媒体确认送达后写入聊天历史的说明
-	Caption           string   // 确定交付的索引等文字，不交给模型改写
+	PageProgress      *PageReadProgress
+	Caption           string // 确定交付的索引等文字，不交给模型改写
 	InlineImages      bool
 	FixedPresentation bool                  // 声明该结果已确定展示形式（如代码、凭据等纯文本），跳过自动转长图排版
 	OnDelivered       func(context.Context) // 仅在通道确认交付后更新展示上下文
 	OnDeliveryFailed  func(context.Context, error)
+}
+
+type PageReadProgress struct {
+	URL    string
+	Status string
 }
 
 // InlineAsset is a rendered image placed at a specific point in a Markdown reply.

@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -38,7 +37,7 @@ func NewReadLinkToolWithCommand(router *llm.MindRouter, command string) *ReadLin
 }
 func (t *ReadLinkTool) Name() string { return "read_link" }
 func (t *ReadLinkTool) Description() string {
-	return "读取指定网页正文并按用户原话完成任务；长文分页时检查 complete，未读完用 next_offset 续读。访问失败如实说明，不截图。"
+	return "读取指定网页正文并按用户原话完成任务；长文分页时用 next_offset 续读。处理多个网页时，先用已读正文回答，说明未读完或未读到的链接。不截图。"
 }
 func (t *ReadLinkTool) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
@@ -51,6 +50,9 @@ func (t *ReadLinkTool) Parameters() map[string]any {
 	}, "required": []string{"url"}}
 }
 func (t *ReadLinkTool) Execute(ctx context.Context, raw json.RawMessage) (*core.ToolResult, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("网页处理需要有效的请求上下文")
+	}
 	var args struct {
 		URL    string `json:"url"`
 		Task   string `json:"task"`
@@ -84,65 +86,148 @@ func (t *ReadLinkTool) Execute(ctx context.Context, raw json.RawMessage) (*core.
 			}
 			return &core.ToolResult{Text: "无法验证网页链接为可访问的公开地址，请核对链接后重试。"}, nil
 		}
-		parsed, err := t.search.run(ctx, webRequest{URL: target, Task: task})
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		if err == nil {
-			if answer, ok := readAGYPageAnswer(parsed); ok {
-				parsed.Response = answer
-				return &core.ToolResult{Text: webSearchResultText(parsed)}, nil
-			}
-		}
-		slog.Info("read_link: AGY 未返回可用正文结果，尝试直接抓取")
 	}
 
-	// Offsets belong to the direct-fetch text and must stay on that path.
-	directCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
-	content, fetchErr := fetchDirectWebPage(directCtx, target)
-	cancel()
-	if fetchErr == nil && strings.TrimSpace(content) != "" {
-		runes := []rune(content)
-		totalRunes := len(runes)
-		slog.Info("read_link: 原生直接抓取成功", "url", target, "runes", totalRunes, "offset", args.Offset)
-
-		if start >= totalRunes && totalRunes > 0 {
-			return pageChunkResult(webPageChunk{URL: target, Offset: start, TotalRunes: totalRunes, Complete: true})
-		}
-
-		sliced := runes[start:]
-		const maxChunkRunes = 16000
-		hasMore := false
-		if len(sliced) > maxChunkRunes {
-			hasMore = true
-			sliced = sliced[:maxChunkRunes]
-		}
-
-		chunk := webPageChunk{URL: target, Offset: start, TotalRunes: totalRunes, Complete: !hasMore, Content: string(sliced)}
-		if hasMore {
-			chunk.NextOffset = start + maxChunkRunes
-		}
-		return pageChunkResult(chunk)
+	// Leave time for the outer conversation to synthesize and send the answer.
+	deadline, hasDeadline := ctx.Deadline()
+	if !hasDeadline {
+		deadline = time.Now().Add(6 * time.Minute)
+	}
+	readCtx, cancel := context.WithDeadline(ctx, deadline.Add(-20*time.Second))
+	defer cancel()
+	label := core.TruncateRunes(target, 240, "…")
+	var result *core.ToolResult
+	var readErr error
+	if start == 0 && readCtx.Err() == nil {
+		result, readErr = readPageWithFallback(readCtx, 45*time.Second,
+			func(ctx context.Context) (*core.ToolResult, error) {
+				parsed, err := t.search.run(ctx, webRequest{URL: target, Task: task})
+				if err != nil {
+					return nil, err
+				}
+				answer, err := readAGYPageAnswer(parsed)
+				if err != nil {
+					return nil, err
+				}
+				parsed.Response = answer
+				return pageResult("网页："+label+"\n"+webSearchResultText(parsed), target, "已读到正文"), nil
+			},
+			func(ctx context.Context) (*core.ToolResult, error) { return readDirectPage(ctx, target, start) })
+	} else if readCtx.Err() == nil {
+		// Offsets belong to the direct-fetch text and must stay on that path.
+		result, readErr = readDirectPage(readCtx, target, start)
 	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	if fetchErr != nil {
-		slog.Warn("read_link: 原生直接抓取失败", "err", fetchErr)
+	if result != nil {
+		return result, nil
 	}
-	return &core.ToolResult{Text: "未能读取该网页正文。"}, nil
+	if readCtx.Err() != nil {
+		return pageResult("本轮网页读取时间不足，尚未读到所需正文："+label, target, "时间不足"), nil
+	}
+	if readErr != nil {
+		slog.Warn("read_link: 未能读取正文", "host", safeLogURL(target), "err", readErr)
+	}
+	return pageResult("未能读取该网页正文："+label, target, "未读到所需正文"), nil
 }
 
-func readAGYPageAnswer(result llm.AGYResult) (string, bool) {
-	if result.FailureDetail() != "" || core.OutputLimitReached(result.FinishedReason) {
-		return "", false
+func pageResult(text, target, status string) *core.ToolResult {
+	return &core.ToolResult{Text: text, PageProgress: &core.PageReadProgress{URL: target, Status: status}}
+}
+
+type pageReader func(context.Context) (*core.ToolResult, error)
+
+func readPageWithFallback(ctx context.Context, delay time.Duration, agy, direct pageReader) (*core.ToolResult, error) {
+	type outcome struct {
+		result *core.ToolResult
+		err    error
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	run := func(read pageReader) <-chan outcome {
+		// A cancelled losing reader can still publish its result and exit.
+		out := make(chan outcome, 1)
+		go func() {
+			result, err := read(ctx)
+			out <- outcome{result: result, err: err}
+		}()
+		return out
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	agyResult, startFallback := run(agy), timer.C
+	var directResult <-chan outcome
+	var lastErr error
+	for agyResult != nil || directResult != nil || startFallback != nil {
+		select {
+		case <-ctx.Done():
+			if agyResult != nil && ctx.Err() == context.DeadlineExceeded {
+				slog.Info("read_link: AGY 正文读取到达本轮时间预算")
+			}
+			return nil, ctx.Err()
+		case <-startFallback:
+			startFallback = nil
+			slog.Info("read_link: AGY 仍在读取，启动 Go 兜底")
+			directResult = run(direct)
+		case final := <-agyResult:
+			agyResult = nil
+			if final.err == nil && final.result != nil {
+				return final.result, nil
+			}
+			lastErr = final.err
+			slog.Info("read_link: AGY 未返回可用结果", "err", final.err)
+			if startFallback != nil {
+				startFallback = nil
+				timer.Stop()
+				directResult = run(direct)
+			}
+		case final := <-directResult:
+			directResult = nil
+			if final.err == nil && final.result != nil {
+				slog.Info("read_link: Go 兜底读取到正文")
+				return final.result, nil
+			}
+			lastErr = final.err
+			slog.Info("read_link: Go 兜底没有可用正文", "err", final.err)
+		}
+	}
+	return nil, lastErr
+}
+
+func readDirectPage(ctx context.Context, target string, start int) (*core.ToolResult, error) {
+	directCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+	content, err := fetchDirectWebPage(directCtx, target)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(content) == "" {
+		return nil, fmt.Errorf("网页没有可用正文")
+	}
+	runes := []rune(content)
+	start = min(start, len(runes))
+	end := min(start+16000, len(runes))
+	chunk := webPageChunk{URL: target, Offset: start, TotalRunes: len(runes), Complete: end == len(runes), Content: string(runes[start:end])}
+	if !chunk.Complete {
+		chunk.NextOffset = end
+	}
+	return pageChunkResult(chunk)
+}
+
+func readAGYPageAnswer(result llm.AGYResult) (string, error) {
+	if result.FailureDetail() != "" {
+		return "", fmt.Errorf("AGY 执行失败")
+	}
+	if core.OutputLimitReached(result.FinishedReason) {
+		return "", fmt.Errorf("AGY 输出达到上限")
 	}
 	body := strings.TrimSpace(result.Response)
 	if fenced, ok := strings.CutPrefix(body, "```"); ok {
 		language, rest, hasLine := strings.Cut(fenced, "\n")
 		content, closed := strings.CutSuffix(strings.TrimSpace(rest), "```")
 		if !hasLine || !closed || (strings.TrimSpace(language) != "" && !strings.EqualFold(strings.TrimSpace(language), "json")) {
-			return "", false
+			return "", fmt.Errorf("AGY 返回的正文结果格式不完整")
 		}
 		body = content
 	}
@@ -150,11 +235,17 @@ func readAGYPageAnswer(result llm.AGYResult) (string, bool) {
 		Read   bool   `json:"read"`
 		Answer string `json:"answer"`
 	}
-	if json.Unmarshal([]byte(body), &page) != nil || !page.Read {
-		return "", false
+	if json.Unmarshal([]byte(body), &page) != nil {
+		return "", fmt.Errorf("AGY 返回的正文结果格式不完整")
+	}
+	if !page.Read {
+		return "", fmt.Errorf("AGY 未读到网页正文")
 	}
 	answer := strings.TrimSpace(page.Answer)
-	return answer, answer != ""
+	if answer == "" {
+		return "", fmt.Errorf("AGY 没有返回基于正文的回答")
+	}
+	return answer, nil
 }
 
 func pageChunkResult(chunk webPageChunk) (*core.ToolResult, error) {
@@ -162,7 +253,11 @@ func pageChunkResult(chunk webPageChunk) (*core.ToolResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encode webpage text chunk: %w", err)
 	}
-	return &core.ToolResult{Text: string(encoded)}, nil
+	status := "已读到正文"
+	if !chunk.Complete {
+		status = "已读部分正文，可继续读取"
+	}
+	return pageResult(string(encoded), chunk.URL, status), nil
 }
 
 // fetchDirectWebPage attempts to fetch and extract readable text from targetURL
@@ -207,13 +302,18 @@ func fetchDirectWebPage(ctx context.Context, targetURL string) (string, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || resp.StatusCode == http.StatusPartialContent {
 		return "", fmt.Errorf("HTTP status %d", resp.StatusCode)
+	}
+	if resp.Request != nil && resp.Request.URL.Path != req.URL.Path {
+		switch strings.ToLower(strings.TrimSuffix(resp.Request.URL.Path, "/")) {
+		case "/login", "/signin", "/sign-in", "/session", "/auth/login", "/users/sign_in":
+			return "", fmt.Errorf("网页重定向到了登录页")
+		}
 	}
 
 	// 限制最大读取 4MB，防止超大文件耗尽内存
-	lr := io.LimitReader(resp.Body, 4<<20)
-	body, err := io.ReadAll(lr)
+	body, err := core.ReadBounded(resp.Body, 4<<20)
 	if err != nil {
 		return "", err
 	}
@@ -269,12 +369,7 @@ func extractHTMLContent(raw []byte) (string, error) {
 	}
 
 	var sb strings.Builder
-	if title != "" {
-		sb.WriteString("【页面标题】：")
-		sb.WriteString(title)
-		sb.WriteString("\n\n【页面正文】：\n")
-	}
-
+	hasPasswordInput := false
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
 		if sb.Len() > 300000 {
@@ -285,7 +380,18 @@ func extractHTMLContent(raw []byte) (string, error) {
 				return
 			}
 			switch n.Data {
-			case "script", "style", "nav", "footer", "header", "form", "svg", "noscript", "iframe", "template":
+			case "form":
+				for child := range n.Descendants() {
+					if child.Type == html.ElementNode && child.Data == "input" {
+						for _, attr := range child.Attr {
+							if attr.Key == "type" && strings.EqualFold(attr.Val, "password") && !insideHiddenHTML(child) {
+								hasPasswordInput = true
+							}
+						}
+					}
+				}
+				return
+			case "script", "style", "nav", "footer", "header", "svg", "noscript", "iframe", "template":
 				return
 			case "p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li", "tr", "br":
 				defer sb.WriteString("\n")
@@ -321,8 +427,14 @@ func extractHTMLContent(raw []byte) (string, error) {
 		}
 	}
 	res = strings.Join(cleaned, "\n")
+	if hasPasswordInput && utf8.RuneCountInString(res) < 200 {
+		return "", fmt.Errorf("网页只返回登录界面及少量说明")
+	}
 	if utf8.RuneCountInString(res) < 50 {
 		return "", fmt.Errorf("extracted content too short")
+	}
+	if title != "" {
+		res = "【页面标题】：" + title + "\n\n【页面正文】：\n" + res
 	}
 	return res, nil
 }

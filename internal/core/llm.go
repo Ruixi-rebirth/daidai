@@ -43,12 +43,14 @@ type ToolCallFunction struct {
 
 // ChatMessage 单条对话消息
 type ChatMessage struct {
-	RecoveryContent string `json:"-"` // Tool evidence retained only when saving a draft.
-	Role            Role
-	Content         string
-	ToolCalls       []ToolCall // 当 Role 为 assistant 时，可能包含工具调用指令
-	ToolCallID      string     // 当 Role 为 tool 时，对应 ToolCall.ID
-	Name            string     // 工具名称
+	RecoveryContent  string            `json:"-"` // Tool evidence retained only when saving a draft.
+	GroupReplyTarget string            `json:"-"` // Group continuation judgement metadata.
+	PageProgress     *PageReadProgress `json:"-"` // Used to report progress if synthesis cannot finish.
+	Role             Role
+	Content          string
+	ToolCalls        []ToolCall // 当 Role 为 assistant 时，可能包含工具调用指令
+	ToolCallID       string     // 当 Role 为 tool 时，对应 ToolCall.ID
+	Name             string     // 工具名称
 }
 
 // ChatOptions 模型生成参数

@@ -16,7 +16,8 @@ var ErrMessageTooLong = errors.New("message exceeds the platform's single-respon
 var ErrReplyDeadlineWithDraft = fmt.Errorf("reply deadline with saved draft: %w", context.DeadlineExceeded)
 
 type ReplyDeadlineWithDraft struct {
-	DraftID string
+	DraftID  string
+	Progress string
 }
 
 func (e *ReplyDeadlineWithDraft) Error() string { return ErrReplyDeadlineWithDraft.Error() }

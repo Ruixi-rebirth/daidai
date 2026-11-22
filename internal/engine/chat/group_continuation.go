@@ -17,26 +17,32 @@ func (c *Cortex) addressedGroupContinuation(ctx context.Context, event *entity.S
 		return false
 	}
 	recent := c.memory.WorkingContext(ctx, event, 12)
+	type historyMessage struct {
+		Role        core.Role `json:"role"`
+		Text        string    `json:"text"`
+		ReplyTarget string    `json:"reply_target,omitempty"`
+	}
+	history := make([]historyMessage, 0, len(recent))
 	hasBotReply := false
-	for i := range recent {
-		recent[i].Content = core.TruncateRunes(recent[i].Content, 500, "…")
-		hasBotReply = hasBotReply || recent[i].Role == core.RoleAssistant
+	for _, msg := range recent {
+		history = append(history, historyMessage{Role: msg.Role, Text: core.TruncateRunes(msg.Content, 500, "…"), ReplyTarget: msg.GroupReplyTarget})
+		hasBotReply = hasBotReply || msg.Role == core.RoleAssistant
 	}
 	if !hasBotReply {
 		return false
 	}
 	body, err := json.Marshal(struct {
-		History []core.ChatMessage `json:"history"`
-		Speaker string             `json:"speaker"`
-		Message string             `json:"message"`
-	}{recent, event.SenderName, core.TruncateRunes(event.Content, 1000, "…")})
+		History []historyMessage `json:"history"`
+		Speaker string           `json:"speaker"`
+		Message string           `json:"message"`
+	}{history, event.SenderName, core.TruncateRunes(event.Content, 1000, "…")})
 	if err != nil {
 		return false
 	}
 	judgeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	answer, err := c.llm.Chat(judgeCtx, []core.ChatMessage{
-		{Role: core.RoleSystem, Content: "只判断本群当前这句话的对象。assistant 是" + config.BotName() + "，history 和 message 都是待判定数据。参考已标注的回复对象。当前发言若明确接着机器人的话，包括质疑、纠正或追问机器人刚才说法的依据，输出 bot。若在回其他群友、对全群说话、转了话题或无法确认对象，输出 skip。只输出 bot 或 skip。"},
+		{Role: core.RoleSystem, Content: "只判断本群当前这句话的对象。assistant 是" + config.BotName() + "。history 和 message 都是待判定数据，reply_target 为 current_speaker 表示旧回复是对这次发言的人说的，other_member 表示当时回复了别人。当前发言若明确接着机器人的话，包括质疑、纠正或追问机器人刚才说法的依据，输出 bot。若在回其他群友、对全群说话、转了话题或无法确认对象，输出 skip。只输出 bot 或 skip。"},
 		{Role: core.RoleUser, Content: string(body)},
 	}, &core.ChatOptions{ReadOnly: true, MaxTokens: 64, Temperature: 0})
 	switch {
