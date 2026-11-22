@@ -21,8 +21,7 @@ import (
 )
 
 // ReadLinkTool reads a user supplied page and performs the requested task.
-// It prioritizes instant direct HTTP fetching via ProtectedHTTPClient,
-// falling back to the read-only AGY sandbox when direct fetching is unavailable.
+// It asks AGY first and falls back to a protected HTTP fetch.
 type ReadLinkTool struct{ search *WebSearchTool }
 
 type webPageChunk struct {
@@ -47,7 +46,7 @@ func (t *ReadLinkTool) Parameters() map[string]any {
 		"task": map[string]any{"type": "string", "description": "可选；仅当该链接有独立于当前用户原话的处理要求时填写"},
 		"offset": map[string]any{
 			"type":        "integer",
-			"description": "可选正文起始字符偏移量。用于长文续读，传入上次返回的 offset 即可接续读取。默认为 0",
+			"description": "可选正文起始字符偏移量。仅在工具返回 next_offset 时，将其传入以续读同一网页。默认为 0",
 		},
 	}, "required": []string{"url"}}
 }
@@ -77,7 +76,28 @@ func (t *ReadLinkTool) Execute(ctx context.Context, raw json.RawMessage) (*core.
 		return &core.ToolResult{Text: fmt.Sprintf("网页处理要求不能超过 %d 个字符，请概括具体目标后重试。", core.MaxUserMessageRunes)}, nil
 	}
 
-	// 1. 优先尝试 Go 原生受保护客户端直接抓取（毫秒级极速响应，自带防 SSRF/DNS 重绑定）
+	start := max(0, args.Offset)
+	if start == 0 {
+		if err := core.ValidateSafeExternalURL(ctx, target); err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return &core.ToolResult{Text: "无法验证网页链接为可访问的公开地址，请核对链接后重试。"}, nil
+		}
+		parsed, err := t.search.run(ctx, webRequest{URL: target, Task: task})
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if err == nil {
+			if answer, ok := readAGYPageAnswer(parsed); ok {
+				parsed.Response = answer
+				return &core.ToolResult{Text: webSearchResultText(parsed)}, nil
+			}
+		}
+		slog.Info("read_link: AGY 未返回可用正文结果，尝试直接抓取")
+	}
+
+	// Offsets belong to the direct-fetch text and must stay on that path.
 	directCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	content, fetchErr := fetchDirectWebPage(directCtx, target)
 	cancel()
@@ -86,10 +106,6 @@ func (t *ReadLinkTool) Execute(ctx context.Context, raw json.RawMessage) (*core.
 		totalRunes := len(runes)
 		slog.Info("read_link: 原生直接抓取成功", "url", target, "runes", totalRunes, "offset", args.Offset)
 
-		start := args.Offset
-		if start < 0 {
-			start = 0
-		}
 		if start >= totalRunes && totalRunes > 0 {
 			return pageChunkResult(webPageChunk{URL: target, Offset: start, TotalRunes: totalRunes, Complete: true})
 		}
@@ -108,12 +124,37 @@ func (t *ReadLinkTool) Execute(ctx context.Context, raw json.RawMessage) (*core.
 		}
 		return pageChunkResult(chunk)
 	}
-	if fetchErr != nil {
-		slog.Warn("read_link: 原生直接抓取失败，回退到 AGY 沙箱抓取", "url", target, "err", fetchErr)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
+	if fetchErr != nil {
+		slog.Warn("read_link: 原生直接抓取失败", "err", fetchErr)
+	}
+	return &core.ToolResult{Text: "未能读取该网页正文。"}, nil
+}
 
-	// 2. 原生读取不适用或受阻时，回退到受控沙箱
-	return t.search.run(ctx, webRequest{URL: target, Task: task})
+func readAGYPageAnswer(result llm.AGYResult) (string, bool) {
+	if result.FailureDetail() != "" || core.OutputLimitReached(result.FinishedReason) {
+		return "", false
+	}
+	body := strings.TrimSpace(result.Response)
+	if fenced, ok := strings.CutPrefix(body, "```"); ok {
+		language, rest, hasLine := strings.Cut(fenced, "\n")
+		content, closed := strings.CutSuffix(strings.TrimSpace(rest), "```")
+		if !hasLine || !closed || (strings.TrimSpace(language) != "" && !strings.EqualFold(strings.TrimSpace(language), "json")) {
+			return "", false
+		}
+		body = content
+	}
+	var page struct {
+		Read   bool   `json:"read"`
+		Answer string `json:"answer"`
+	}
+	if json.Unmarshal([]byte(body), &page) != nil || !page.Read {
+		return "", false
+	}
+	answer := strings.TrimSpace(page.Answer)
+	return answer, answer != ""
 }
 
 func pageChunkResult(chunk webPageChunk) (*core.ToolResult, error) {

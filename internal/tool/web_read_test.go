@@ -24,7 +24,10 @@ func TestReadLinkPreservesURLAndTaskThroughCLIBoundary(t *testing.T) {
 	capture := filepath.Join(t.TempDir(), "prompt.txt")
 	t.Setenv("DAIDAI_TEST_WEB_PROMPT", capture)
 	command := filepath.Join(t.TempDir(), "fake-agy")
-	script := "#!/bin/sh\nprintf '%s' \"$2\" > \"$DAIDAI_TEST_WEB_PROMPT\"\nprintf '%s' '{\"status\":\"SUCCESS\",\"response\":\"网页已读取，回答完整。\"}'\n"
+	script := `#!/bin/sh
+printf '%s' "$2" > "$DAIDAI_TEST_WEB_PROMPT"
+printf '%s' '{"status":"SUCCESS","response":"{\"read\":true,\"answer\":\"网页已读取，回答完整。\"}"}'
+`
 	if err := os.WriteFile(command, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
