@@ -108,6 +108,9 @@ func (t *ModelSwitchTool) Execute(ctx context.Context, rawArgs json.RawMessage) 
 		return redactModelStatus(ctx, t.handleList(ctx, channel)), nil
 	case "switch":
 		ev := entity.SensoryEventFromContext(ctx)
+		if ev != nil {
+			ev.SkipFactExtraction = true
+		}
 		if ev == nil || t.immune == nil {
 			return &core.ToolResult{Text: "权限校验不可用，拒绝切换模型"}, nil
 		}

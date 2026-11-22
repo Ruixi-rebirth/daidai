@@ -90,11 +90,27 @@ func TestFactExtractionHistoryStopsBeforeMergedTurn(t *testing.T) {
 	}
 }
 
+func TestModelSettingTurnDoesNotBecomePersonalMemory(t *testing.T) {
+	ctx := context.Background()
+	store, engine, provider := newFactTestEngine(t, nil, `{"mutations":[{"action":"ADD","fact":"使用 Gemini，思考强度 low"}]}`)
+	event := factTestEvent(t, engine, "把 Gemini 模型思考强度调到 low")
+	event.SkipFactExtraction = true
+	engine.Commit(ctx, event, "已把思考强度调到 low")
+	engine.asyncWG.Wait()
+	if provider.calls.Load() != 0 {
+		t.Fatal("model settings turn entered automatic fact extraction")
+	}
+	history, err := store.RecentMessages(ctx, "qq", "private", event.ChannelID, 2)
+	if err != nil || len(history) != 2 || !history[1].IsBot {
+		t.Fatalf("the request and receipt should remain in chat history: %v %v", history, err)
+	}
+}
+
 func TestRepeatedFactAddsEvidenceWithoutDuplicatingFact(t *testing.T) {
 	store, engine, _ := newFactTestEngine(t, nil, `{"mutations":[{"action":"ADD","fact":"喜欢乌龙茶"}]}`)
 	for range 2 {
 		event := factTestEvent(t, engine, "我喜欢乌龙茶")
-		engine.consolidateUserFacts(context.Background(), event, "")
+		engine.consolidateUserFacts(context.Background(), event)
 	}
 	facts, err := store.ListVisibleFacts(context.Background(), "qq", "user", "private", false)
 	if err != nil || len(facts) != 1 {
@@ -112,7 +128,7 @@ func TestMergedTurnRetainsEveryOriginalSourceMessage(t *testing.T) {
 	last := factTestEvent(t, engine, "尤其是晚饭后")
 	last.Content = first.Content + "\n" + last.Content
 	last.HistoryRecordIDs = []int64{first.LastHistoryRecordID(), last.LastHistoryRecordID()}
-	engine.consolidateUserFacts(context.Background(), last, "")
+	engine.consolidateUserFacts(context.Background(), last)
 	facts, err := store.ListVisibleFacts(context.Background(), "qq", "user", "private", false)
 	if err != nil || len(facts) != 1 {
 		t.Fatalf("facts=%v error=%v", facts, err)
@@ -125,9 +141,9 @@ func TestMergedTurnRetainsEveryOriginalSourceMessage(t *testing.T) {
 
 func TestModelAddDoesNotOverwriteSimilarFact(t *testing.T) {
 	store, engine, provider := newFactTestEngine(t, &factTestEmbedder{}, `{"mutations":[{"action":"ADD","fact":"喜欢乌龙茶"}]}`)
-	engine.consolidateUserFacts(context.Background(), factTestEvent(t, engine, "我喜欢乌龙茶"), "")
+	engine.consolidateUserFacts(context.Background(), factTestEvent(t, engine, "我喜欢乌龙茶"))
 	provider.response = `{"mutations":[{"action":"ADD","fact":"常用 Neovim"}]}`
-	engine.consolidateUserFacts(context.Background(), factTestEvent(t, engine, "我还常用 Neovim"), "")
+	engine.consolidateUserFacts(context.Background(), factTestEvent(t, engine, "我还常用 Neovim"))
 	facts, err := store.ListVisibleFacts(context.Background(), "qq", "user", "private", false)
 	if err != nil || len(facts) != 2 {
 		t.Fatalf("explicit ADD overwrote an independent fact: facts=%v error=%v", facts, err)
@@ -142,7 +158,7 @@ func TestFactExtractionDoesNotWaitForEmbeddingBackfill(t *testing.T) {
 	event := factTestEvent(t, engine, "我还常用 Neovim")
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
-	engine.consolidateUserFacts(ctx, event, "")
+	engine.consolidateUserFacts(ctx, event)
 	facts, err := store.ListVisibleFacts(context.Background(), "qq", "user", "private", false)
 	if err != nil || len(facts) != 2 || provider.calls.Load() != 1 {
 		t.Fatalf("embedding prevented fact storage: facts=%v chat calls=%d error=%v", facts, provider.calls.Load(), err)
@@ -151,14 +167,14 @@ func TestFactExtractionDoesNotWaitForEmbeddingBackfill(t *testing.T) {
 
 func TestModelExplicitUpdatePreservesFactIDAndEvidence(t *testing.T) {
 	store, engine, provider := newFactTestEngine(t, nil, `{"mutations":[{"action":"ADD","fact":"喜欢咖啡"}]}`)
-	engine.consolidateUserFacts(context.Background(), factTestEvent(t, engine, "我喜欢咖啡"), "")
+	engine.consolidateUserFacts(context.Background(), factTestEvent(t, engine, "我喜欢咖啡"))
 	facts, err := store.ListVisibleFacts(context.Background(), "qq", "user", "private", false)
 	if err != nil || len(facts) != 1 {
 		t.Fatalf("facts=%v error=%v", facts, err)
 	}
 	id := facts[0].ID
 	provider.response = fmt.Sprintf(`{"mutations":[{"action":"UPDATE","fact_id":%d,"fact":"现在喜欢乌龙茶"}]}`, id)
-	engine.consolidateUserFacts(context.Background(), factTestEvent(t, engine, "我现在改喝乌龙茶了"), "")
+	engine.consolidateUserFacts(context.Background(), factTestEvent(t, engine, "我现在改喝乌龙茶了"))
 	facts, err = store.ListVisibleFacts(context.Background(), "qq", "user", "private", false)
 	if err != nil || len(facts) != 1 || facts[0].ID != id || facts[0].Content != "现在喜欢乌龙茶" {
 		t.Fatalf("explicit update failed: facts=%v error=%v", facts, err)

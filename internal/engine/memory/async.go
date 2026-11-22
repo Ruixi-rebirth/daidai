@@ -96,11 +96,7 @@ func (m *MemoryEngine) processPostCommitJob(job postCommitJob) {
 		return
 	}
 	if job.needExtract {
-		factContext := job.replyText
-		if job.event.GroupExpression != "" {
-			factContext = ""
-		}
-		m.consolidateUserFacts(m.asyncCtx, &job.event, factContext)
+		m.consolidateUserFacts(m.asyncCtx, &job.event)
 	}
 	if job.emb == nil || m.asyncCtx.Err() != nil {
 		return

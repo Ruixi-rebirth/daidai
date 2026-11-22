@@ -87,6 +87,9 @@ func TestModelSwitchTool_Flow(t *testing.T) {
 	if !strings.Contains(okRes.Text, "切换成功") || !strings.Contains(okRes.Text, "Claude Sonnet") {
 		t.Fatalf("switch output unexpected: %s", okRes.Text)
 	}
+	if !entity.SensoryEventFromContext(partnerCtx).SkipFactExtraction {
+		t.Fatal("a model change is a runtime setting, not an automatic memory source")
+	}
 
 	// 5. 再次查询当前，验证 effort 正确呈现
 	currRes2, _ := switchTool.Execute(context.Background(), json.RawMessage(`{}`))

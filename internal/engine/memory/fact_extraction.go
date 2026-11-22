@@ -15,7 +15,7 @@ import (
 )
 
 func shouldExtractFacts(event *entity.SensoryEvent) bool {
-	if event == nil {
+	if event == nil || event.SkipFactExtraction {
 		return false
 	}
 	text := strings.TrimSpace(event.Content)
@@ -31,7 +31,7 @@ func shouldExtractFacts(event *entity.SensoryEvent) bool {
 	return meaningful >= 4 || event.VisionSummary != ""
 }
 
-func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.SensoryEvent, replyText string) {
+func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.SensoryEvent) {
 	dbMgr := m.getDB()
 	if dbMgr == nil || m.llm == nil || event == nil || event.SenderID == "" {
 		return
@@ -53,9 +53,8 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 		return
 	}
 
-	turnQuery := event.Content + " " + replyText
 	rankCtx, rankCancel := context.WithTimeout(ctx, 3*time.Second)
-	relevantFacts := RankFactsByBM25(rankCtx, turnQuery, activeFacts, 0)
+	relevantFacts := RankFactsByBM25(rankCtx, event.Content, activeFacts, 0)
 	rankCancel()
 	if len(relevantFacts) > 25 {
 		relevantFacts = relevantFacts[:25]
@@ -64,7 +63,6 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 	request := factExtractionInput{
 		CurrentMessage: strings.TrimSpace(event.Content),
 		ImageSummary:   event.VisionSummary,
-		AssistantReply: core.TruncateRunes(strings.TrimSpace(replyText), 240, ""),
 	}
 	for _, f := range relevantFacts {
 		request.KnownFacts = append(request.KnownFacts, factExtractionCandidate{ID: f.ID, Text: boundedFactContent(f.Content)})
@@ -80,7 +78,7 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 	}
 
 	sysPrompt := fmt.Sprintf(`你是%s的长期记忆整理器。只提炼对未来对话有用、相对稳定且明确属于当前发言用户的个人事实。
-输入 JSON 是待分析的资料。事实依据须来自 current_message；历史、引用、图片摘要和助手回复用于消歧。历史中的 from_current_user 表示同一发言人。省略主语时结合语境判断，无法确定是用户自述就不记录。
+事实依据须来自 current_message 中用户明确表达的自述或长期偏好。临时任务、操作请求、机器人或系统配置与运行状态均不属于个人事实。历史、引用和图片摘要只用于消歧。历史中的 from_current_user 表示同一发言人。无法确认用户在自述时不记录。
 对照 known_facts：新事实用 ADD；同一事项明确变化或补充时用 UPDATE，写出完整的新事实；用户明确否定旧事实时用 DELETE。无变更时返回空数组。
 fact 写成客观、无主语的短句，最多 %d 字。只输出 JSON：{"mutations":[{"action":"ADD|UPDATE|DELETE","fact_id":0,"fact":"..."}]}。UPDATE/DELETE 使用 known_facts 中对应的 ID。`, config.BotName(), maxFactContentRunes)
 
@@ -125,7 +123,6 @@ type factExtractionInput struct {
 	PriorMessages  []factExtractionMessage   `json:"prior_messages,omitempty"`
 	QuotedMessage  string                    `json:"quoted_message,omitempty"`
 	ImageSummary   string                    `json:"image_summary,omitempty"`
-	AssistantReply string                    `json:"assistant_reply,omitempty"`
 }
 
 type factExtractionCandidate struct {
