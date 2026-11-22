@@ -81,6 +81,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_one_current ON channel_workspace
 
 CREATE TABLE IF NOT EXISTS session_resets (
     conv_id    TEXT PRIMARY KEY,
+    reset_at   INTEGER NOT NULL DEFAULT 0,
     reset_id   INTEGER NOT NULL CHECK (reset_id >= 0)
 );
 

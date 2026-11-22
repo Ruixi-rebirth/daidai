@@ -41,7 +41,7 @@ func (t *ReadLinkTool) Description() string {
 }
 func (t *ReadLinkTool) Parameters() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{
-		"url":  map[string]any{"type": "string", "description": "用户提供的完整 HTTP/HTTPS 网页链接"},
+		"url":  map[string]any{"type": "string", "description": "完整 HTTP/HTTPS 网页链接。当用户提供完整链接或仅提供 GitHub 用户名/仓库名等目标时，补全完整 URL（如 https://github.com/<target>）传入读取。"},
 		"task": map[string]any{"type": "string", "description": "可选；仅当该链接有独立于当前用户原话的处理要求时填写"},
 		"offset": map[string]any{
 			"type":        "integer",

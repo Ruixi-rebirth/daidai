@@ -146,10 +146,11 @@ func (m *Manager) resetSessionHistory(platform, chatType, convID string, clearDr
 		return err
 	}
 
+	resetAt := time.Now().UnixMilli()
 	if _, err := tx.Exec(
-		`INSERT INTO session_resets (conv_id, reset_id) VALUES (?, ?)
-		 ON CONFLICT(conv_id) DO UPDATE SET reset_id = excluded.reset_id`,
-		sessionResetKey(chatType, convID), resetID,
+		`INSERT INTO session_resets (conv_id, reset_at, reset_id) VALUES (?, ?, ?)
+		 ON CONFLICT(conv_id) DO UPDATE SET reset_at = excluded.reset_at, reset_id = excluded.reset_id`,
+		sessionResetKey(chatType, convID), resetAt, resetID,
 	); err != nil {
 		return err
 	}
