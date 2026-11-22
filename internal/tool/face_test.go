@@ -39,8 +39,8 @@ func TestFaceTool_HitCache(t *testing.T) {
 	if !bytes.Equal(res.ImageData, expectedBytes) {
 		t.Errorf("expected image data to match normalized bytes (got %d bytes, want %d bytes)", len(res.ImageData), len(expectedBytes))
 	}
-	if res.Text != "已发送呆呆的【开心】图片" {
-		t.Errorf("unexpected text: %s", res.Text)
+	if !res.ImageOnly || !res.FixedPresentation {
+		t.Errorf("expected prepared face image with ImageOnly and FixedPresentation")
 	}
 }
 

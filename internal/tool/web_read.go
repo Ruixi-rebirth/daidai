@@ -99,7 +99,11 @@ func (t *ReadLinkTool) Execute(ctx context.Context, raw json.RawMessage) (*core.
 	var result *core.ToolResult
 	var readErr error
 	if start == 0 && readCtx.Err() == nil {
-		result, readErr = readPageWithFallback(readCtx, 45*time.Second,
+		agyTimeout := 90 * time.Second
+		if remaining := time.Until(deadline.Add(-20 * time.Second)); remaining > 15*time.Second && remaining-15*time.Second < agyTimeout {
+			agyTimeout = remaining - 15*time.Second
+		}
+		result, readErr = readPageWithFallback(readCtx, agyTimeout,
 			func(ctx context.Context) (*core.ToolResult, error) {
 				parsed, err := t.search.run(ctx, webRequest{URL: target, Task: task})
 				if err != nil {
@@ -138,61 +142,37 @@ func pageResult(text, target, status string) *core.ToolResult {
 
 type pageReader func(context.Context) (*core.ToolResult, error)
 
-func readPageWithFallback(ctx context.Context, delay time.Duration, agy, direct pageReader) (*core.ToolResult, error) {
-	type outcome struct {
-		result *core.ToolResult
-		err    error
+func readPageWithFallback(ctx context.Context, agyTimeout time.Duration, agy, direct pageReader) (*core.ToolResult, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("网页处理需要有效的请求上下文")
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	run := func(read pageReader) <-chan outcome {
-		// A cancelled losing reader can still publish its result and exit.
-		out := make(chan outcome, 1)
-		go func() {
-			result, err := read(ctx)
-			out <- outcome{result: result, err: err}
-		}()
-		return out
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	agyResult, startFallback := run(agy), timer.C
-	var directResult <-chan outcome
-	var lastErr error
-	for agyResult != nil || directResult != nil || startFallback != nil {
-		select {
-		case <-ctx.Done():
-			if agyResult != nil && ctx.Err() == context.DeadlineExceeded {
-				slog.Info("read_link: AGY 正文读取到达本轮时间预算")
-			}
-			return nil, ctx.Err()
-		case <-startFallback:
-			startFallback = nil
-			slog.Info("read_link: AGY 仍在读取，启动 Go 兜底")
-			directResult = run(direct)
-		case final := <-agyResult:
-			agyResult = nil
-			if final.err == nil && final.result != nil {
-				return final.result, nil
-			}
-			lastErr = final.err
-			slog.Info("read_link: AGY 未返回可用结果", "err", final.err)
-			if startFallback != nil {
-				startFallback = nil
-				timer.Stop()
-				directResult = run(direct)
-			}
-		case final := <-directResult:
-			directResult = nil
-			if final.err == nil && final.result != nil {
-				slog.Info("read_link: Go 兜底读取到正文")
-				return final.result, nil
-			}
-			lastErr = final.err
-			slog.Info("read_link: Go 兜底没有可用正文", "err", final.err)
-		}
+
+	agyCtx, cancel := context.WithTimeout(ctx, agyTimeout)
+	result, err := agy(agyCtx)
+	cancel()
+
+	if err == nil && result != nil {
+		return result, nil
 	}
-	return nil, lastErr
+
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	slog.Info("read_link: AGY 未能返回可用结果，启动 Go 兜底", "err", err)
+	directResult, directErr := direct(ctx)
+	if directErr == nil && directResult != nil {
+		slog.Info("read_link: Go 兜底读取到正文")
+		return directResult, nil
+	}
+	slog.Info("read_link: Go 兜底没有可用正文", "err", directErr)
+	if directErr != nil {
+		return nil, directErr
+	}
+	return nil, err
 }
 
 func readDirectPage(ctx context.Context, target string, start int) (*core.ToolResult, error) {
