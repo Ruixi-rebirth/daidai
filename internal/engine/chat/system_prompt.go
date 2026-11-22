@@ -44,6 +44,7 @@ func (c *Cortex) buildSystemPrompt(event *entity.SensoryEvent, request chatReque
 		sysPrompt += "\n【图片】没有成功分析的图片不可当作已经看过，必要时请用户重发或描述。"
 	}
 	sysPrompt += "\n" + actionEvidencePolicy
+	sysPrompt += "\n【流程图】复杂流程或关系只有在图示能明显帮助理解时才使用 Mermaid 代码块；流程图以外仍正常回答。服务端会把 mermaid 代码块渲染成图片并嵌入回复。用户明确指定 HTML 等格式时，按用户要求输出。"
 	if !event.IsPartnerPrivate() {
 		sysPrompt += "\n【宿主机隐私】当前会话不得探测、查询或透露宿主机公网 IP。"
 	}

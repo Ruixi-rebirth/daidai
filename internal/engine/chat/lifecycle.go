@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"daidai/internal/core"
+	"daidai/internal/engine/render"
 	"daidai/internal/entity"
 	"daidai/internal/media"
 )
@@ -23,6 +24,14 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (out *en
 		}
 		if out == nil || thinkErr != nil {
 			return
+		}
+		if out.Text != "" && (event.Platform == "qq" || event.Platform == "telegram") {
+			rendered, assets, err := render.RenderMermaidBlocks(ctx, out.Text)
+			if err != nil {
+				slog.Warn("cortex: Mermaid 流程图未能渲染", "channel", event.ChannelID, "err", err)
+			}
+			out.Text = rendered
+			out.InlineAssets = append(out.InlineAssets, assets...)
 		}
 		var textOnly bool
 		needsPresentationDecision := out.HasMedia() || c.ShouldRenderCard(ctx, out.Text)

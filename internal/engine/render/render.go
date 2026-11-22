@@ -72,6 +72,17 @@ func RenderCard(ctx context.Context, md string) ([]byte, error) {
 	return renderMarkdownCard(ctx, md, standardCardStyle)
 }
 
+// RenderCardWithInlineAssets renders generated inline Markdown images together
+// with the surrounding text. Only references explicitly supplied by the caller
+// are resolved to local files.
+func RenderCardWithInlineAssets(ctx context.Context, md string, inlineAssets []core.InlineAsset) ([]byte, error) {
+	paths, data, err := inlineAssetFiles(inlineAssets)
+	if err != nil {
+		return nil, err
+	}
+	return renderMarkdownCardWithAssets(ctx, md, standardCardStyle, paths, data)
+}
+
 // RenderMemoryProfileCard uses a warmer palette and wider spacing for a
 // personal impression and memory list.
 func RenderMemoryProfileCard(ctx context.Context, md string) ([]byte, error) {
@@ -79,6 +90,10 @@ func RenderMemoryProfileCard(ctx context.Context, md string) ([]byte, error) {
 }
 
 func renderMarkdownCard(ctx context.Context, md string, style cardStyle) ([]byte, error) {
+	return renderMarkdownCardWithAssets(ctx, md, style, nil, nil)
+}
+
+func renderMarkdownCardWithAssets(ctx context.Context, md string, style cardStyle, imagePaths map[string]string, assets map[string][]byte) ([]byte, error) {
 	trimmed := strings.TrimSpace(md)
 	if trimmed == "" {
 		return nil, fmt.Errorf("empty markdown text")
@@ -87,7 +102,7 @@ func renderMarkdownCard(ctx context.Context, md string, style cardStyle) ([]byte
 		return nil, fmt.Errorf("markdown input exceeds %d byte limit", maxRenderInputBytes)
 	}
 
-	typstBody := MarkdownToTypst([]byte(trimmed))
+	typstBody := markdownToTypst([]byte(trimmed), imagePaths)
 
 	doc := fmt.Sprintf(`#set page(
   width: 680pt,
@@ -141,7 +156,21 @@ func renderMarkdownCard(ctx context.Context, md string, style cardStyle) ([]byte
 %s
 ]
 `, style.textColor, style.paragraphLeading, style.headingBelow, style.headingAbove, style.headingColor, style.codeRadius, style.inlineCodeFill, style.cardFill, style.cardRadius, style.cardStroke, typstBody)
-	return renderTypst(ctx, doc, style.canvasColor)
+	return renderTypstAssets(ctx, doc, assets, style.canvasColor)
+}
+
+func inlineAssetFiles(assets []core.InlineAsset) (map[string]string, map[string][]byte, error) {
+	paths := make(map[string]string, len(assets))
+	data := make(map[string][]byte, len(assets))
+	for index, asset := range assets {
+		if asset.Reference == "" || len(asset.Data) == 0 || len(asset.Data) > core.MaxImageBytes {
+			return nil, nil, fmt.Errorf("invalid inline image asset %d", index+1)
+		}
+		name := fmt.Sprintf("inline-%d.png", index+1)
+		paths[asset.Reference] = name
+		data[name] = asset.Data
+	}
+	return paths, data, nil
 }
 
 // HasMathFormulas checks whether markdown text contains real LaTeX math expressions
@@ -188,10 +217,6 @@ func ShouldRenderCard(md string) bool {
 		return true
 	}
 	return runeCount >= 80 || (runeCount >= 60 && nonEmptyLines >= 3)
-}
-
-func renderTypst(ctx context.Context, doc string, canvasColor string) ([]byte, error) {
-	return renderTypstAssets(ctx, doc, nil, canvasColor)
 }
 
 func renderTypstAssets(ctx context.Context, doc string, assets map[string][]byte, canvasColor string) ([]byte, error) {

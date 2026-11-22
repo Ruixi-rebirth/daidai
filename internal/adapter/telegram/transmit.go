@@ -34,6 +34,9 @@ func (c *Channel) Transmit(ctx context.Context, u *entity.Utterance) error {
 		images = [][]byte{u.CardData}
 		sources = []string{u.FallbackText}
 	}
+	if len(u.InlineAssets) > 0 && len(images) == 0 {
+		return c.transmitInlineAssets(ctx, u, reply)
+	}
 	for len(sources) < len(images) {
 		sources = append(sources, "")
 	}

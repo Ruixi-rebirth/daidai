@@ -64,6 +64,7 @@
               wrapProgram $out/bin/daidai \
                 --prefix PATH : ${pkgs.lib.makeBinPath [
                   pkgs.typst
+                  pkgs.mermaid-cli
                   pkgs.ffmpeg
                   pkgs.chromium
                   pkgs.iproute2

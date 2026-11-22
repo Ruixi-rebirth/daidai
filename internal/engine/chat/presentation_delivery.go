@@ -9,6 +9,15 @@ import (
 // Only text cards with complete source documents can be delivered as text.
 // Never replace an actual photograph or generated image with a guessed caption.
 func useCardSourceText(out *entity.Utterance) {
+	for _, asset := range out.InlineAssets {
+		plain := asset.SemanticText
+		if plain == "" {
+			plain = asset.Fallback
+		}
+		out.Text = strings.Replace(out.Text, asset.Placeholder, plain, 1)
+	}
+	out.InlineAssets = nil
+	out.QuoteText = ""
 	media := out.WithoutEmptyImages()
 	var sources []string
 	var remaining [][]byte

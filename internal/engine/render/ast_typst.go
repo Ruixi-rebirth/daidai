@@ -65,6 +65,10 @@ func listIndentDepth(n ast.Node) int {
 
 // MarkdownToTypst 基于 Goldmark AST 语法树遍历将 Markdown 编译为原生 Typst AST 节点与字符串字面量
 func MarkdownToTypst(source []byte) string {
+	return markdownToTypst(source, nil)
+}
+
+func markdownToTypst(source []byte, imagePaths map[string]string) string {
 	protected, mathList := extractAndProtectMath(source)
 	doc := mdEngine.Parser().Parse(text.NewReader(protected))
 	var buf bytes.Buffer
@@ -244,6 +248,10 @@ func MarkdownToTypst(source []byte) string {
 
 		case *ast.Image:
 			if entering {
+				if path := imagePaths[string(node.Destination)]; path != "" {
+					fmt.Fprintf(&buf, "#image(%s, width: 100%%)\n\n", typstQuote(path))
+					return ast.WalkSkipChildren, nil
+				}
 				var altBuf bytes.Buffer
 				for c := node.FirstChild(); c != nil; c = c.NextSibling() {
 					if t, ok := c.(*ast.Text); ok {

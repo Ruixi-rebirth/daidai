@@ -21,6 +21,18 @@ type ToolResult struct {
 	OnDeliveryFailed  func(context.Context, error)
 }
 
+// InlineAsset is a tool-rendered image that the model can place inside its
+// Markdown answer. Placeholder is the exact Markdown image node returned to
+// the model; Reference identifies the local asset without exposing a URL.
+type InlineAsset struct {
+	Placeholder  string
+	Reference    string
+	Alt          string
+	Fallback     string
+	SemanticText string
+	Data         []byte
+}
+
 // Tool 统一的原子功能工具接口
 type Tool interface {
 	Name() string

@@ -61,6 +61,9 @@ func (a *SuperAgent) transmitUtteranceWithContinuationContext(ctx, continuationC
 	utterance = utterance.WithoutEmptyImages()
 	var partialErr *PartialDeliveryError
 	if err := a.Channels.Transmit(ctx, utterance); err == nil {
+		if utterance.QuoteText != "" {
+			return utterance.QuoteText, nil
+		}
 		if utterance.HasMedia() && len(utterance.ImageSources) > 0 {
 			sources := append(append([]string(nil), utterance.ImageSources...), utterance.Text)
 			if text, _ := ImageDeliveryText(sources, len(sources)); text != "" {

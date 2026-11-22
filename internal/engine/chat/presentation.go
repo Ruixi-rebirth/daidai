@@ -39,6 +39,16 @@ func (c *Cortex) RenderCard(ctx context.Context, event *entity.SensoryEvent, con
 
 // RenderCardPages turns long replies into a small, ordered set of readable cards.
 func (c *Cortex) RenderCardPages(ctx context.Context, event *entity.SensoryEvent, content string, maxPages int) ([][]byte, error) {
+	return c.renderCardPages(ctx, event, content, maxPages, nil)
+}
+
+// RenderCardPagesWithInlineAssets keeps generated diagrams at their Markdown
+// position while converting a long reply into paginated cards.
+func (c *Cortex) RenderCardPagesWithInlineAssets(ctx context.Context, event *entity.SensoryEvent, content string, maxPages int, assets []core.InlineAsset) ([][]byte, error) {
+	return c.renderCardPages(ctx, event, content, maxPages, assets)
+}
+
+func (c *Cortex) renderCardPages(ctx context.Context, event *entity.SensoryEvent, content string, maxPages int, assets []core.InlineAsset) ([][]byte, error) {
 	if maxPages < 1 {
 		return nil, fmt.Errorf("image page limit must be positive")
 	}
@@ -57,7 +67,13 @@ func (c *Cortex) RenderCardPages(ctx context.Context, event *entity.SensoryEvent
 		if len(chunks) > 1 {
 			pageContent = fmt.Sprintf("### [%d / %d]\n\n%s", index+1, len(chunks), chunk)
 		}
-		image, err := c.RenderCard(ctx, event, pageContent)
+		var image []byte
+		var err error
+		if len(assets) > 0 {
+			image, err = render.RenderCardWithInlineAssets(ctx, pageContent, assets)
+		} else {
+			image, err = c.RenderCard(ctx, event, pageContent)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("render reply page %d of %d: %w", index+1, len(chunks), err)
 		}

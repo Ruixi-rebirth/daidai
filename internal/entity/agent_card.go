@@ -19,6 +19,10 @@ type automaticCardRenderer interface {
 	RenderCardPages(context.Context, *SensoryEvent, string, int) ([][]byte, error)
 }
 
+type inlineAssetCardRenderer interface {
+	RenderCardPagesWithInlineAssets(context.Context, *SensoryEvent, string, int, []core.InlineAsset) ([][]byte, error)
+}
+
 func (a *SuperAgent) renderAutomaticReplyCard(ctx context.Context, event *SensoryEvent, utterance *Utterance) {
 	if event == nil || utterance == nil ||
 		(event.Platform != "qq" && event.Platform != "telegram") || event.GroupInterjection ||
@@ -53,7 +57,19 @@ func (a *SuperAgent) renderAutomaticReplyCard(ctx context.Context, event *Sensor
 		maxPages = 1
 	}
 	cardCtx, cancel := context.WithTimeout(ctx, automaticCardTimeout)
-	pages, renderErr := renderer.RenderCardPages(cardCtx, event, replyContent, maxPages)
+	var pages [][]byte
+	var renderErr error
+	if len(utterance.InlineAssets) > 0 {
+		assetRenderer, ok := renderer.(inlineAssetCardRenderer)
+		if !ok {
+			cancel()
+			slog.Warn("superagent: 长回复含内嵌图片，但卡片渲染器不支持内嵌资源", "platform", event.Platform, "channel", event.ChannelID)
+			return
+		}
+		pages, renderErr = assetRenderer.RenderCardPagesWithInlineAssets(cardCtx, event, replyContent, maxPages, utterance.InlineAssets)
+	} else {
+		pages, renderErr = renderer.RenderCardPages(cardCtx, event, replyContent, maxPages)
+	}
 	cancel()
 	if renderErr != nil || len(pages) == 0 {
 		slog.Warn("superagent: 长回复卡片渲染失败，回退为文字", "platform", event.Platform, "channel", event.ChannelID, "err", renderErr)
@@ -64,16 +80,27 @@ func (a *SuperAgent) renderAutomaticReplyCard(ctx context.Context, event *Sensor
 	for len(utterance.ImageSources) < len(images) {
 		utterance.ImageSources = append(utterance.ImageSources, "")
 	}
+	historyContent := replyContent
+	fallbackContent := replyContent
+	for _, asset := range utterance.InlineAssets {
+		fallback := asset.Fallback
+		if fallback == "" {
+			fallback = "[流程图]"
+		}
+		historyContent = strings.Replace(historyContent, asset.Placeholder, fallback+"\n"+asset.SemanticText, 1)
+		fallbackContent = strings.Replace(fallbackContent, asset.Placeholder, fallback, 1)
+	}
 	for range pages {
-		utterance.ImageSources = append(utterance.ImageSources, replyContent)
+		utterance.ImageSources = append(utterance.ImageSources, historyContent)
 	}
 	images = append(images, pages...)
 	utterance.FallbackText = strings.TrimSpace(strings.Join(nonEmptyStrings([]string{
-		strings.TrimSpace(utterance.FallbackText), replyContent,
+		strings.TrimSpace(utterance.FallbackText), fallbackContent,
 	}), "\n\n"))
 	utterance.Text = ""
 	utterance.CardData = nil
 	utterance.Images = images
 	utterance.InlineImages = true
+	utterance.InlineAssets = nil
 	slog.Info("superagent: 长回复已分页渲染为图文消息", "platform", event.Platform, "channel", event.ChannelID, "pages", len(pages), "images", len(images), "textBytes", len(replyContent))
 }
