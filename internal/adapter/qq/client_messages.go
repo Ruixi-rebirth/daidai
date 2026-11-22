@@ -112,15 +112,13 @@ func (c *Client) sendMediaMessage(ctx context.Context, targetType, targetID, con
 	url := fmt.Sprintf("%s/v2/%s/%s/messages", apiBaseURL, targetType, targetID)
 	payload := map[string]any{
 		"msg_type": 7,
-		// QQ v2 在富媒体消息中仍要求 content 字段，即使消息没有文字。
-		"content": content,
 		"media": map[string]string{
 			"file_info": fileInfo,
 		},
 		"msg_seq": c.nextSeq(),
 	}
-	if content == "" {
-		payload["content"] = " "
+	if strings.TrimSpace(content) != "" {
+		payload["content"] = content
 	}
 	if msgID != "" {
 		payload["msg_id"] = msgID

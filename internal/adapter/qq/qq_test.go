@@ -23,6 +23,33 @@ type qqTestTransport func(*http.Request) (*http.Response, error)
 
 func (f qqTestTransport) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
+func TestQQNativeImageOmitsBlankCaption(t *testing.T) {
+	for _, caption := range []string{"", " ", "图片说明"} {
+		client := NewClient("test", "test")
+		var sent bool
+		client.httpClient.Transport = qqTestTransport(func(req *http.Request) (*http.Response, error) {
+			body := `{"file_info":"uploaded-image"}`
+			if strings.HasSuffix(req.URL.Path, "/messages") {
+				var payload map[string]json.RawMessage
+				if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+					t.Fatal(err)
+				}
+				got, exists := payload["content"]
+				want, _ := json.Marshal(caption)
+				if exists != (strings.TrimSpace(caption) != "") || (exists && !bytes.Equal(got, want)) {
+					t.Fatalf("caption %q produced content %s (present: %v)", caption, got, exists)
+				}
+				sent = true
+				body = `{"id":"sent-image"}`
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+		})
+		if err := client.sendMediaMessage(context.Background(), "users", "recipient", caption, []byte("image"), "question", QuoteMetadata{}); err != nil || !sent {
+			t.Fatalf("native image message not sent: %v", err)
+		}
+	}
+}
+
 func TestQQGroupMemoryImageSharesMessageWithMention(t *testing.T) {
 	var pngData bytes.Buffer
 	if err := png.Encode(&pngData, image.NewRGBA(image.Rect(0, 0, 2, 2))); err != nil {
