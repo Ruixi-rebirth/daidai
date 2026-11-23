@@ -6,6 +6,7 @@ import (
 	"strings"
 	"unicode"
 
+	mathml "github.com/filippo-agent/goldmark-mathml"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
@@ -18,6 +19,7 @@ var mdEngine = goldmark.New(
 		extension.Table,
 		extension.Strikethrough,
 		extension.TaskList,
+		mathml.New(),
 	),
 )
 
@@ -69,8 +71,7 @@ func MarkdownToTypst(source []byte) string {
 }
 
 func markdownToTypst(source []byte, imagePaths map[string]string) string {
-	protected, mathList := extractAndProtectMath(source)
-	doc := mdEngine.Parser().Parse(text.NewReader(protected))
+	doc := mdEngine.Parser().Parse(text.NewReader(source))
 	var buf bytes.Buffer
 
 	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
@@ -172,13 +173,13 @@ func markdownToTypst(source []byte, imagePaths map[string]string) string {
 			if entering {
 				info := ""
 				if node.Info != nil {
-					info = strings.TrimSpace(string(node.Info.Value(protected)))
+					info = strings.TrimSpace(string(node.Info.Value(source)))
 				}
 				var codeBuf bytes.Buffer
 				lines := node.Lines()
 				for i := 0; i < lines.Len(); i++ {
 					line := lines.At(i)
-					codeBuf.Write(line.Value(protected))
+					codeBuf.Write(line.Value(source))
 				}
 				codeText := strings.TrimRight(codeBuf.String(), "\r\n")
 				if info != "" {
@@ -195,7 +196,7 @@ func markdownToTypst(source []byte, imagePaths map[string]string) string {
 				lines := node.Lines()
 				for i := 0; i < lines.Len(); i++ {
 					line := lines.At(i)
-					codeBuf.Write(line.Value(protected))
+					codeBuf.Write(line.Value(source))
 				}
 				codeText := strings.TrimRight(codeBuf.String(), "\r\n")
 				fmt.Fprintf(&buf, "#raw(block: true, %s)\n\n", typstQuote(codeText))
@@ -207,7 +208,7 @@ func markdownToTypst(source []byte, imagePaths map[string]string) string {
 				var spanBuf bytes.Buffer
 				for c := node.FirstChild(); c != nil; c = c.NextSibling() {
 					if t, ok := c.(*ast.Text); ok {
-						spanBuf.Write(t.Segment.Value(protected))
+						spanBuf.Write(t.Segment.Value(source))
 					}
 				}
 				fmt.Fprintf(&buf, "#raw(block: false, %s)", typstQuote(spanBuf.String()))
@@ -255,7 +256,7 @@ func markdownToTypst(source []byte, imagePaths map[string]string) string {
 				var altBuf bytes.Buffer
 				for c := node.FirstChild(); c != nil; c = c.NextSibling() {
 					if t, ok := c.(*ast.Text); ok {
-						altBuf.Write(t.Segment.Value(protected))
+						altBuf.Write(t.Segment.Value(source))
 					}
 				}
 				alt := strings.TrimSpace(altBuf.String())
@@ -276,16 +277,16 @@ func markdownToTypst(source []byte, imagePaths map[string]string) string {
 
 		case *ast.AutoLink:
 			if entering {
-				url := string(node.URL(protected))
-				label := string(node.Label(protected))
+				url := string(node.URL(source))
+				label := string(node.Label(source))
 				fmt.Fprintf(&buf, "#link(%s)[#%s]", typstQuote(url), typstQuote(label))
 			}
 
 		case *ast.Text:
 			if entering {
-				val := string(node.Segment.Value(protected))
+				val := string(node.Segment.Value(source))
 				if val != "" {
-					renderTextOrMath(val, mathList, &buf)
+					buf.WriteString("#" + typstQuote(val))
 				}
 				if node.HardLineBreak() {
 					buf.WriteString(" \\\n")
@@ -298,9 +299,25 @@ func markdownToTypst(source []byte, imagePaths map[string]string) string {
 			if entering {
 				val := string(node.Value)
 				if val != "" {
-					renderTextOrMath(val, mathList, &buf)
+					buf.WriteString("#" + typstQuote(val))
 				}
 			}
+
+		case *mathml.Inline:
+			if entering {
+				if node.Display {
+					fmt.Fprintf(&buf, "#mitex(%s)\n", typstQuote(string(node.Equation)))
+				} else {
+					fmt.Fprintf(&buf, "#mi(%s)", typstQuote(string(node.Equation)))
+				}
+			}
+			return ast.WalkSkipChildren, nil
+
+		case *mathml.Block:
+			if entering {
+				fmt.Fprintf(&buf, "#mitex(%s)\n\n", typstQuote(string(node.Equation)))
+			}
+			return ast.WalkSkipChildren, nil
 		}
 
 		return ast.WalkContinue, nil

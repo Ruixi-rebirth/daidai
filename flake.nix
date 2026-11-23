@@ -16,6 +16,7 @@
               twemoji-color-font
             ];
           };
+          mitexPath = "${pkgs.typstPackages.mitex}/lib/typst-packages/mitex/${pkgs.typstPackages.mitex.version}";
         in {
           devShells.default = pkgs.mkShell {
             name = "daidai-dev-shell";
@@ -46,6 +47,7 @@
               export CGO_ENABLED=0
               export FONTCONFIG_FILE="${fontConfig}"
               export TYPST_FONT_PATHS="${pkgs.twemoji-color-font}/share/fonts/truetype:${pkgs.maple-mono.CN}/share/fonts/truetype:${pkgs.source-han-sans}/share/fonts/truetype"
+              export DAIDAI_MITEX_PATH="${mitexPath}"
               echo "✨ Daidai Development Environment Loaded ✨"
               echo "Go version: $(go version)"
               echo "Typst version: $(typst --version)"
@@ -79,6 +81,7 @@
                   pkgs.sqlite
                 ]} \
                 --set-default FONTCONFIG_FILE ${fontConfig} \
+                --set-default DAIDAI_MITEX_PATH ${mitexPath} \
                 --set-default TYPST_FONT_PATHS "${pkgs.twemoji-color-font}/share/fonts/truetype:${pkgs.maple-mono.CN}/share/fonts/truetype:${pkgs.source-han-sans}/share/fonts/truetype"
             '';
           };

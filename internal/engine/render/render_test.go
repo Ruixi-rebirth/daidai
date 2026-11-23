@@ -66,7 +66,7 @@ func TestMarkdownToTypst_TableInlineFormatting(t *testing.T) {
 	if !strings.Contains(res, `#raw(block: false, "通用表示")`) {
 		t.Fatalf("expected inline code compiled to #raw, got:\n%s", res)
 	}
-	if !strings.Contains(res, `$E = m  c ^2$`) {
+	if !strings.Contains(res, `#mi("E=mc^2")`) {
 		t.Fatalf("expected math compiled to Typst math, got:\n%s", res)
 	}
 	if !strings.Contains(res, `#link("https://example.com")[#"指令"]`) {

@@ -7,41 +7,24 @@ import (
 	"time"
 )
 
-func TestLaTeXToTypstMath(t *testing.T) {
-	tests := []struct {
-		name     string
-		latex    string
-		contains []string
+func TestMathSyntax(t *testing.T) {
+	cases := []struct {
+		name, markdown, want string
+		math                 bool
 	}{
-		{
-			name:     "quadratic formula",
-			latex:    `x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}`,
-			contains: []string{"frac(", "plus.minus", "sqrt(", "b ^2"},
-		},
-		{
-			name:     "summation and greek",
-			latex:    `\sum_{i=1}^n x_i = \alpha + \beta`,
-			contains: []string{"sum _(i =1)", "^n", "alpha", "beta"},
-		},
-		{
-			name:     "matrix",
-			latex:    `\begin{pmatrix} 1 & 2 \\ 3 & 4 \end{pmatrix}`,
-			contains: []string{`mat(delim: "(",`, "1", "2", "3", "4)"},
-		},
-		{
-			name:     "text in math",
-			latex:    `f(x) = \text{const}`,
-			contains: []string{`"const"`},
-		},
+		{"numeric-leading formula", `$2x - x = 0$`, `#mi("2x - x = 0")`, true},
+		{"ordinary formula", `$x = 2x$`, `#mi("x = 2x")`, true},
+		{"currency", `价格 $100 和 $200`, `$100 和 `, false},
+		{"code span", "`$x$`", `#raw(block: false, "$x$")`, false},
+		{"code fence", "```text\n$x$\n```", `#raw(block: true, lang: "text", "$x$")`, false},
+		{"display formula", "$$\n\\sum_{i=1}^n i\n$$", `#mitex("\\sum_{i=1}^n i\n")`, true},
+		{"math fence", "```math\nx^2 + y^2\n```", `#mitex("x^2 + y^2")`, true},
 	}
-
-	for _, tc := range tests {
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := LaTeXToTypstMath(tc.latex)
-			for _, exp := range tc.contains {
-				if !strings.Contains(got, exp) {
-					t.Errorf("LaTeXToTypstMath(%q) = %q, missing %q", tc.latex, got, exp)
-				}
+			got := MarkdownToTypst([]byte(tc.markdown))
+			if !strings.Contains(got, tc.want) || HasMathFormulas(tc.markdown) != tc.math {
+				t.Fatalf("rendered %q as %q, want %q and math=%v", tc.markdown, got, tc.want, tc.math)
 			}
 		})
 	}
@@ -83,29 +66,9 @@ $$f(x) = f(x_0) + f'(x_0)(x - x_0) + \frac{f''(x_0)}{2!}(x - x_0)^2 + \cdots + \
 	typst := MarkdownToTypst(content)
 	t.Logf("Generated Typst:\n%s\n", typst)
 
-	expectedSnippets := []string{
-		`$ f ( x ) =  f ( x _0)`,
-		`$P ( x _0) =  f ( x _0)$`,
-		`frac(f ''( x _0), 2!)`,
-		`$e ^x = 1 +  x  + frac(x ^2, 2!)`,
-		`$sin   x  =  x  - frac(x ^3, 3!)`,
-		`$cos   x  = 1 - frac(x ^2, 2!)`,
-		`$ln (1+ x ) =  x  - frac(x ^2, 2)`,
-	}
-	for _, exp := range expectedSnippets {
-		if !strings.Contains(typst, exp) {
-			t.Errorf("MarkdownToTypst output missing expected math snippet: %q", exp)
-		}
-	}
-
-	forbiddenSnippets := []string{
-		`\\frac`,
-		`\\cdots`,
-		`x_"#"0`,
-	}
-	for _, forb := range forbiddenSnippets {
-		if strings.Contains(typst, forb) {
-			t.Errorf("MarkdownToTypst output contains unparsed raw LaTeX/broken syntax: %q", forb)
+	for _, want := range []string{`#mi("\\sin(x)")`, `#mi("x_0")`, `#mitex("f(x) = f(x_0)`} {
+		if !strings.Contains(typst, want) {
+			t.Errorf("missing math snippet %q in %s", want, typst)
 		}
 	}
 

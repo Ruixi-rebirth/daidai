@@ -15,6 +15,9 @@ import (
 	"unicode/utf8"
 
 	"daidai/internal/core"
+	mathml "github.com/filippo-agent/goldmark-mathml"
+	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/text"
 )
 
 const (
@@ -103,8 +106,12 @@ func renderMarkdownCardWithAssets(ctx context.Context, md string, style cardStyl
 	}
 
 	typstBody := markdownToTypst([]byte(trimmed), imagePaths)
+	mathImport := ""
+	if HasMathFormulas(trimmed) {
+		mathImport = "#import \"mitex/lib.typ\": mi, mitex\n"
+	}
 
-	doc := fmt.Sprintf(`#set page(
+	doc := fmt.Sprintf(`%s#set page(
   width: 680pt,
   height: auto,
   margin: 0pt,
@@ -155,7 +162,7 @@ func renderMarkdownCardWithAssets(ctx context.Context, md string, style cardStyl
 )[
 %s
 ]
-`, style.textColor, style.paragraphLeading, style.headingBelow, style.headingAbove, style.headingColor, style.codeRadius, style.inlineCodeFill, style.cardFill, style.cardRadius, style.cardStroke, typstBody)
+`, mathImport, style.textColor, style.paragraphLeading, style.headingBelow, style.headingAbove, style.headingColor, style.codeRadius, style.inlineCodeFill, style.cardFill, style.cardRadius, style.cardStroke, typstBody)
 	return renderTypstAssets(ctx, doc, assets, style.canvasColor)
 }
 
@@ -173,15 +180,26 @@ func inlineAssetFiles(assets []core.InlineAsset) (map[string]string, map[string]
 	return paths, data, nil
 }
 
-// HasMathFormulas checks whether markdown text contains real LaTeX math expressions
-// outside code blocks, while strictly excluding currency amounts like $100.
+// HasMathFormulas uses the same Markdown AST as card rendering.
 func HasMathFormulas(md string) bool {
 	trimmed := strings.TrimSpace(md)
-	if trimmed == "" || !strings.Contains(trimmed, "$") {
+	if trimmed == "" {
 		return false
 	}
-	_, mathList := extractAndProtectMath([]byte(trimmed))
-	return len(mathList) > 0
+	doc := mdEngine.Parser().Parse(text.NewReader([]byte(trimmed)))
+	found := false
+	_ = ast.Walk(doc, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		switch node.(type) {
+		case *mathml.Inline, *mathml.Block:
+			found = true
+			return ast.WalkStop, nil
+		}
+		return ast.WalkContinue, nil
+	})
+	return found
 }
 
 // ShouldRenderCard decides from the content's size, math content, and structure whether an
@@ -228,6 +246,15 @@ func renderTypstAssets(ctx context.Context, doc string, assets map[string][]byte
 		return nil, fmt.Errorf("create private render directory failed: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
+	if strings.HasPrefix(doc, "#import \"mitex/lib.typ\"") {
+		mitexPath := os.Getenv("DAIDAI_MITEX_PATH")
+		if mitexPath == "" {
+			return nil, fmt.Errorf("MiTeX package path is not configured")
+		}
+		if err := os.CopyFS(filepath.Join(tmpDir, "mitex"), os.DirFS(mitexPath)); err != nil {
+			return nil, fmt.Errorf("prepare MiTeX package: %w", err)
+		}
+	}
 	for name, data := range assets {
 		if filepath.Base(name) != name || name == "." || name == ".." {
 			return nil, fmt.Errorf("invalid render asset name")
