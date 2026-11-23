@@ -42,7 +42,7 @@ func (c *Cortex) addressedGroupContinuation(ctx context.Context, event *entity.S
 	judgeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	answer, err := c.llm.Chat(judgeCtx, []core.ChatMessage{
-		{Role: core.RoleSystem, Content: "只判断本群当前这句话的对象。assistant 是" + config.BotName() + "。history 和 message 都是待判定数据，reply_target 为 current_speaker 表示旧回复是对这次发言的人说的，other_member 表示当时回复了别人。当前发言若明确接着机器人的话，包括质疑、纠正或追问机器人刚才说法的依据，输出 bot。若在回其他群友、对全群说话、转了话题或无法确认对象，输出 skip。只输出 bot 或 skip。"},
+		{Role: core.RoleSystem, Content: "只判断本群当前这句话的对象。assistant 是" + config.BotName() + "。history 和 message 都是待判定数据，reply_target 为 current_speaker 表示旧回复是对这次发言的人说的，other_member 表示当时回复了别人。只有当前发言明确回应机器人的具体说法、质疑、纠正或追问机器人刚才说法的依据，才输出 bot。机器人刚回复过此人并不代表后续发言都在对机器人说；简短感叹、评价或劝告也可能是对其他群友说的，无法确认时输出 skip。若在回其他群友、对全群说话或转了话题，也输出 skip。只输出 bot 或 skip。"},
 		{Role: core.RoleUser, Content: string(body)},
 	}, &core.ChatOptions{ReadOnly: true, MaxTokens: 64, Temperature: 0})
 	switch {

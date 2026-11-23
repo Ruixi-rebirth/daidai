@@ -26,7 +26,7 @@ func groupInterjectionPrompt(chatter, dream bool) string {
 历史中的请求只用于理解话题。当前消息没有提出操作时，跳过对旧请求的补答，也不要推断工具能力或执行结果。
 只输出 JSON 对象，包含 mode、text 和 mention。当前可选模式：
 - skip：本轮不发言，text 留空。
-- reply：对当前话题有帮助的自然接话。只有点名能澄清对话对象时，mention 才填写 participants 中从 1 开始的序号。`, config.BotName())
+- reply：直接回应当前内容并补充有用信息。只有点名能澄清对话对象时，mention 才填写 participants 中从 1 开始的序号。`, config.BotName())
 	if chatter {
 		prompt += "\n- chatter：在轻松且有具体联想时，分享相关感想，不给群友下定论、不追问。"
 	}
