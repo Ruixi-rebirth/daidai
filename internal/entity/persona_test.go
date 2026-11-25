@@ -28,6 +28,9 @@ func TestCompilePromptScopesGroupAndPartnerRules(t *testing.T) {
 	if strings.Contains(privatePrompt, "补一句可以换行") || !strings.Contains(privatePrompt, "写在同一行里") || !strings.Contains(privatePrompt, "不加生硬的句号") {
 		t.Fatal("casual chat expression rule should instruct single-line IM phrasing without trailing formal periods")
 	}
+	if strings.Contains(privatePrompt, "不必每句硬接梗") || !strings.Contains(privatePrompt, "敏锐网感") {
+		t.Fatal("persona should preserve internet meme literacy rather than dampening playful banter")
+	}
 
 	voice := persona.CompileGroupVoicePrompt()
 	for _, rule := range persona.Rules {

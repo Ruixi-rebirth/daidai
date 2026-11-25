@@ -30,8 +30,8 @@ func resolveCircadianProfile(hour int) circadianProfile {
 	case hour >= 0 && hour < 7:
 		return circadianProfile{
 			phase:  "深夜",
-			energy: "很低",
-			tempo:  "轻声困倦、更短慢半拍、句尾自然收住",
+			energy: "安静夜猫子",
+			tempo:  "语气轻软安静、话短一点但脑子清醒机灵、句尾自然收住",
 		}
 	case hour >= 7 && hour < 12:
 		return circadianProfile{
