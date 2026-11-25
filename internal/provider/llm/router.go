@@ -471,7 +471,7 @@ func (r *MindRouter) FormatStatusFor(partnerPrivate bool) string {
 
 		if pub.Model != "" {
 			pubName := resolveDisplayModelName(models, pub.Channel, pub.Model)
-			sb.WriteString("\n### 群聊与公用模型（bwrap 沙箱）\n")
+			sb.WriteString("\n### 公用模型（bwrap 沙箱）\n")
 			fmt.Fprintf(&sb, "🤖 模型：%s\n", pubName)
 			if pubName != pub.Model {
 				fmt.Fprintf(&sb, "模型 ID：`%s`\n", pub.Model)
@@ -487,7 +487,7 @@ func (r *MindRouter) FormatStatusFor(partnerPrivate bool) string {
 		}
 	} else {
 		pubName := resolveDisplayModelName(models, pub.Channel, pub.Model)
-		sb.WriteString("### 当前会话模型（公用轨）\n")
+		sb.WriteString("### 公用模型（bwrap 沙箱）\n")
 		fmt.Fprintf(&sb, "🤖 模型：%s\n", pubName)
 		if pubName != pub.Model {
 			fmt.Fprintf(&sb, "模型 ID：`%s`\n", pub.Model)

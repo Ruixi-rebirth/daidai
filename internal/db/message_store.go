@@ -151,6 +151,27 @@ func (m *Manager) MessageContentByPlatformID(ctx context.Context, platform, chat
 	return content, err
 }
 
+// DeleteMessagesByIDs removes pre-logged inbound rows when a turn resolves as a pure ephemeral control action.
+func (m *Manager) DeleteMessagesByIDs(ctx context.Context, platform string, ids []int64) error {
+	if m == nil || len(ids) == 0 {
+		return nil
+	}
+	conn, err := m.GetConn(platform)
+	if err != nil {
+		return err
+	}
+	p := NormPlatform(platform)
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, err := conn.ExecContext(ctx, `DELETE FROM messages WHERE platform = ? AND id = ? AND is_bot = 0`, p, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // StoredMessage 持久化的会话历史消息记录
 type StoredMessage struct {
 	ID             int64

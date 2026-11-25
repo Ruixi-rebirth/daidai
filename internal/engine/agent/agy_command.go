@@ -12,7 +12,7 @@ import (
 func buildAGYCommandArgs(ticket *entity.Ticket, model, effort, conversationID string) ([]string, error) {
 	args := []string{
 		"-p", buildAGYExecutionGoal(ticket),
-		"--output-format", "json",
+		"--output-format", "stream-json",
 		"--mode", "accept-edits",
 		"--sandbox",
 		"--dangerously-skip-permissions",

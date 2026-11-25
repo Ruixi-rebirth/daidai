@@ -205,6 +205,8 @@ func (t *MemoryTool) profile(ctx context.Context, event *entity.SensoryEvent, re
 	result := &core.ToolResult{Text: content, FallbackText: content, ImageOnly: true}
 	if event.IsGroup {
 		result.HistoryText = "[已向群成员展示个人记忆卡；卡片内容不作为其他成员的记忆依据]"
+	} else {
+		result.HistoryText = "[已展示当前会话的个人记忆卡]"
 	}
 	renderCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()

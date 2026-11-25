@@ -68,7 +68,7 @@ func (t *ModelSwitchTool) Parameters() map[string]any {
 			"scope": map[string]any{
 				"type":        "string",
 				"enum":        []string{"partner", "public", "both"},
-				"description": "切换作用轨道：'partner' 仅切换搭档私聊主轨模型，'public' 仅切换群聊与非搭档公用模型轨（思考强度上限 medium），'both' 双轨同步切换。留空时按当前会话自动决定（私聊默认 'partner'，群聊默认 'public'）",
+				"description": "切换作用轨道：'partner' 仅切换搭档私聊模型，'public' 仅切换公用模型（思考强度上限 medium），'both' 双轨同步切换。留空时按当前会话自动决定（私聊默认 'partner'，群聊默认 'public'）",
 			},
 		},
 	}
@@ -251,7 +251,7 @@ func (t *ModelSwitchTool) handleList(ctx context.Context, channelFilter string) 
 				if pub.Effort != "" {
 					effortDesc = fmt.Sprintf(", 思考强度: %s", pub.Effort)
 				}
-				activeTag = fmt.Sprintf(" *(群聊/公用首选%s)*", effortDesc)
+				activeTag = fmt.Sprintf(" *(公用模型%s)*", effortDesc)
 			case m.ID == configuredModel:
 				activeTag = " *(" + modelUsage + ")*"
 			}
@@ -272,7 +272,7 @@ func (t *ModelSwitchTool) handleList(ctx context.Context, channelFilter string) 
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString("想切换模型，直接说“切换到 <模型名称>”（私聊默认切搭档私聊轨，群聊默认切公用轨）；也可明确说“把公用模型切换到 <模型名称>”或“全局切换到 <模型名称>”。")
+	sb.WriteString("想切换模型，直接说“切换到 <模型名称>”（私聊默认切搭档私聊模型，群聊默认切公用模型）；也可明确说“把公用模型切换到 <模型名称>”或“全局切换到 <模型名称>”。")
 
 	return &core.ToolResult{
 		Text: strings.TrimSpace(sb.String()),

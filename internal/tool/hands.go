@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"daidai/internal/briefing"
@@ -43,6 +44,7 @@ type HandsConfig struct {
 	BriefingOwners   map[string]string
 	GroupExpressions *groupchat.Store
 	Vision           *vision.Engine
+	Embedder         core.EmbeddingProvider
 }
 
 // NewHandsWithConfig 按配置挂载原子双手
@@ -64,7 +66,9 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 		h.Register(NewBriefingTool(cfg.Briefing, cfg.BriefingOwners, true))
 	}
 	h.Register(NewSysInfoTool())
-	h.Register(NewMemoryTool(cfg.Database, cfg.Router))
+	memTool := NewMemoryTool(cfg.Database, cfg.Router)
+	memTool.SetEmbedder(cfg.Embedder)
+	h.Register(memTool)
 	if cfg.Database != nil && cfg.Immune != nil {
 		h.Register(NewAccessTool(cfg.Database, cfg.Immune))
 	}
@@ -180,6 +184,36 @@ func (h *HandsRegistry) Execute(ctx context.Context, name string, rawArgs json.R
 	if !ok {
 		return nil, fmt.Errorf("hands: tool %q not found", name)
 	}
+	if !systemAccess && event != nil {
+		markOperationalToolTurn(event, name, rawArgs)
+	}
 
 	return t.Execute(ctx, rawArgs)
+}
+
+func markOperationalToolTurn(event *entity.SensoryEvent, name string, rawArgs json.RawMessage) {
+	switch name {
+	case "switch_workspace", "get_system_status", "singbox_links",
+		"manage_group_expressions", "manage_group_image_quota", "manage_geek_briefing":
+		event.SkipFactExtraction = true
+		event.SkipVectorIndex = true
+		event.EphemeralControlTurn = true
+	case "switch_model":
+		event.SkipFactExtraction = true
+		event.SkipVectorIndex = true
+		var probe struct {
+			Action string `json:"action"`
+			Model  string `json:"model"`
+			Effort string `json:"effort"`
+		}
+		_ = json.Unmarshal(rawArgs, &probe)
+		act := strings.ToLower(strings.TrimSpace(probe.Action))
+		if act == "switch" || act == "current" || act == "usage" ||
+			(act == "" && (strings.TrimSpace(probe.Model) != "" || strings.TrimSpace(probe.Effort) != "")) {
+			event.EphemeralControlTurn = true
+		}
+	case "manage_access", "oci_ip", "oci_bill", "delegate_ticket", "manage_memory", "summarize_chat", "get_geek_briefing":
+		event.SkipFactExtraction = true
+		event.SkipVectorIndex = true
+	}
 }

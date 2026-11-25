@@ -31,6 +31,17 @@ func historyUserText(event *entity.SensoryEvent) string {
 	return core.AppendTextWithinRuneLimit(userText, strings.Join(notes, "\n"), core.MaxUserMessageRunes, "\n[原消息过长，已截短以保留附件信息]")
 }
 
+func isNonConversationalCommandEvent(event *entity.SensoryEvent) bool {
+	if event == nil {
+		return false
+	}
+	if event.EphemeralControlTurn {
+		return true
+	}
+	content := strings.TrimSpace(event.Content)
+	return strings.HasPrefix(content, "/") || content == "继续" || entity.IsSensitiveAuthCommand(content)
+}
+
 func shouldRecordHistoryEvent(event *entity.SensoryEvent) bool {
 	if event == nil {
 		return false
@@ -41,7 +52,7 @@ func shouldRecordHistoryEvent(event *entity.SensoryEvent) bool {
 	if event.IsGroup && event.GroupMessageObserved && content == "" {
 		return false
 	}
-	if strings.HasPrefix(content, "/") || content == "继续" || entity.IsSensitiveAuthCommand(content) {
+	if isNonConversationalCommandEvent(event) {
 		return false
 	}
 	return historyUserText(event) != ""
@@ -72,6 +83,16 @@ func (m *MemoryEngine) RecordInbound(ctx context.Context, event *entity.SensoryE
 func (m *MemoryEngine) Commit(ctx context.Context, event *entity.SensoryEvent, replyText string) {
 	dbMgr := m.getDB()
 	if dbMgr == nil || event == nil || event.Platform == "" {
+		return
+	}
+	// 斜杠命令、未知斜杠文本及纯瞬态控制操作不进入对话数据库，并清理预写入的原始控制消息行。
+	if isNonConversationalCommandEvent(event) {
+		if len(event.HistoryRecordIDs) > 0 {
+			if err := dbMgr.DeleteMessagesByIDs(ctx, event.Platform, event.HistoryRecordIDs); err != nil {
+				slog.Warn("memory: 清理瞬态控制消息记录失败", "platform", event.Platform, "err", err)
+			}
+			event.HistoryRecordIDs = nil
+		}
 		return
 	}
 

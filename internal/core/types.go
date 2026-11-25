@@ -164,7 +164,9 @@ type SensoryEvent struct {
 	GroupInterjection     bool          // 当前未 @ 群消息通过低频判断，可尝试生成一条短回复
 	GroupContinuation     bool          // 免 @ 续聊候选，须先确认当前发言对象
 	GroupExpression       string        // 已核验的群内表达类型：chatter/dream；仅用于交付后的记忆处理
-	SkipFactExtraction    bool          // 本轮操作不参与自动提炼个人事实
+	SkipFactExtraction    bool          // 本轮操作不参与自动提炼个人事实与熟悉度计数
+	SkipVectorIndex       bool          // 本轮消息不生成稠密语义检索向量（避免运维/管理工具输出污染语义回溯）
+	EphemeralControlTurn  bool          // 纯控制/状态开关轮次，完成后清理预写入入站记录且不落盘至对话历史表
 	GroupParticipants     []GroupParticipant
 	MentionedUsers        []GroupParticipant // 本条消息明确 @ 的群成员；供需要精确目标身份的功能校验
 	OnProgress            func(string)       // 认知耗时操作（如签发重型工单）时的即时进度回执回调

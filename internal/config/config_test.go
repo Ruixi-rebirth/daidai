@@ -20,7 +20,7 @@ func TestDefaultAndFileConfigShareStartupDefaults(t *testing.T) {
 		}
 		for _, cfg := range []*Config{defaults, loaded} {
 			timeout, err := time.ParseDuration(cfg.Agent.ExecutionTimeout)
-			if err != nil || timeout != 30*time.Minute {
+			if err != nil || timeout != time.Hour {
 				t.Fatalf("startup requires a valid execution timeout, got %q (%v)", cfg.Agent.ExecutionTimeout, err)
 			}
 			if cfg.Server.Port != 8080 || cfg.Agent.MaxConcurrent != 1 || cfg.QQ.Enabled || cfg.Telegram.Enabled {

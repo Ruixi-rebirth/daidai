@@ -195,3 +195,84 @@ func TestWorkingContextStopsBeforeCurrentTurnEvenWithQueuedMessages(t *testing.T
 		t.Fatal("history cutoff bypassed reset boundary")
 	}
 }
+
+func TestRecallProfileActivatesSemanticRerankAbovePromptLimit(t *testing.T) {
+	mgr := db.NewManager(t.TempDir())
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	ctx := context.Background()
+	engine := NewMemoryEngine(nil)
+	engine.SetDBManager(mgr)
+	emb := &mockEmbedder{}
+	engine.SetEmbedder(emb)
+	defer SetDefaultEmbedder(nil)
+
+	idModel := embeddingIdentity(emb)
+	otherVec, _ := emb.Embed(ctx, "普通爱好")
+	targetVec, _ := emb.Embed(ctx, "Cilium eBPF")
+
+	// Insert 15 unrelated facts + 1 target semantic fact (#4 in insertion order, outside oldest-3 baseline if pushed down, or #14 so newest bias doesn't save it if 15..16 come after).
+	var mutations []db.FactMutation
+	for i := 1; i <= 15; i++ {
+		if i == 8 {
+			mutations = append(mutations, db.FactMutation{
+				Action: "ADD", Fact: "线上网络使用 Cilium 与 eBPF", ScopeType: "global",
+				Embedding: targetVec, EmbeddingModel: idModel,
+			})
+		}
+		mutations = append(mutations, db.FactMutation{
+			Action: "ADD", Fact: fmt.Sprintf("日常记录条目编号 %d", i), ScopeType: "global",
+			Embedding: otherVec, EmbeddingModel: idModel,
+		})
+	}
+	if err := mgr.ApplyFactMutations(ctx, "qq", "owner", mutations); err != nil {
+		t.Fatal(err)
+	}
+
+	ev := &entity.SensoryEvent{Platform: "qq", SenderID: "owner", Content: "容器网络方案怎么选"}
+	recalled, err := engine.RecallProfileForEvent(ctx, ev, ev.Content, maxPromptFacts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, f := range recalled {
+		if strings.Contains(f.Content, "Cilium") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected semantic vector reranking to recall Cilium fact within %d prompt limit when user has 16 facts (< 40), got: %+v", maxPromptFacts, recalled)
+	}
+}
+
+func TestCommitSkipsSlashCommandsAndCleansEphemeralControlTurns(t *testing.T) {
+	mgr := db.NewManager(t.TempDir())
+	t.Cleanup(func() { _ = mgr.Close() })
+	ctx := context.Background()
+	engine := NewMemoryEngine(nil)
+	engine.SetDBManager(mgr)
+
+	// 1. Unknown slash command reply must not leave an orphan bot row in messages.
+	slashEv := &entity.SensoryEvent{Platform: "qq", ChannelID: "chat-1", SenderID: "owner", Content: "/unknown_cmd"}
+	if err := engine.RecordInbound(ctx, slashEv); err != nil {
+		t.Fatal(err)
+	}
+	engine.Commit(ctx, slashEv, "未知指令回复")
+
+	// 2. Natural-language ephemeral control turn (e.g. switch_model / switch_workspace) cleans up pre-logged inbound row and skips bot reply.
+	ctrlEv := &entity.SensoryEvent{Platform: "qq", ChannelID: "chat-1", SenderID: "owner", RawMessageID: "m-ctrl", Content: "把公用模型调到 low"}
+	if err := engine.RecordInbound(ctx, ctrlEv); err != nil {
+		t.Fatal(err)
+	}
+	if len(ctrlEv.HistoryRecordIDs) != 1 {
+		t.Fatalf("expected pre-logged inbound row before Think, got %v", ctrlEv.HistoryRecordIDs)
+	}
+	ctrlEv.EphemeralControlTurn = true
+	engine.Commit(ctx, ctrlEv, "调好了，公用模型已经是 low")
+
+	recents, err := mgr.RecentMessages(ctx, "qq", "private", "chat-1", 10)
+	if err != nil || len(recents) != 0 {
+		t.Fatalf("expected zero polluted command/control messages in DB, got %+v (err=%v)", recents, err)
+	}
+}

@@ -14,3 +14,23 @@ func TestParseAGYResultIgnoresProgressAfterAnswer(t *testing.T) {
 		t.Fatal("progress-only output was accepted as an answer")
 	}
 }
+
+func TestParseAGYResultStreamJSONExtractsFinalStepAndInitConvID(t *testing.T) {
+	stream := `{"event":"init","conversation_id":"conv-stream-1","init":{"model":"gemini-3.8-flash"}}
+{"event":"step_update","step_update":{"conversation_id":"conv-stream-1","step_index":1,"state":"DONE","step_type":"agent_response","text_delta":"正在进入 Nix 开发环境跑测试…\n"}}
+{"event":"step_update","step_update":{"conversation_id":"conv-stream-1","step_index":2,"state":"DONE","step_type":"tool","tool_name":"run_command"}}
+{"event":"step_update","step_update":{"conversation_id":"conv-stream-1","step_index":3,"state":"ACTIVE","step_type":"agent_response","text_delta":"### 最终结论\n"}}
+{"event":"step_update","step_update":{"conversation_id":"conv-stream-1","step_index":3,"state":"DONE","step_type":"agent_response","text_delta":"全部 21 个包测试已通过。"}}
+{"event":"result","result":{"conversation_id":"conv-stream-1","status":"SUCCESS","response":"正在进入 Nix 开发环境跑测试…\n### 最终结论\n全部 21 个包测试已通过。"}}`
+
+	got, err := ParseAGYResult([]byte(stream))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.ConversationID != "conv-stream-1" || got.Status != "SUCCESS" {
+		t.Fatalf("unexpected stream result metadata: %+v", got)
+	}
+	if got.FinalStepResponse != "### 最终结论\n全部 21 个包测试已通过。" {
+		t.Fatalf("expected clean final step without intermediate monologue, got %q", got.FinalStepResponse)
+	}
+}

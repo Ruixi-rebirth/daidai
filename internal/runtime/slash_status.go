@@ -23,7 +23,13 @@ func (a *SuperAgent) handleStatusCommand(ctx context.Context, event *entity.Sens
 		sections = append(sections, a.Channels.FormatStatus())
 	}
 	if a.Cognition != nil {
-		if mindStatus := strings.TrimSpace(a.Cognition.MindStatus()); mindStatus != "" {
+		mindStatus := ""
+		if scoped, ok := a.Cognition.(interface{ MindStatusFor(*entity.SensoryEvent) string }); ok && event.IsGroup {
+			mindStatus = strings.TrimSpace(scoped.MindStatusFor(event))
+		} else {
+			mindStatus = strings.TrimSpace(a.Cognition.MindStatus())
+		}
+		if mindStatus != "" {
 			sections = append(sections, mindStatus)
 		}
 	}
@@ -52,7 +58,12 @@ func (a *SuperAgent) handleModelCommand(ctx context.Context, event *entity.Senso
 	if !a.checkModelCommandPermission(ctx, event) {
 		return
 	}
-	status := strings.TrimSpace(a.Cognition.MindStatus())
+	status := ""
+	if scoped, ok := a.Cognition.(interface{ MindStatusFor(*entity.SensoryEvent) string }); ok && event.IsGroup {
+		status = strings.TrimSpace(scoped.MindStatusFor(event))
+	} else {
+		status = strings.TrimSpace(a.Cognition.MindStatus())
+	}
 	if status == "" {
 		status = "当前没有可用的激活模型状态。"
 	}
@@ -225,20 +236,20 @@ func (a *SuperAgent) handleStopCommand(ctx context.Context, event *entity.Sensor
 	a.replyText(ctx, event, msg)
 }
 
-func (a *SuperAgent) handleResetCommand(ctx context.Context, event *entity.SensoryEvent, content string) {
+func (a *SuperAgent) handleResetCommand(ctx context.Context, event *entity.SensoryEvent, _ string) {
 	if err := a.delegationPermissionError(event.Role); err != nil {
 		a.replyText(ctx, event, err.Error())
 		return
 	}
-	if event.IsGroup && strings.HasPrefix(strings.TrimSpace(content), "/ws") {
-		a.replyText(ctx, event, fmt.Sprintf("工作空间仅用于私聊工程协作，请在与%s的私聊中查看或切换。", config.BotName()))
+	if event.IsGroup {
+		a.replyText(ctx, event, fmt.Sprintf("群聊采用自动滚动上下文，不支持在群内重置（避免误清今日群聊总结记录）；如需重开工程会话，请在与%s的私聊中使用 `/reset`。", config.BotName()))
 		return
 	}
 	a.cancelThinkingSession(event)
 	unlock := a.lockSession(event)
 	defer unlock()
 	currWs, wsName := "", ""
-	if !event.IsGroup && a.Workspaces != nil {
+	if a.Workspaces != nil {
 		var err error
 		currWs, wsName, err = a.Workspaces.GetCurrent(event.Platform, event.ChannelID)
 		if err != nil {
@@ -246,24 +257,16 @@ func (a *SuperAgent) handleResetCommand(ctx context.Context, event *entity.Senso
 			return
 		}
 	}
-	if !event.IsGroup && a.Delegates != nil {
+	if a.Delegates != nil {
 		_ = a.Delegates.AbortByChannel(event.Platform, event.ChannelID)
-	}
-	chatType := "private"
-	if event.IsGroup {
-		chatType = "group"
 	}
 	if a.database == nil {
 		a.replyText(ctx, event, "【会话重开失败】\n近期对话历史存储未配置。")
 		return
 	}
-	if err := a.database.ResetConversation(event.Platform, chatType, event.ChannelID); err != nil {
+	if err := a.database.ResetConversation(event.Platform, "private", event.ChannelID); err != nil {
 		slog.Error("superagent: 重开会话时清理近期历史失败", "platform", event.Platform, "channelID", event.ChannelID, "err", err)
-		if event.IsGroup {
-			a.replyText(ctx, event, "【会话重开失败】\n本群近期对话历史未能清理，请稍后重试。")
-		} else {
-			a.replyText(ctx, event, "【会话重开失败】\n近期对话历史未能清理，AGY 会话记录未清空；已中断的任务不会自动恢复。请稍后重试。")
-		}
+		a.replyText(ctx, event, "【会话重开失败】\n近期对话历史未能清理，AGY 会话记录未清空；已中断的任务不会自动恢复。请稍后重试。")
 		return
 	}
 	a.clearSessionReplyContinuations(event)
@@ -275,10 +278,6 @@ func (a *SuperAgent) handleResetCommand(ctx context.Context, event *entity.Senso
 			a.replyText(ctx, event, "近期对话已重置，但早报指代上下文未能清除，请稍后重试。 ")
 			return
 		}
-	}
-	if event.IsGroup {
-		a.replyText(ctx, event, "【当前群聊会话已完成重开】\n已清空本群近期对话记忆，长期画像完好保留。")
-		return
 	}
 	if a.Delegates != nil {
 		if err := a.Delegates.ResetSession(event.Platform, event.ChannelID, currWs); err != nil {

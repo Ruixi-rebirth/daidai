@@ -1,10 +1,12 @@
 package chat
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
+	"daidai/internal/core"
 	"daidai/internal/entity"
 )
 
@@ -38,6 +40,18 @@ func (c *Cortex) buildSystemPrompt(event *entity.SensoryEvent, request chatReque
 			fmt.Fprintf(&runtimeContext, "【当前工作空间】：%s (默认工作区)\n", wsPath)
 		} else {
 			fmt.Fprintf(&runtimeContext, "【当前工作空间】：%s (工程: %s)\n", wsPath, wsName)
+		}
+	}
+	if c.delegates != nil && event.IsPartnerPrivate() && event.SenderID != "" && event.ChannelID != "" {
+		tCtx, tCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		recentTickets, _ := c.delegates.TicketsFor(tCtx, event.Platform, event.SenderID, event.ChannelID, 2)
+		tCancel()
+		if len(recentTickets) > 0 {
+			var tLines []string
+			for _, tk := range recentTickets {
+				tLines = append(tLines, fmt.Sprintf("- %s [%s]: %s", tk.ID, tk.Status, core.TruncateRunes(strings.TrimSpace(tk.Goal), 80, "…")))
+			}
+			fmt.Fprintf(&runtimeContext, "【近期后台工单】（如需查看完整进度或报错输出可调用 delegate_ticket 的 status 动作）：\n%s\n", strings.Join(tLines, "\n"))
 		}
 	}
 	sysPrompt := ""

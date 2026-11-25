@@ -36,21 +36,27 @@ func (a *SuperAgent) notifyTicketCompletion(ctx context.Context, ticket *entity.
 	if execErr != nil && ticket.Status != entity.TicketAborted && ticket.Status != entity.TicketStopping {
 		state = "⚠️ 这件事没能完整处理完"
 	}
-	result := strings.TrimSpace(ticket.Output)
+	result := strings.TrimSpace(ticket.Summary)
+	if result == "" || ticket.Status != entity.TicketCompleted {
+		result = strings.TrimSpace(ticket.Output)
+	}
 	if result == "" {
 		result = strings.TrimSpace(output)
 	}
 	var message strings.Builder
-	fmt.Fprintf(&message, "%s：%s\n编号：%s\n", state, core.TruncateRunes(strings.TrimSpace(ticket.Goal), 180, "…"), ticket.ID)
+	fmt.Fprintf(&message, "%s：%s\n编号：`%s`\n", state, core.TruncateRunes(strings.TrimSpace(ticket.Goal), 180, "…"), ticket.ID)
+	if ticket.Model != "" {
+		fmt.Fprintf(&message, "模型：`%s`\n", ticket.Model)
+	}
 	if result != "" {
-		fmt.Fprintf(&message, "\n%s\n", ticketResultPreview(result, 700))
+		fmt.Fprintf(&message, "\n%s\n", ticketResultPreview(result, 1200))
 	}
 	if ticket.Status != entity.TicketCompleted {
 		message.WriteString("\n目前保留的阶段结果可用 `/task ")
 		message.WriteString(ticket.ID)
 		message.WriteString("` 查看；不会自动重跑。需要继续时，告诉我从哪个阶段接着做。")
 	} else {
-		message.WriteString("\n完整输出可用 `/task ")
+		message.WriteString("\n完整执行日志可用 `/task ")
 		message.WriteString(ticket.ID)
 		message.WriteString("` 查看。")
 	}
@@ -68,6 +74,19 @@ func (a *SuperAgent) notifyTicketCompletion(ctx context.Context, ticket *entity.
 	if ticket.IsGroup && ticket.RequesterID != "" {
 		utterance.MentionUserIDs = []string{ticket.RequesterID}
 	}
+	role := entity.RoleGuest
+	if ticket.AllowSensitive {
+		role = entity.RolePartner
+	}
+	cardCtx, cancelCard := context.WithTimeout(ctx, 20*time.Second)
+	a.renderAutomaticReplyCard(cardCtx, &entity.SensoryEvent{
+		Platform:  ticket.Platform,
+		IsGroup:   ticket.IsGroup,
+		ChannelID: ticket.ChannelID,
+		SenderID:  ticket.RequesterID,
+		Role:      role,
+	}, utterance)
+	cancelCard()
 	notificationKey := "agent-ticket:" + ticket.ID
 	queued := false
 	if a.database != nil && ticket.RequesterID != "" && ticket.Platform != "" {

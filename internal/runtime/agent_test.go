@@ -654,9 +654,32 @@ func TestGroupSlashCommandsDecoupleWorkspacesAndTickets(t *testing.T) {
 		t.Fatalf("group /status leaked workspace or ticket details: %s", statusReply)
 	}
 
-	// Partner /reset in group resets group conversation memory without leaking workspace paths.
+	// Partner /reset in group is also restricted to private chat so daily group summaries stay intact.
 	resetReply := partnerGroup("/reset")
-	if !strings.Contains(resetReply, "当前群聊会话已完成重开") || strings.Contains(resetReply, "secret-project") || strings.Contains(resetReply, base) {
-		t.Fatalf("group /reset leaked workspace or used wrong message: %s", resetReply)
+	if !strings.Contains(resetReply, "私聊") || strings.Contains(resetReply, "secret-project") || strings.Contains(resetReply, base) {
+		t.Fatalf("group /reset should direct partner to private chat without leaking workspace: %s", resetReply)
+	}
+
+	// Partner private /task with no args automatically displays the latest ticket and resolved worker.
+	if err := delegates.AttachTicketStore(ctx, store, "qq"); err != nil {
+		t.Fatal(err)
+	}
+	tk := delegates.CreateTicketForPlatform("qq", "owner", "owner-dm", "修复卡片公式渲染", "", project, "", true)
+	if tk == nil || !strings.HasPrefix(tk.ID, "tkt-") || len(tk.ID) > 12 {
+		t.Fatalf("expected concise short ticket ID, got %+v", tk)
+	}
+	if _, err := delegates.ExecuteTicket(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+	channel.sentUtter = nil
+	agent.Process(ctx, &entity.SensoryEvent{
+		Platform:  "qq",
+		ChannelID: "owner-dm",
+		SenderID:  "owner",
+		Role:      entity.RolePartner,
+		Content:   "/task",
+	})
+	if channel.sentUtter == nil || !strings.Contains(channel.sentUtter.Text, tk.ID) || !strings.Contains(channel.sentUtter.Text, "执行通道**：`agy`") {
+		t.Fatalf("expected /task without args to show latest ticket and resolved worker, got: %+v", channel.sentUtter)
 	}
 }

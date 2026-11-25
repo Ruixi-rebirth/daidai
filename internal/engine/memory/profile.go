@@ -29,7 +29,7 @@ func (m *MemoryEngine) RecallProfile(ctx context.Context, platform, userID, quer
 	if err != nil || len(activeFacts) == 0 {
 		return nil, err
 	}
-	return rankProfileFacts(ctx, query, activeFacts, maxFacts), nil
+	return rankProfileFacts(ctx, m.getEmbedder(), query, activeFacts, maxFacts), nil
 }
 
 // RecallProfileForEvent only injects facts visible from the current conversation scope.
@@ -45,15 +45,15 @@ func (m *MemoryEngine) RecallProfileForEvent(ctx context.Context, event *entity.
 	if err != nil || len(facts) == 0 {
 		return nil, err
 	}
-	return rankProfileFacts(ctx, query, facts, maxFacts), nil
+	return rankProfileFacts(ctx, m.getEmbedder(), query, facts, maxFacts), nil
 }
 
-func rankProfileFacts(ctx context.Context, query string, activeFacts []*core.Fact, maxFacts int) []*core.Fact {
+func rankProfileFacts(ctx context.Context, emb core.EmbeddingProvider, query string, activeFacts []*core.Fact, maxFacts int) []*core.Fact {
 	if maxFacts <= 0 {
 		maxFacts = defaultMaxFacts
 	}
 
-	ranked := RankFactsByBM25(ctx, query, activeFacts, 0)
+	ranked := RankFactsWithEmbedder(ctx, emb, query, activeFacts, 0, maxFacts)
 	if len(ranked) <= maxFacts {
 		return ranked
 	}

@@ -222,6 +222,25 @@ func (m *MemoryEngine) RecallEpisodic(ctx context.Context, event *entity.Sensory
 
 const emotionContinuityTTL = 6 * time.Hour
 
+func effectiveInteractionCount(ctx context.Context, dbMgr *db.Manager, event *entity.SensoryEvent, rel *db.UserRelation) int {
+	interactions := 0
+	if rel != nil {
+		interactions = rel.InteractionCount
+	}
+	// Preserve natural familiarity for members who already have chat history
+	// before user_relations began accumulating turns.
+	if dbMgr != nil && event != nil && interactions < 30 && strings.TrimSpace(event.ChannelID) != "" {
+		chatType := "private"
+		if event.IsGroup {
+			chatType = "group"
+		}
+		if recentMsgs, msgErr := dbMgr.RecentUserMessagesInChat(ctx, event.Platform, chatType, event.ChannelID, event.SenderID, 35); msgErr == nil && len(recentMsgs) > interactions {
+			interactions = len(recentMsgs)
+		}
+	}
+	return interactions
+}
+
 func (m *MemoryEngine) recallRelationContext(ctx context.Context, event *entity.SensoryEvent, anchorTime time.Time) string {
 	dbMgr := m.getDB()
 	if dbMgr == nil {
@@ -231,21 +250,7 @@ func (m *MemoryEngine) recallRelationContext(ctx context.Context, event *entity.
 	if err != nil {
 		return ""
 	}
-	interactions := 0
-	if rel != nil {
-		interactions = rel.InteractionCount
-	}
-	// Preserve natural familiarity for members who already have chat history
-	// before user_relations began accumulating turns.
-	if interactions < 30 && strings.TrimSpace(event.ChannelID) != "" {
-		chatType := "private"
-		if event.IsGroup {
-			chatType = "group"
-		}
-		if recentMsgs, msgErr := dbMgr.RecentUserMessagesInChat(ctx, event.Platform, chatType, event.ChannelID, event.SenderID, 35); msgErr == nil && len(recentMsgs) > interactions {
-			interactions = len(recentMsgs)
-		}
-	}
+	interactions := effectiveInteractionCount(ctx, dbMgr, event, rel)
 
 	var notes []string
 	switch {

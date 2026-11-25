@@ -51,7 +51,7 @@ func (t *MemoryTool) listOrSearch(ctx context.Context, event *entity.SensoryEven
 	}
 	searchTotalPages, searchTotalMatches, searchPage := 0, 0, 1
 	if action == "SEARCH" && q != "" {
-		facts = memory.RankFactsByBM25(ctx, q, facts, 0.25)
+		facts = memory.RankFactsWithEmbedder(ctx, t.embedder, q, facts, 0.25, 0)
 		searchTotalMatches = len(facts)
 		searchTotalPages = (len(facts) + memoryFactsPerPage - 1) / memoryFactsPerPage
 		pageKey := memorySearchPageKey(event, q)
@@ -109,7 +109,7 @@ func (t *MemoryTool) listOrSearch(ctx context.Context, event *entity.SensoryEven
 			if event.IsGroup {
 				chatType = "group"
 			}
-			msgs, mErr := memory.SearchMessagesInChatByBM25(ctx, t.db, event.Platform, chatType, event.ChannelID, q, 10)
+			msgs, mErr := memory.SearchMessagesInChatWithEmbedder(ctx, t.db, t.embedder, event.Platform, chatType, event.ChannelID, q, 10)
 			if mErr != nil {
 				sections = append(sections, fmt.Sprintf("【历史对话搜索失败】%v", mErr))
 			} else if len(msgs) > 0 {

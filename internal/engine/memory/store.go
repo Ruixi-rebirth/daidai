@@ -75,6 +75,14 @@ func (m *MemoryEngine) getEmbedder() core.EmbeddingProvider {
 	return GetDefaultEmbedder()
 }
 
+// Embedder returns the bound embedding provider for explicit dependency injection.
+func (m *MemoryEngine) Embedder() core.EmbeddingProvider {
+	if m == nil {
+		return nil
+	}
+	return m.getEmbedder()
+}
+
 func (m *MemoryEngine) lockUser(ctx context.Context, platform, userID string) (func(), error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

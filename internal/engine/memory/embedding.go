@@ -55,6 +55,19 @@ func EmbedText(ctx context.Context, text string) []float32 {
 
 func EmbedTextWithIdentity(ctx context.Context, text string) ([]float32, string) {
 	emb, version := defaultEmbedderSnapshot()
+	return embedCachedWithProvider(ctx, emb, version, text)
+}
+
+// EmbedTextWithProvider encodes text using an explicit embedding provider with shared bounded caching.
+func EmbedTextWithProvider(ctx context.Context, emb core.EmbeddingProvider, text string) ([]float32, string) {
+	if emb == nil {
+		return EmbedTextWithIdentity(ctx, text)
+	}
+	_, version := defaultEmbedderSnapshot()
+	return embedCachedWithProvider(ctx, emb, version, text)
+}
+
+func embedCachedWithProvider(ctx context.Context, emb core.EmbeddingProvider, version uint64, text string) ([]float32, string) {
 	clean := strings.TrimSpace(text)
 	if emb == nil || clean == "" {
 		return nil, ""

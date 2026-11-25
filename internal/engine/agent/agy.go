@@ -121,12 +121,52 @@ func (w *AGYWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (string
 		return "", err
 	}
 
-	process, err := runAGYProcess(ctx, w.command, cwd, args)
+	modelDisplay := model
+	if modelDisplay != "" && effort != "" {
+		modelDisplay = fmt.Sprintf("%s (%s)", model, effort)
+	}
+	if t.OnLiveUpdate != nil && modelDisplay != "" {
+		t.OnLiveUpdate(modelDisplay, "", "")
+	}
+
+	var savedInitConvID string
+	var sessionSaveErr error
+	hooks := agyStreamHooks{
+		onConversationID: func(cid string) {
+			cid = strings.TrimSpace(cid)
+			if cid == "" || cid == savedInitConvID {
+				return
+			}
+			savedInitConvID = cid
+			session.Lock()
+			session.ConversationID = cid
+			session.loaded = true
+			session.Unlock()
+			if err := w.saveConversationID(t, cwd, cid); err != nil {
+				sessionSaveErr = err
+			}
+		},
+		onLiveProgress: func(liveLog, summary string) {
+			if t.OnLiveUpdate != nil {
+				t.OnLiveUpdate(modelDisplay, liveLog, summary)
+			}
+		},
+	}
+
+	process, err := runAGYProcess(ctx, w.command, cwd, args, hooks)
 	stdoutBuf, stderrBuf, duration := process.stdout, process.stderr, process.duration
 
 	if err != nil {
 		saveErr := w.retainConversationID(session, t, cwd, stdoutBuf.Bytes())
-		partial := partialAGYOutput(stdoutBuf.String(), stderrBuf.String(), stdoutBuf.Truncated(), stderrBuf.Truncated())
+		if saveErr == nil {
+			saveErr = sessionSaveErr
+		}
+		partial := process.liveLog
+		if partial == "" {
+			partial = partialAGYOutput(stdoutBuf.String(), stderrBuf.String(), stdoutBuf.Truncated(), stderrBuf.Truncated())
+		} else if stderrText := strings.TrimSpace(stderrBuf.String()); stderrText != "" {
+			partial += "\n\n标准错误：\n" + core.TruncateRunes(stderrText, 2000, "…")
+		}
 		partial = appendSessionSaveWarning(partial, saveErr)
 		if ctx.Err() == context.Canceled {
 			return partial, fmt.Errorf("任务已被中断 (已耗时 %s)", duration.Truncate(time.Second))
@@ -148,7 +188,13 @@ func (w *AGYWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (string
 	}
 	if stdoutBuf.Truncated() {
 		saveErr := w.retainConversationID(session, t, cwd, stdoutBuf.Bytes())
-		partial := partialAGYOutput(stdoutBuf.String(), stderrBuf.String(), true, stderrBuf.Truncated())
+		if saveErr == nil {
+			saveErr = sessionSaveErr
+		}
+		partial := process.liveLog
+		if partial == "" {
+			partial = partialAGYOutput(stdoutBuf.String(), stderrBuf.String(), true, stderrBuf.Truncated())
+		}
 		partial = appendSessionSaveWarning(partial, saveErr)
 		return partial, fmt.Errorf("AGY 输出超过 2 MiB 上限，结果不完整")
 	}
@@ -160,14 +206,16 @@ func (w *AGYWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (string
 	}
 	// A non-success response can still carry a valid conversation ID and useful
 	// stage output. Preserve both so a later, explicit stage can continue safely.
-	var sessionSaveErr error
-	if parsed.ConversationID != "" {
+	if parsed.ConversationID != "" && parsed.ConversationID != savedInitConvID {
 		session.Lock()
 		session.ConversationID = strings.TrimSpace(parsed.ConversationID)
 		session.loaded = true
 		conversationID := session.ConversationID
 		session.Unlock()
 		sessionSaveErr = w.saveConversationID(t, cwd, conversationID)
+	}
+	if t.OnLiveUpdate != nil {
+		t.OnLiveUpdate(modelDisplay, "", parsed.FinalStepResponse)
 	}
 	response, resultErr := agyTicketResult(parsed)
 	response = appendSessionSaveWarning(response, sessionSaveErr)

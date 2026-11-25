@@ -17,6 +17,7 @@ import (
 type MemoryTool struct {
 	db          *db.Manager
 	llm         core.LLMProvider
+	embedder    core.EmbeddingProvider
 	pageMu      sync.Mutex
 	profilePage map[string]int
 }
@@ -35,12 +36,19 @@ func NewMemoryTool(dbMgr *db.Manager, providers ...core.LLMProvider) *MemoryTool
 	return &MemoryTool{db: dbMgr, llm: provider, profilePage: make(map[string]int)}
 }
 
+// SetEmbedder binds an explicit embedding provider for semantic fact and chat history search.
+func (t *MemoryTool) SetEmbedder(emb core.EmbeddingProvider) {
+	if t != nil {
+		t.embedder = emb
+	}
+}
+
 func (t *MemoryTool) Name() string {
 	return "manage_memory"
 }
 
 func (t *MemoryTool) Description() string {
-	return "查看和管理当前会话可见的个人记忆。用户问你对本人有什么印象、是否记得本人或记得本人的哪些事，调用 profile 交付印象与记忆卡片，即使用户没有提到卡片。群聊里用户明确 @ 一位成员并询问你记不记得对方时，profile 可查询该成员在当前群的记忆；必须传该 @ 对象的 target_user_id。想核对具体的一条记忆时用 search 或 source。私聊和各群的记忆按会话隔离。"
+	return "查看和管理当前会话可见的个人记忆，并检索本会话过往历史聊天记录。用户问你对本人有什么印象、是否记得本人或记得本人的哪些事，调用 profile 交付印象与记忆卡片，即使用户没有提到卡片。群聊里用户明确 @ 一位成员并询问你记不记得对方时，profile 可查询该成员在当前群的记忆；必须传该 @ 对象的 target_user_id。当用户提及‘上次/前几天/之前聊过…’而当前滑动窗口里没有，或想核对某条具体记忆时，主动调用 search 同时做语义+关键词检索（覆盖长期记忆与本会话过往对话原文）；查单条记忆原文出处用 source。私聊和各群的记忆按会话隔离。"
 }
 
 func (t *MemoryTool) Parameters() map[string]any {
@@ -50,7 +58,7 @@ func (t *MemoryTool) Parameters() map[string]any {
 			"action": map[string]any{
 				"type":        "string",
 				"enum":        []string{"add", "update", "delete", "search", "list", "profile", "source"},
-				"description": "profile：查看当前发言人自己的印象与记忆；在群里明确询问某位群友时，可通过 target_user_id 查看本群对该成员的记忆。查询他人必须是当前消息明确 @ 的成员，且只能读取本群范围，不得读取其私聊或其他群记忆。list/search/source/add/update/delete 始终只作用于当前发言人。需要翻页时传 page 或 page_direction。",
+				"description": "profile：查看当前发言人自己的印象与记忆（群里明确 @ 某位成员询问时传 target_user_id 查看本群对该成员的记忆）。search：按关键词或语义同时检索当前发言人的长期记忆与本会话过往历史聊天记录（适合回溯几天前或上一场聊过的话题与细节）。list/source/add/update/delete 始终只作用于当前发言人。需要翻页时传 page 或 page_direction。",
 			},
 			"fact": map[string]any{
 				"type":        "string",

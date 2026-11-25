@@ -8,11 +8,12 @@ import (
 )
 
 type AGYResult struct {
-	ConversationID string `json:"conversation_id"`
-	Status         string `json:"status"`
-	Response       string `json:"response"`
-	FinishedReason string `json:"finished_reason"`
-	Error          string `json:"error"`
+	ConversationID    string `json:"conversation_id"`
+	Status            string `json:"status"`
+	Response          string `json:"response"`
+	FinishedReason    string `json:"finished_reason"`
+	Error             string `json:"error"`
+	FinalStepResponse string `json:"-"`
 }
 
 // FailureDetail reports explicit CLI failures. Callers still decide what
@@ -30,22 +31,74 @@ func (r AGYResult) FailureDetail() string {
 	return ""
 }
 
-// ParseAGYResult reads the last result object from CLI output. Progress events
-// and surrounding log lines can share stdout with the final JSON.
+type agyStreamStepUpdate struct {
+	ConversationID string         `json:"conversation_id"`
+	StepIndex      int            `json:"step_index"`
+	State          string         `json:"state"`
+	StepType       string         `json:"step_type"`
+	TextDelta      string         `json:"text_delta"`
+	ToolName       string         `json:"tool_name"`
+	DurationSec    float64        `json:"duration_seconds"`
+	ToolInfo       map[string]any `json:"tool_info"`
+}
+
+type agyStreamEnvelope struct {
+	AGYResult
+	Type       string               `json:"type"`
+	Event      string               `json:"event"`
+	StepUpdate *agyStreamStepUpdate `json:"step_update"`
+	Result     *AGYResult           `json:"result"`
+}
+
+// ParseAGYResult reads the final result object from CLI output (supporting both
+// single-JSON `--output-format json` and NDJSON `--output-format stream-json`).
 func ParseAGYResult(raw []byte) (AGYResult, error) {
 	var result AGYResult
 	found := false
+	initConvID := ""
+	currentStepIdx := -1
+	var currentStepBuf strings.Builder
+	lastNonEmptyStep := ""
+	flushStep := func() {
+		if text := strings.TrimSpace(currentStepBuf.String()); text != "" {
+			lastNonEmptyStep = text
+		}
+		currentStepBuf.Reset()
+	}
+
 	for raw = bytes.TrimSpace(raw); len(raw) > 0; raw = bytes.TrimSpace(raw) {
 		if raw[0] == '{' {
-			var entry struct {
-				AGYResult
-				Type string `json:"type"`
-			}
+			var entry agyStreamEnvelope
 			decoder := json.NewDecoder(bytes.NewReader(raw))
 			if err := decoder.Decode(&entry); err == nil {
-				if entry.Type != "status" && entry.Type != "delta" && entry.AGYResult != (AGYResult{}) &&
-					!strings.EqualFold(strings.TrimSpace(entry.Status), "RUNNING") {
-					result, found = entry.AGYResult, true
+				switch strings.ToLower(strings.TrimSpace(entry.Event)) {
+				case "init":
+					if cid := strings.TrimSpace(entry.ConversationID); cid != "" {
+						initConvID = cid
+					}
+				case "step_update":
+					if su := entry.StepUpdate; su != nil {
+						if cid := strings.TrimSpace(su.ConversationID); cid != "" && initConvID == "" {
+							initConvID = cid
+						}
+						if strings.EqualFold(su.StepType, "agent_response") {
+							if su.StepIndex != currentStepIdx {
+								flushStep()
+								currentStepIdx = su.StepIndex
+							}
+							currentStepBuf.WriteString(su.TextDelta)
+						}
+					}
+				case "result":
+					if entry.Result != nil && *entry.Result != (AGYResult{}) {
+						result = *entry.Result
+						found = true
+					}
+				default:
+					if entry.Type != "status" && entry.Type != "delta" && entry.AGYResult != (AGYResult{}) &&
+						!strings.EqualFold(strings.TrimSpace(entry.Status), "RUNNING") {
+						result, found = entry.AGYResult, true
+					}
 				}
 				raw = raw[decoder.InputOffset():]
 				continue
@@ -57,8 +110,22 @@ func ParseAGYResult(raw []byte) (AGYResult, error) {
 		}
 		raw = remainder
 	}
+	flushStep()
 	if !found {
+		if initConvID != "" && lastNonEmptyStep != "" {
+			// Stream exited before emitting the final result envelope; surface partial conversation ID for recovery.
+			return AGYResult{ConversationID: initConvID, Status: "INCOMPLETE", Response: lastNonEmptyStep, FinalStepResponse: lastNonEmptyStep}, nil
+		}
+		if initConvID != "" {
+			return AGYResult{ConversationID: initConvID, Status: "INCOMPLETE"}, nil
+		}
 		return AGYResult{}, errors.New("AGY 输出中未找到有效的结构化 JSON 结果")
+	}
+	if result.ConversationID == "" && initConvID != "" {
+		result.ConversationID = initConvID
+	}
+	if lastNonEmptyStep != "" {
+		result.FinalStepResponse = lastNonEmptyStep
 	}
 	return result, nil
 }

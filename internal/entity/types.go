@@ -85,13 +85,15 @@ type Ticket struct {
 	Workspace          string             `json:"workspace"`        // Worker 执行时使用的工作目录；隔离级别由 Worker 配置决定
 	Model              string             `json:"model"`            // 指定模型标识 (留空沿用当前会话模型)
 	Status             TicketStatus       `json:"status"`
-	CreatedAt          time.Time          `json:"created_at"`
-	UpdatedAt          time.Time          `json:"updated_at"`
-	Output             string             `json:"output,omitempty"`
-	AllowSensitive     bool               `json:"-"` // 仅核心伙伴在私聊下允许展示真实公网 IP 等敏感宿主机信息
-	ExecutionTimeout   time.Duration      `json:"-"` // 当前工单的调度器硬超时；0 表示无额外时限
-	AdditionalDirs     []string           `json:"-"` // 本工单显式授权给 AGY 沙箱访问的附件输入目录
-	CancelFunc         context.CancelFunc `json:"-"`
+	CreatedAt          time.Time                            `json:"created_at"`
+	UpdatedAt          time.Time                            `json:"updated_at"`
+	Output             string                               `json:"output,omitempty"`
+	Summary            string                               `json:"-"` // 终局精炼结论摘要（剥离流式中间进度后供主动通知预览）
+	AllowSensitive     bool                                 `json:"-"` // 仅核心伙伴在私聊下允许展示真实公网 IP 等敏感宿主机信息
+	ExecutionTimeout   time.Duration                        `json:"-"` // 当前工单的调度器硬超时；0 表示无额外时限
+	AdditionalDirs     []string                             `json:"-"` // 本工单显式授权给 AGY 沙箱访问的附件输入目录
+	OnLiveUpdate       func(model, liveOut, summary string) `json:"-"`
+	CancelFunc         context.CancelFunc                   `json:"-"`
 	executionToken     uint64
 	persistenceWarning string
 }

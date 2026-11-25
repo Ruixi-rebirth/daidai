@@ -54,7 +54,7 @@ func normalizeMindScope(raw string) (string, error) {
 	case MindScopeBoth, "all", "global":
 		return MindScopeBoth, nil
 	default:
-		return "", fmt.Errorf("未知模型切换范围 %q，可选值为 partner（搭档私聊）、public（群聊与公用）或 both（双轨同步）", raw)
+		return "", fmt.Errorf("未知模型切换范围 %q，可选值为 partner（搭档私聊）、public（公用模型）或 both（双轨同步）", raw)
 	}
 }
 
@@ -160,7 +160,7 @@ func (r *MindRouter) SwitchMind(req SwitchRequest) (*SwitchResult, error) {
 		r.syncProviderLocked(targetModel.Channel, targetModel.ID, finalEffort)
 		pubHint := ""
 		if r.public.Model != "" && (!strings.EqualFold(r.public.Channel, targetModel.Channel) || !strings.EqualFold(r.public.Model, targetModel.ID)) {
-			pubHint = fmt.Sprintf("（群聊与公用模型轨保持 %s · %s 不变）", r.public.Channel, r.public.Model)
+			pubHint = fmt.Sprintf("（公用模型保持 %s · %s 不变）", r.public.Channel, r.public.Model)
 		}
 		return &SwitchResult{
 			Status:  "success",
@@ -190,7 +190,7 @@ func (r *MindRouter) SwitchMind(req SwitchRequest) (*SwitchResult, error) {
 		}
 		capNote := ""
 		if capped {
-			capNote = "（公用轨思考强度已按上限自动封顶为 medium）"
+			capNote = "（公用模型思考强度已按上限自动封顶为 medium）"
 		}
 		privHint := ""
 		if r.active.Model != "" {
@@ -203,7 +203,7 @@ func (r *MindRouter) SwitchMind(req SwitchRequest) (*SwitchResult, error) {
 			Model:   targetModel.ID,
 			Name:    targetModel.Name,
 			Effort:  pubEffort,
-			Message: fmt.Sprintf("群聊与公用模型已成功热切换至 %s 通道模型 %s (%s)%s%s%s",
+			Message: fmt.Sprintf("公用模型已成功热切换至 %s 通道模型 %s (%s)%s%s%s",
 				targetModel.Channel, targetModel.Name, targetModel.ID,
 				formatEffortNotice(pubEffort), capNote, privHint),
 		}, nil
@@ -323,7 +323,7 @@ func (r *MindRouter) switchEffortOnlyLocked(scope, channelReq, effortReq string)
 			Channel: slotChannel,
 			Model:   slotModel,
 			Effort:  pubEffort,
-			Message: fmt.Sprintf("已将群聊与公用轨 %s 通道模型 (%s) 的思考强度调整为: %s%s", slotChannel, slotModel, pubEffort, capNote),
+			Message: fmt.Sprintf("已将公用模型 %s 通道 (%s) 的思考强度调整为: %s%s", slotChannel, slotModel, pubEffort, capNote),
 		}, nil
 
 	case MindScopeBoth:

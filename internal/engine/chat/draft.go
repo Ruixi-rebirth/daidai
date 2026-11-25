@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -85,12 +86,22 @@ func (c *Cortex) ContinueDraft(ctx context.Context, event *entity.SensoryEvent, 
 			for i, draft := range drafts {
 				fmt.Fprintf(&choices, "\n- %d. %s（任务 %s）", i+1, draft.Goal, draft.ID)
 			}
-			return nil, "你有多个未完成的任务，请回复“/continue <任务编号>”选择：" + choices.String(), nil
+			return nil, "你有多个未完成的任务，请回复“/continue <序号或任务编号>”选择：" + choices.String(), nil
 		}
 	}
 	selected, err := c.drafts.GetConversationDraft(ctx, event.Platform, chatType, event.ChannelID, event.SenderID, id)
 	if err != nil {
 		return nil, "", err
+	}
+	if selected == nil {
+		if idx, idxErr := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(id), "#")); idxErr == nil && idx >= 1 {
+			if drafts, listErr := c.drafts.ListConversationDraftSummaries(ctx, event.Platform, chatType, event.ChannelID, event.SenderID); listErr == nil && idx <= len(drafts) {
+				selected, err = c.drafts.GetConversationDraft(ctx, event.Platform, chatType, event.ChannelID, event.SenderID, drafts[idx-1].ID)
+				if err != nil {
+					return nil, "", err
+				}
+			}
+		}
 	}
 	if selected == nil {
 		return nil, "这个任务编号不属于你，或草稿已过期。", nil

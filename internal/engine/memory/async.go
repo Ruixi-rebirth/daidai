@@ -23,6 +23,9 @@ type postCommitJob struct {
 
 func (m *MemoryEngine) schedulePostCommit(dbMgr *db.Manager, event *entity.SensoryEvent, userText, replyText string, userMsgID, botMsgID int64) {
 	emb := m.getEmbedder()
+	if event != nil && event.SkipVectorIndex {
+		emb = nil
+	}
 	needExtract := m.llm != nil && event.SenderID != "" && shouldExtractFacts(event)
 	if !needExtract && emb == nil {
 		return

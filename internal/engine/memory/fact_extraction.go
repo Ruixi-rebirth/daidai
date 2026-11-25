@@ -54,7 +54,7 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 	}
 
 	rankCtx, rankCancel := context.WithTimeout(ctx, 3*time.Second)
-	relevantFacts := RankFactsByBM25(rankCtx, event.Content, activeFacts, 0)
+	relevantFacts := RankFactsWithEmbedder(rankCtx, m.getEmbedder(), event.Content, activeFacts, 0, 25)
 	rankCancel()
 	if len(relevantFacts) > 25 {
 		relevantFacts = relevantFacts[:25]
@@ -64,8 +64,17 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 	if relErr != nil && ctx.Err() == nil {
 		slog.Debug("memory: 读取用户关系状态失败", "err", relErr)
 	}
-	needImpression := rel != nil && rel.InteractionCount >= 3 &&
-		(strings.TrimSpace(rel.Impression) == "" || rel.InteractionCount-rel.ImpressionCount >= 5)
+	interactions := effectiveInteractionCount(ctx, dbMgr, event, rel)
+	prevImpressionCount := 0
+	prevImpression := ""
+	var prevUpdatedAt time.Time
+	if rel != nil {
+		prevImpressionCount = rel.ImpressionCount
+		prevImpression = strings.TrimSpace(rel.Impression)
+		prevUpdatedAt = rel.UpdatedAt
+	}
+	needImpression := interactions >= 3 &&
+		(prevImpression == "" || interactions-prevImpressionCount >= 5)
 
 	request := factExtractionInput{
 		CurrentMessage: strings.TrimSpace(event.Content),
@@ -73,9 +82,9 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 	}
 	if needImpression {
 		request.Relation = &relationExtractionInput{
-			InteractionCount:   rel.InteractionCount,
-			PreviousImpression: strings.TrimSpace(rel.Impression),
-			LongTimeNoChat:     !rel.UpdatedAt.IsZero() && time.Since(rel.UpdatedAt) > 30*24*time.Hour,
+			InteractionCount:   interactions,
+			PreviousImpression: prevImpression,
+			LongTimeNoChat:     !prevUpdatedAt.IsZero() && time.Since(prevUpdatedAt) > 30*24*time.Hour,
 		}
 	}
 	for _, f := range relevantFacts {
@@ -136,11 +145,7 @@ func (m *MemoryEngine) consolidateUserFacts(ctx context.Context, event *entity.S
 		}
 	}
 	if (impression != "" || emotion != "") && ctx.Err() == nil {
-		interactionCount := 0
-		if rel != nil {
-			interactionCount = rel.InteractionCount
-		}
-		if err := dbMgr.SaveUserRelationInsight(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup, impression, interactionCount, emotion, event.OccurredAt); err != nil {
+		if err := dbMgr.SaveUserRelationInsight(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup, impression, interactions, emotion, event.OccurredAt); err != nil {
 			slog.Warn("memory: 后台保存用户关系印象失败", "err", err)
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -22,8 +23,13 @@ func (m *Manager) SaveAgentTicket(ctx context.Context, platform string, t AgentT
 	_, err = db.ExecContext(ctx, `INSERT INTO agent_tickets
 		(id, requester_id, channel_id, goal, worker, workspace, model, status, output, allow_sensitive, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET status=excluded.status, output=excluded.output,
-		updated_at=excluded.updated_at WHERE excluded.updated_at > agent_tickets.updated_at`, t.ID, t.RequesterID, t.ChannelID, t.Goal,
+		ON CONFLICT(id) DO UPDATE SET
+			worker=CASE WHEN excluded.worker<>'' THEN excluded.worker ELSE agent_tickets.worker END,
+			model=CASE WHEN excluded.model<>'' THEN excluded.model ELSE agent_tickets.model END,
+			status=excluded.status,
+			output=excluded.output,
+			updated_at=excluded.updated_at
+		WHERE excluded.updated_at > agent_tickets.updated_at`, t.ID, t.RequesterID, t.ChannelID, t.Goal,
 		t.Worker, t.Workspace, t.Model, t.Status, t.Output, t.AllowSensitive,
 		t.CreatedAt.UnixMilli(), t.UpdatedAt.UnixMilli())
 	return err
@@ -82,7 +88,7 @@ func (m *Manager) GetAgentTicket(ctx context.Context, platform, requesterID, cha
 		FROM agent_tickets WHERE requester_id=? AND channel_id=? AND id=?`, requesterID, channelID, ticketID).Scan(
 		&t.ID, &t.RequesterID, &t.ChannelID, &t.Goal, &t.Worker, &t.Workspace, &t.Model, &t.Status, &t.Output, &sensitive, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+		return m.findAgentTicketByPrefix(ctx, db, requesterID, channelID, ticketID)
 	}
 	if err != nil {
 		return nil, err
@@ -91,6 +97,42 @@ func (m *Manager) GetAgentTicket(ctx context.Context, platform, requesterID, cha
 	t.CreatedAt = time.UnixMilli(createdAt)
 	t.UpdatedAt = time.UnixMilli(updatedAt)
 	return &t, nil
+}
+
+func (m *Manager) findAgentTicketByPrefix(ctx context.Context, conn *sql.DB, requesterID, channelID, rawPrefix string) (*AgentTicket, error) {
+	prefix := strings.ToLower(strings.TrimSpace(rawPrefix))
+	if len(prefix) < 4 || strings.ContainsAny(prefix, "%_") {
+		return nil, nil
+	}
+	altPrefix := prefix
+	if !strings.HasPrefix(prefix, "tkt-") && !strings.HasPrefix(prefix, "tkt_") {
+		altPrefix = "tkt-" + prefix
+	}
+	rows, err := conn.QueryContext(ctx, `SELECT id, requester_id, channel_id, goal, worker, workspace, model, status, output, allow_sensitive, created_at, updated_at
+		FROM agent_tickets
+		WHERE requester_id=? AND channel_id=? AND (lower(id) LIKE ? OR lower(id) LIKE ?)
+		ORDER BY created_at DESC LIMIT 2`, requesterID, channelID, prefix+"%", altPrefix+"%")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var matches []AgentTicket
+	for rows.Next() {
+		var t AgentTicket
+		var sensitive int
+		var createdAt, updatedAt int64
+		if err := rows.Scan(&t.ID, &t.RequesterID, &t.ChannelID, &t.Goal, &t.Worker, &t.Workspace, &t.Model, &t.Status, &t.Output, &sensitive, &createdAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		t.AllowSensitive = sensitive != 0
+		t.CreatedAt = time.UnixMilli(createdAt)
+		t.UpdatedAt = time.UnixMilli(updatedAt)
+		matches = append(matches, t)
+	}
+	if err := rows.Err(); err != nil || len(matches) != 1 {
+		return nil, err
+	}
+	return &matches[0], nil
 }
 
 func (m *Manager) LoadAGYSession(ctx context.Context, platform, requesterID, channelID, workspace string) (string, error) {

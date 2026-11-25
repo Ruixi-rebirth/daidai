@@ -20,8 +20,27 @@ func (d *Delegates) AbortByRequester(platform, channelID, requesterID string) in
 }
 
 func (d *Delegates) AbortTicketForRequester(ticketID, platform, channelID, requesterID string) int {
+	resolvedID := strings.TrimSpace(ticketID)
+	d.mu.RLock()
+	if _, exact := d.tickets[resolvedID]; !exact {
+		matched := ""
+		for _, t := range d.tickets {
+			if t.Platform == platform && t.ChannelID == channelID && t.RequesterID == requesterID &&
+				(t.Status == TicketRunning || t.Status == TicketPending) && matchTicketIdentifier(t.ID, resolvedID) {
+				if matched != "" {
+					matched = ""
+					break
+				}
+				matched = t.ID
+			}
+		}
+		if matched != "" {
+			resolvedID = matched
+		}
+	}
+	d.mu.RUnlock()
 	return d.abortTickets(func(t *Ticket) bool {
-		return t.ID == ticketID && t.Platform == platform && t.ChannelID == channelID && t.RequesterID == requesterID
+		return t.ID == resolvedID && t.Platform == platform && t.ChannelID == channelID && t.RequesterID == requesterID
 	})
 }
 

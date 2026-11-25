@@ -120,7 +120,7 @@ func DefaultConfig() *Config {
 	cfg.Name = "呆呆"
 	cfg.Server.Port = 8080
 	cfg.Agent.MaxConcurrent = 1
-	cfg.Agent.ExecutionTimeout = "30m"
+	cfg.Agent.ExecutionTimeout = "1h"
 	cfg.Briefing = BriefingConfig{Enabled: true, Timezone: "Asia/Singapore", Time: "08:00"}
 	return cfg
 }

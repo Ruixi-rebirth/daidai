@@ -280,6 +280,7 @@ func run() int {
 		BriefingOwners:   briefingOwners,
 		GroupExpressions: groupExpressions,
 		Vision:           visEngine,
+		Embedder:         memEngine.Embedder(),
 	})
 
 	// 具体认知大脑 (实现 entity.Cognition)
@@ -290,6 +291,7 @@ func run() int {
 		Hands:            hands,
 		Vision:           visEngine,
 		Workspaces:       workspaceMgr,
+		Delegates:        delegates,
 		Inbox:            attachmentInbox,
 		GroupExpressions: groupExpressions,
 		Drafts:           database,

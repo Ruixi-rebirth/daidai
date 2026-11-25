@@ -115,7 +115,7 @@ func NewDelegatesWithLimit(maxConcurrent int, workers ...Worker) *Delegates {
 		tickets:          make(map[string]*Ticket),
 		workers:          make(map[string]Worker),
 		maxConcurrent:    maxConcurrent,
-		executionTimeout: 30 * time.Minute,
+		executionTimeout: time.Hour,
 		workspaceUses:    make(map[string]int),
 	}
 	for _, w := range workers {
@@ -257,14 +257,20 @@ func (d *Delegates) CreateTicketForPlatform(platform, requesterID, channelID, go
 	}
 
 	d.nextTicketID++
-	var randomID [8]byte
-	randomSuffix := ""
-	if _, err := rand.Read(randomID[:]); err != nil {
-		randomSuffix = fmt.Sprintf("%x", d.nextTicketID)
-	} else {
-		randomSuffix = hex.EncodeToString(randomID[:])
+	ticketID := ""
+	for attempt := 0; attempt < 8; attempt++ {
+		var randomID [3]byte
+		if _, err := rand.Read(randomID[:]); err == nil {
+			candidate := "tkt-" + hex.EncodeToString(randomID[:])
+			if _, exists := d.tickets[candidate]; !exists {
+				ticketID = candidate
+				break
+			}
+		}
 	}
-	ticketID := fmt.Sprintf("tkt_%x_%s", time.Now().UnixMilli(), randomSuffix)
+	if ticketID == "" {
+		ticketID = fmt.Sprintf("tkt-%06x", d.nextTicketID)
+	}
 
 	canSeeSensitive := len(allowSensitive) > 0 && allowSensitive[0]
 	t := &Ticket{

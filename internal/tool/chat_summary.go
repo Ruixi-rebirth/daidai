@@ -112,6 +112,9 @@ func (t *ChatSummaryTool) Execute(ctx context.Context, rawArgs json.RawMessage) 
 		if text == "" || entity.IsSensitiveAuthCommand(text) {
 			continue
 		}
+		if message.IsBot && isNonConversationalBotBroadcast(message.Text) {
+			continue
+		}
 		text = core.TruncateRunes(text, core.MaxSummaryMessageRunes, "…[截断]")
 		speaker := strings.TrimSpace(message.Name)
 		if speaker == "" {
@@ -211,4 +214,21 @@ func summaryPeriodLabel(period string) string {
 		return "今天"
 	}
 	return "最近"
+}
+
+func isNonConversationalBotBroadcast(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	for _, prefix := range []string{
+		"# 极客早报 ·",
+		"# 💌 ",
+		"# 🖥️ ",
+		"[已向群成员展示个人记忆卡",
+		"[已展示当前会话的个人记忆卡",
+		"[呆呆已向当时的群成员展示个人记忆卡",
+	} {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return false
 }

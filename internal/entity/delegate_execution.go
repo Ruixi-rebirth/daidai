@@ -73,6 +73,7 @@ func (d *Delegates) executeTicket(ctx context.Context, t *Ticket, onStarted func
 	}
 	defer cancel()
 
+	t.Worker = workerName
 	t.CancelFunc = cancel
 	t.Status = TicketRunning
 	touchTicket(t)
@@ -80,8 +81,30 @@ func (d *Delegates) executeTicket(ctx context.Context, t *Ticket, onStarted func
 	workerTicket := *t
 	workerTicket.ExecutionTimeout = d.executionTimeout
 	// Worker 只接收该次执行的不可变快照，避免 /stop 并发更新调度状态时
-	// 与 Worker 读取共享 Ticket 产生数据竞争。
+	// 与 Worker 读取共享 Ticket 产生数据竞争；实时进度通过回调线程安全写回。
 	workerTicket.CancelFunc = nil
+	ticketID := t.ID
+	allowSensitive := t.AllowSensitive
+	execToken := t.executionToken
+	workerTicket.OnLiveUpdate = func(resolvedModel, liveOut, summary string) {
+		if !allowSensitive {
+			liveOut = core.RedactSensitiveIPs(liveOut)
+			summary = core.RedactSensitiveIPs(summary)
+		}
+		d.mu.Lock()
+		if cur := d.tickets[ticketID]; cur != nil && cur.executionToken == execToken && cur.Status == TicketRunning {
+			if resolvedModel != "" {
+				cur.Model = resolvedModel
+			}
+			if liveOut != "" {
+				cur.Output = liveOut
+			}
+			if summary != "" {
+				cur.Summary = summary
+			}
+		}
+		d.mu.Unlock()
+	}
 	d.mu.Unlock()
 	if onStarted != nil {
 		onStarted()

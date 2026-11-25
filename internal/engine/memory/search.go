@@ -26,14 +26,23 @@ func ScoreFactRelevance(query, content string) float32 {
 	return scores[0]
 }
 
-// RankFactsByBM25 对候选事实列表执行 BM25 稀疏检索 + BAAI/bge-m3 稠密向量 RRF 双路混合重排 + 时间衰减，并按阈值过滤
+// RankFactsByBM25 对候选事实列表执行 BM25 稀疏检索 + 稠密向量 RRF 混合重排 + 时间衰减。
 func RankFactsByBM25(ctx context.Context, query string, facts []*core.Fact, minScore float32) []*core.Fact {
+	return RankFactsWithEmbedder(ctx, GetDefaultEmbedder(), query, facts, minScore, defaultMaxFacts)
+}
+
+// RankFactsWithEmbedder 按目标截断容量 targetLimit 动态决定是否触发稠密语义向量 RRF 重排：
+// 只要 minScore > 0（主动检索过滤）或候选数超过实际保留上限 targetLimit（即将发生淘汰截断），立即融合 bge-m3 语义相似度。
+func RankFactsWithEmbedder(ctx context.Context, emb core.EmbeddingProvider, query string, facts []*core.Fact, minScore float32, targetLimit int) []*core.Fact {
 	if len(facts) == 0 {
 		return nil
 	}
+	if emb == nil {
+		emb = GetDefaultEmbedder()
+	}
 	docs := make([]string, len(facts))
 	hasFactEmb := false
-	queryIdentity := embeddingIdentity(GetDefaultEmbedder())
+	queryIdentity := embeddingIdentity(emb)
 	for i, f := range facts {
 		docs[i] = f.Content
 		if len(f.Embedding) > 0 && f.EmbeddingModel == queryIdentity {
@@ -42,11 +51,10 @@ func RankFactsByBM25(ctx context.Context, query string, facts []*core.Fact, minS
 	}
 	bm25Scores := ScoreBM25(query, docs)
 
-	// 仅在主动检索过滤 (minScore > 0) 或存量事实数超过常驻窗口上限需要淘汰截断时请求查询向量；
-	// 若全量事实本就少于常驻上限且无需过滤，直接本地 0ms 完成 BM25 + 时间衰减排序，避免主对话热路径发生不必要的网络等待
+	needSemanticRerank := minScore > 0 || (targetLimit > 0 && len(facts) > targetLimit)
 	var vecScores []float32
-	if hasFactEmb && strings.TrimSpace(query) != "" && (minScore > 0 || len(facts) > defaultMaxFacts) {
-		if qVec, identity := EmbedTextWithIdentity(ctx, query); len(qVec) > 0 && identity == queryIdentity {
+	if hasFactEmb && strings.TrimSpace(query) != "" && needSemanticRerank {
+		if qVec, identity := EmbedTextWithProvider(ctx, emb, query); len(qVec) > 0 && identity == queryIdentity {
 			vecScores = make([]float32, len(facts))
 			for i, f := range facts {
 				if len(f.Embedding) > 0 && f.EmbeddingModel == identity {
@@ -97,13 +105,18 @@ func RankFactsByBM25(ctx context.Context, query string, facts []*core.Fact, minS
 
 // SearchMessagesInChatByBM25 keeps lexical and vector recall inside one chat type.
 func SearchMessagesInChatByBM25(ctx context.Context, dbMgr *db.Manager, platform, chatType, convID, query string, limit int) ([]db.StoredMessage, error) {
+	return SearchMessagesInChatWithEmbedder(ctx, dbMgr, GetDefaultEmbedder(), platform, chatType, convID, query, limit)
+}
+
+// SearchMessagesInChatWithEmbedder performs lexical + dense vector RRF search within one chat using an explicit embedder.
+func SearchMessagesInChatWithEmbedder(ctx context.Context, dbMgr *db.Manager, emb core.EmbeddingProvider, platform, chatType, convID, query string, limit int) ([]db.StoredMessage, error) {
 	if chatType != "group" && chatType != "private" {
 		return nil, fmt.Errorf("chat type must be group or private")
 	}
-	return searchMessagesByBM25(ctx, dbMgr, platform, chatType, convID, query, limit)
+	return searchMessagesByBM25(ctx, dbMgr, emb, platform, chatType, convID, query, limit)
 }
 
-func searchMessagesByBM25(ctx context.Context, dbMgr *db.Manager, platform, chatType, convID, query string, limit int) ([]db.StoredMessage, error) {
+func searchMessagesByBM25(ctx context.Context, dbMgr *db.Manager, emb core.EmbeddingProvider, platform, chatType, convID, query string, limit int) ([]db.StoredMessage, error) {
 	if dbMgr == nil || convID == "" {
 		return nil, nil
 	}
@@ -130,7 +143,7 @@ func searchMessagesByBM25(ctx context.Context, dbMgr *db.Manager, platform, chat
 		}
 	}
 
-	qVec, modelIdentity := EmbedTextWithIdentity(ctx, query)
+	qVec, modelIdentity := EmbedTextWithProvider(ctx, emb, query)
 	if len(qVec) > 0 {
 		var vecMsgs []db.StoredMessage
 		var err error

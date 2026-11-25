@@ -29,21 +29,50 @@ func (a *SuperAgent) handleTaskCommand(ctx context.Context, event *entity.Sensor
 	if !a.requirePrivateTicketCommand(ctx, event) {
 		return
 	}
+	if a.Delegates == nil {
+		a.replyText(ctx, event, "工单调度器未配置。")
+		return
+	}
 	parts := strings.Fields(content)
-	if (len(parts) != 2 && len(parts) != 3) || a.Delegates == nil {
-		a.replyText(ctx, event, "用法：/task <工单编号> [页码]")
+	if len(parts) > 3 {
+		a.replyText(ctx, event, "用法：/task [工单编号] [页码]")
 		return
 	}
 	page := 1
-	if len(parts) == 3 {
+	var ticket *entity.Ticket
+	var err error
+	switch len(parts) {
+	case 1:
+		recent, listErr := a.Delegates.TicketsFor(ctx, event.Platform, event.SenderID, event.ChannelID, 1)
+		if len(recent) == 0 {
+			if listErr != nil {
+				a.replyText(ctx, event, "读取近期工单失败，请稍后重试。")
+				return
+			}
+			a.replyText(ctx, event, "当前会话暂无工程工单。")
+			return
+		}
+		ticket, err = a.Delegates.TicketFor(ctx, event.Platform, event.SenderID, event.ChannelID, recent[0].ID)
+	case 2:
+		ticket, err = a.Delegates.TicketFor(ctx, event.Platform, event.SenderID, event.ChannelID, parts[1])
+		if ticket == nil {
+			if parsedPage, parseErr := strconv.Atoi(parts[1]); parseErr == nil && parsedPage >= 1 {
+				page = parsedPage
+				recent, _ := a.Delegates.TicketsFor(ctx, event.Platform, event.SenderID, event.ChannelID, 1)
+				if len(recent) > 0 {
+					ticket, err = a.Delegates.TicketFor(ctx, event.Platform, event.SenderID, event.ChannelID, recent[0].ID)
+				}
+			}
+		}
+	case 3:
 		parsedPage, parseErr := strconv.Atoi(parts[2])
 		if parseErr != nil || parsedPage < 1 {
-			a.replyText(ctx, event, "页码必须是大于 0 的整数。用法：/task <工单编号> [页码]")
+			a.replyText(ctx, event, "页码必须是大于 0 的整数。用法：/task [工单编号] [页码]")
 			return
 		}
 		page = parsedPage
+		ticket, err = a.Delegates.TicketFor(ctx, event.Platform, event.SenderID, event.ChannelID, parts[1])
 	}
-	ticket, err := a.Delegates.TicketFor(ctx, event.Platform, event.SenderID, event.ChannelID, parts[1])
 	if ticket == nil {
 		if err != nil {
 			slog.Warn("superagent: 查询工单失败", "channel", event.ChannelID, "err", err)
@@ -87,6 +116,9 @@ func (a *SuperAgent) handleTaskCommand(ctx context.Context, event *entity.Sensor
 	}
 	if ticket.Worker != "" {
 		fmt.Fprintf(&sb, "- **执行通道**：`%s`\n", ticket.Worker)
+	}
+	if ticket.Model != "" {
+		fmt.Fprintf(&sb, "- **执行模型**：`%s`\n", ticket.Model)
 	}
 	timeRange := ticket.CreatedAt.Format("2006-01-02 15:04:05")
 	if ticket.UpdatedAt.After(ticket.CreatedAt) {

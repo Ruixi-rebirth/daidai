@@ -51,12 +51,7 @@ func (a *SuperAgent) handleCognitionFailure(thinkCtx context.Context, event *ent
 	}
 	sendCtx, cancel := context.WithTimeout(thinkCtx, 15*time.Second)
 	defer cancel()
-	if err := a.transmitReplyText(sendCtx, event, errorReply); err != nil {
-		return
-	}
-	commitCtx, commitCancel := context.WithTimeout(thinkCtx, 15*time.Second)
-	a.commitCognitionReply(commitCtx, event, errorReply)
-	commitCancel()
+	_ = a.transmitReplyText(sendCtx, event, errorReply)
 }
 
 func uncertainExecutionReply(err error) string {

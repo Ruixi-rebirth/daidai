@@ -23,6 +23,7 @@ type Cortex struct {
 	hands            entity.Hands
 	vision           *vision.Engine
 	workspaces       *entity.WorkspaceManager
+	delegates        *entity.Delegates
 	inbox            *media.Inbox
 	groupExpressions *groupchat.Store
 	drafts           *db.Manager
@@ -36,6 +37,7 @@ type CortexConfig struct {
 	Hands            entity.Hands
 	Vision           *vision.Engine
 	Workspaces       *entity.WorkspaceManager
+	Delegates        *entity.Delegates
 	Inbox            *media.Inbox
 	GroupExpressions *groupchat.Store
 	Drafts           *db.Manager
@@ -50,6 +52,7 @@ func NewCortex(cfg CortexConfig) *Cortex {
 		hands:            cfg.Hands,
 		vision:           cfg.Vision,
 		workspaces:       cfg.Workspaces,
+		delegates:        cfg.Delegates,
 		inbox:            cfg.Inbox,
 		groupExpressions: cfg.GroupExpressions,
 		drafts:           cfg.Drafts,

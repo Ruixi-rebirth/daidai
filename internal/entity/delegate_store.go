@@ -159,7 +159,29 @@ func prioritizeActiveTickets(tickets []*Ticket, limit int) []*Ticket {
 	return selected
 }
 
+func matchTicketIdentifier(candidateID, rawQuery string) bool {
+	q := strings.ToLower(strings.TrimSpace(rawQuery))
+	id := strings.ToLower(strings.TrimSpace(candidateID))
+	if q == "" || id == "" {
+		return false
+	}
+	if id == q {
+		return true
+	}
+	if len(q) < 4 {
+		return false
+	}
+	if strings.HasPrefix(id, q) {
+		return true
+	}
+	if !strings.HasPrefix(q, "tkt-") && !strings.HasPrefix(q, "tkt_") {
+		return strings.HasPrefix(id, "tkt-"+q) || strings.HasPrefix(id, "tkt_"+q)
+	}
+	return false
+}
+
 func (d *Delegates) TicketFor(ctx context.Context, platform, requesterID, channelID, ticketID string) (*Ticket, error) {
+	ticketID = strings.TrimSpace(ticketID)
 	d.mu.RLock()
 	manager := d.ticketDB
 	if t, ok := d.tickets[ticketID]; ok && t.Platform == platform && t.RequesterID == requesterID && t.ChannelID == channelID {
@@ -170,7 +192,28 @@ func (d *Delegates) TicketFor(ctx context.Context, platform, requesterID, channe
 		}
 		return &cp, nil
 	}
+	var prefixMatch *Ticket
+	ambiguous := false
+	for _, t := range d.tickets {
+		if t.Platform != platform || t.RequesterID != requesterID || t.ChannelID != channelID {
+			continue
+		}
+		if matchTicketIdentifier(t.ID, ticketID) {
+			if prefixMatch != nil {
+				ambiguous = true
+				break
+			}
+			cp := *t
+			prefixMatch = &cp
+		}
+	}
 	d.mu.RUnlock()
+	if prefixMatch != nil && !ambiguous {
+		if prefixMatch.persistenceWarning != "" {
+			return prefixMatch, fmt.Errorf("%s", prefixMatch.persistenceWarning)
+		}
+		return prefixMatch, nil
+	}
 	if manager == nil {
 		return nil, fmt.Errorf("工单历史存储未配置")
 	}
