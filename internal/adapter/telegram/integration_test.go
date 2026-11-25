@@ -134,12 +134,23 @@ func TestGroupAccessAndCommandTargets(t *testing.T) {
 	if err := c.handle(context.Background(), m, handle); err != nil {
 		t.Fatal(err)
 	}
+	// Replying to another human while casually mentioning BotName must stay observed (not addressed).
+	m.ID = 4
+	m.Text = "你看呆呆刚才发的图"
+	m.Reply = &message{ID: 1, Text: "普通发言", From: &user{ID: 88, FirstName: "OtherHuman"}}
+	if err := c.handle(context.Background(), m, handle); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 || !events[2].GroupMessageObserved {
+		t.Fatalf("replying to another human while mentioning bot name should not hijack conversation: %+v", events)
+	}
+	m.Reply = nil
 	m.From.IsBot = true
 	m.Text = "呆呆你好"
 	if err := c.handle(context.Background(), m, handle); err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 2 {
+	if len(events) != 3 {
 		t.Fatal("responded to another bot or its command")
 	}
 }

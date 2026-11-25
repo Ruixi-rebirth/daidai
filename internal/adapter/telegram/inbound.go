@@ -41,7 +41,13 @@ func (c *Channel) handle(ctx context.Context, m *message, handler func(*entity.S
 		body = strings.TrimSpace(m.Caption)
 	}
 	group := m.Chat.Type != "private"
-	addressed := !group || strings.Contains(strings.ToLower(body), "@"+strings.ToLower(c.bot.Username)) || strings.Contains(body, config.BotName()) || (m.Reply != nil && m.Reply.From != nil && m.Reply.From.ID == c.bot.ID)
+	botName := config.BotName()
+	repliedBot := m.Reply != nil && m.Reply.From != nil && m.Reply.From.ID == c.bot.ID
+	repliedOther := group && m.Reply != nil && !repliedBot
+	mentionedBotUsername := c.bot.Username != "" && strings.Contains(strings.ToLower(body), "@"+strings.ToLower(c.bot.Username))
+	calledBotAtStart := botName != "" && strings.HasPrefix(body, botName)
+	namedBot := botName != "" && strings.Contains(body, botName)
+	addressed := !group || mentionedBotUsername || repliedBot || calledBotAtStart || (!repliedOther && namedBot)
 	// Normalize /command@Bot without stripping suffixes intended for another bot.
 	if strings.HasPrefix(body, "/") {
 		command, rest, _ := strings.Cut(body, " ")
@@ -89,7 +95,8 @@ func (c *Channel) handle(ctx context.Context, m *message, handler func(*entity.S
 	// Persist the message's own attachments and its reference separately. A
 	// flattened processing list must never become the next stored quote node.
 	inboundRecord := recordFromEvent(event, 0)
-	currentAttachments := append(append([]*core.Attachment(nil), event.Images...), event.Files...)
+	currentFiles := append([]*core.Attachment(nil), event.Files...)
+	currentAttachments := append(append([]*core.Attachment(nil), event.Images...), currentFiles...)
 	for quoted := event.ReplyContext; quoted != nil; quoted = quoted.ReplyContext {
 		for _, attachment := range quoted.Files {
 			if attachment == nil {
@@ -113,8 +120,8 @@ func (c *Channel) handle(ctx context.Context, m *message, handler func(*entity.S
 			event.PendingImages, event.OmittedPendingImages = c.Inbox.PendingKind(scope, core.AttachmentImage)
 			event.PendingFiles, event.OmittedPendingFiles = c.Inbox.PendingKind(scope, core.AttachmentFile)
 			c.Inbox.RememberPending(scope, currentAttachments)
-		} else if len(event.Files) > 0 {
-			c.Inbox.RememberPending(scope, event.Files)
+		} else if len(currentFiles) > 0 {
+			c.Inbox.RememberPending(scope, currentFiles)
 		}
 	}
 	if body == "" && len(event.Images) == 0 && len(event.Files) == 0 {

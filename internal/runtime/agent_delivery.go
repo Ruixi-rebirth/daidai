@@ -40,11 +40,19 @@ func (a *SuperAgent) transmitReplyTextDelivered(ctx context.Context, event *enti
 }
 
 func addressReply(utterance *entity.Utterance, event *entity.SensoryEvent) {
+	if event.GroupInterjection {
+		if utterance.TargetUserID == "" && len(utterance.MentionUserIDs) > 0 {
+			utterance.TargetUserID = utterance.MentionUserIDs[0]
+		}
+		event.ReplyTargetID = utterance.TargetUserID
+		return
+	}
 	if utterance.TargetUserID == "" {
 		utterance.TargetUserID = event.SenderID
 	}
-	if event.Platform == "qq" && event.IsGroup && !event.GroupInterjection && len(utterance.MentionUserIDs) == 0 && event.SenderID != "" {
-		utterance.MentionUserIDs = []string{event.SenderID}
+	event.ReplyTargetID = utterance.TargetUserID
+	if event.Platform == "qq" && event.IsGroup && len(utterance.MentionUserIDs) == 0 && utterance.TargetUserID != "" {
+		utterance.MentionUserIDs = []string{utterance.TargetUserID}
 	}
 }
 

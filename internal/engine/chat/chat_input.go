@@ -29,12 +29,13 @@ type chatImageContext struct {
 }
 
 type chatRequestContext struct {
-	QuotedMessage  *quotedMessageContext `json:"quoted_message"`
-	CurrentRequest string                `json:"current_request"`
-	Images         *chatImageContext     `json:"images,omitempty"`
-	Files          []chatFileContext     `json:"files,omitempty"`
-	OmittedFiles   int                   `json:"omitted_current_files,omitempty"`
-	OmittedPending int                   `json:"omitted_pending_files,omitempty"`
+	QuotedMessage    *quotedMessageContext `json:"quoted_message"`
+	CurrentRequest   string                `json:"current_request"`
+	MentionedMembers []string              `json:"mentioned_members,omitempty"`
+	Images           *chatImageContext     `json:"images,omitempty"`
+	Files            []chatFileContext     `json:"files,omitempty"`
+	OmittedFiles     int                   `json:"omitted_current_files,omitempty"`
+	OmittedPending   int                   `json:"omitted_pending_files,omitempty"`
 }
 
 func (c *Cortex) buildChatInput(ctx context.Context, event *entity.SensoryEvent) (*chatInput, error) {
@@ -78,9 +79,24 @@ func (c *Cortex) buildChatInput(ctx context.Context, event *entity.SensoryEvent)
 
 	remainingQuotedRunes := core.MaxQuotedMessageRunes
 	quotedMessage := quotedMessageContextFromEvent(event.ReplyContext, 0, &remainingQuotedRunes)
+	var mentionedMembers []string
+	if event.IsGroup && len(event.MentionedUsers) > 0 {
+		seen := make(map[string]struct{}, len(event.MentionedUsers))
+		for _, u := range event.MentionedUsers {
+			name := strings.TrimSpace(u.Name)
+			if name == "" {
+				continue
+			}
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			mentionedMembers = append(mentionedMembers, name)
+		}
+	}
 	request := chatRequestContext{
-		QuotedMessage: quotedMessage, CurrentRequest: userContent, Files: files,
-		OmittedFiles: event.OmittedFiles, OmittedPending: event.OmittedPendingFiles,
+		QuotedMessage: quotedMessage, CurrentRequest: userContent, MentionedMembers: mentionedMembers,
+		Files: files, OmittedFiles: event.OmittedFiles, OmittedPending: event.OmittedPendingFiles,
 	}
 	if len(currentImages) > 0 || omittedCurrentImages > 0 || len(quotedImages) > 0 || omittedQuotedImages > 0 {
 		request.Images = &chatImageContext{

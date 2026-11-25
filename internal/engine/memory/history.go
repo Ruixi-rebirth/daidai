@@ -13,6 +13,38 @@ import (
 	"daidai/internal/groupchat"
 )
 
+func historyQuoteAnchor(reply *entity.SensoryEvent) string {
+	if reply == nil {
+		return ""
+	}
+	raw := strings.TrimSpace(reply.Content)
+	if strings.HasPrefix(raw, "[引用") || strings.HasPrefix(raw, "[QQ ") || strings.HasPrefix(raw, "[用户选中的引用片段]") {
+		raw = strings.TrimSpace(strings.TrimPrefix(raw, "[用户选中的引用片段]"))
+		if strings.HasPrefix(raw, "[引用") || strings.HasPrefix(raw, "[QQ ") {
+			raw = ""
+		}
+	}
+	for strings.HasPrefix(raw, "[回复 ") || strings.HasPrefix(raw, "[回复引用:") {
+		end := strings.IndexByte(raw, ']')
+		if end < 0 {
+			break
+		}
+		raw = strings.TrimSpace(raw[end+1:])
+	}
+	snippet := core.TruncateRunes(strings.Join(strings.Fields(raw), " "), 36, "…")
+	author := strings.TrimSpace(reply.SenderName)
+	switch {
+	case author != "" && snippet != "":
+		return fmt.Sprintf("[回复 %s: 「%s」]", author, snippet)
+	case author != "":
+		return fmt.Sprintf("[回复 %s]", author)
+	case snippet != "":
+		return fmt.Sprintf("[回复引用: 「%s」]", snippet)
+	default:
+		return ""
+	}
+}
+
 func historyUserText(event *entity.SensoryEvent) string {
 	if event == nil {
 		return ""
@@ -20,6 +52,12 @@ func historyUserText(event *entity.SensoryEvent) string {
 	userText := strings.TrimSpace(core.TruncateRunes(event.Content, core.MaxUserMessageRunes, "\n[消息过长，后续内容已截断]"))
 	if entity.IsSensitiveAuthCommand(event.Content) {
 		userText = "[OAuth authorization code redacted]"
+	} else if anchor := historyQuoteAnchor(event.ReplyContext); anchor != "" {
+		if userText != "" {
+			userText = core.TruncateRunes(anchor+" "+userText, core.MaxUserMessageRunes, "\n[消息过长，后续内容已截断]")
+		} else {
+			userText = anchor
+		}
 	}
 	var notes []string
 	if note := strings.TrimSpace(event.HistoryAttachmentNote); note != "" {
@@ -29,6 +67,19 @@ func historyUserText(event *entity.SensoryEvent) string {
 		notes = append(notes, "[图片内容: "+summary+"]")
 	}
 	return core.AppendTextWithinRuneLimit(userText, strings.Join(notes, "\n"), core.MaxUserMessageRunes, "\n[原消息过长，已截短以保留附件信息]")
+}
+
+func replyTargetUID(event *entity.SensoryEvent) string {
+	if event == nil {
+		return ""
+	}
+	if target := strings.TrimSpace(event.ReplyTargetID); target != "" {
+		return target
+	}
+	if event.GroupInterjection {
+		return ""
+	}
+	return event.SenderID
 }
 
 func isNonConversationalCommandEvent(event *entity.SensoryEvent) bool {
@@ -104,8 +155,9 @@ func (m *MemoryEngine) Commit(ctx context.Context, event *entity.SensoryEvent, r
 	visionSummary := core.TruncateRunes(event.VisionSummary, core.MaxVisionSummaryRunes, "\n[视觉摘要过长，后续内容已截断]")
 	replyText = core.TruncateRunes(replyText, core.MaxUserMessageRunes, "\n[消息过长，后续内容已截断]")
 	userText, userMsgID := m.commitInboundHistory(ctx, dbMgr, event, visionSummary)
-	botMsgID := m.commitBotHistory(ctx, dbMgr, event, chatType, replyText, userMsgID)
-	if userMsgID > 0 && botMsgID > 0 && event.SenderID != "" && event.GroupExpression == "" && !event.SkipFactExtraction {
+	targetUID := replyTargetUID(event)
+	botMsgID := m.commitBotHistory(ctx, dbMgr, event, chatType, replyText, targetUID, userMsgID)
+	if userMsgID > 0 && botMsgID > 0 && event.SenderID != "" && targetUID == event.SenderID && event.GroupExpression == "" && !event.SkipFactExtraction {
 		if _, err := dbMgr.BumpUserRelationInteraction(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup, event.OccurredAt); err != nil {
 			slog.Warn("memory: 更新用户互动计数失败", "platform", event.Platform, "channel", event.ChannelID, "err", err)
 		}
@@ -139,7 +191,7 @@ func (m *MemoryEngine) commitInboundHistory(ctx context.Context, dbMgr *db.Manag
 	return userText, userMsgID
 }
 
-func (m *MemoryEngine) commitBotHistory(ctx context.Context, dbMgr *db.Manager, event *entity.SensoryEvent, chatType, replyText string, userMsgID int64) int64 {
+func (m *MemoryEngine) commitBotHistory(ctx context.Context, dbMgr *db.Manager, event *entity.SensoryEvent, chatType, replyText, targetUID string, userMsgID int64) int64 {
 	if replyText == "" {
 		return 0
 	}
@@ -147,7 +199,11 @@ func (m *MemoryEngine) commitBotHistory(ctx context.Context, dbMgr *db.Manager, 
 	if event.IsGroup && event.GroupExpression == groupchat.Dream {
 		historyText = fmt.Sprintf("[%s的梦境联想：虚构故事，不是群成员的真实经历]\n%s", config.BotName(), replyText)
 	}
-	botMsgID, err := dbMgr.LogBotReply(ctx, event.Platform, chatType, event.ChannelID, historyText, event.SenderID, userMsgID)
+	replyToMsgID := userMsgID
+	if targetUID == "" {
+		replyToMsgID = 0
+	}
+	botMsgID, err := dbMgr.LogBotReply(ctx, event.Platform, chatType, event.ChannelID, historyText, targetUID, replyToMsgID)
 	if err != nil {
 		slog.Warn("memory: 保存机器人回复失败", "platform", event.Platform, "channel", event.ChannelID, "err", err)
 	}

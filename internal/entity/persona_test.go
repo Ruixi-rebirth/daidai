@@ -31,6 +31,9 @@ func TestCompilePromptScopesGroupAndPartnerRules(t *testing.T) {
 	if strings.Contains(privatePrompt, "不必每句硬接梗") || !strings.Contains(privatePrompt, "敏锐网感") {
 		t.Fatal("persona should preserve internet meme literacy rather than dampening playful banter")
 	}
+	if strings.Contains(groupPrompt, "（如‘？’") || strings.Contains(groupPrompt, "‘你好怪’）") {
+		t.Fatal("persona prompt must not provide canned robotic catchphrases like 你好怪 or leading question mark templates")
+	}
 
 	voice := persona.CompileGroupVoicePrompt()
 	for _, rule := range persona.Rules {

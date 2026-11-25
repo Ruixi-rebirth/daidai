@@ -16,11 +16,12 @@ import (
 )
 
 var (
-	faceTagPattern        = regexp.MustCompile(`[\[【]\s*脸\s*[:：]\s*([^\]】\n]{1,12}?)\s*[\]】]`)
-	leakedPromptPattern   = regexp.MustCompile(`【(?:你的视觉观察|此刻内在节律|近期口癖去重|熟悉度分寸|对方近期情绪底色|你心里对 TA 的印象)[^】\n]*】?\s*`)
-	fullWidthParenPattern = regexp.MustCompile(`（([^（）\n]{1,24})）`)
-	halfWidthParenPattern = regexp.MustCompile(`\(([^()\n]{1,24})\)`)
-	asteriskActionPattern = regexp.MustCompile(`\*([^*\n]{1,18})\*`)
+	faceTagPattern         = regexp.MustCompile(`[\[【]\s*脸\s*[:：]\s*([^\]】\n]{1,12}?)\s*[\]】]`)
+	leakedPromptPattern    = regexp.MustCompile(`【(?:你的视觉观察|此刻内在节律|近期口癖去重|熟悉度分寸|对方近期情绪底色|你心里对 TA 的印象)[^】\n]*】?\s*`)
+	leadingReplyTagPattern = regexp.MustCompile(`^\[(?:对\s*[^\]\n]{1,40}?\s*说|对\s+[^\]\n]{1,40}|回\s+[^\]\n]{1,40}|回复\s+[^\]\n]{1,40})\]\s*[:：]\s*`)
+	fullWidthParenPattern  = regexp.MustCompile(`（([^（）\n]{1,24})）`)
+	halfWidthParenPattern  = regexp.MustCompile(`\(([^()\n]{1,24})\)`)
+	asteriskActionPattern  = regexp.MustCompile(`\*([^*\n]{1,18})\*`)
 
 	aiSelfDisclosurePattern = regexp.MustCompile(
 		`(?i)我(?:是|只是|不过是|其实是|作为)(?:一个|个|一名|款)?\s*(?:ai|人工智能|聊天机器人|聊天程序|机器人|智能助手|大?语言模型|对话模型|虚拟助手)` +
@@ -41,7 +42,7 @@ var (
 	)
 )
 
-var aiDismissalPool = [...]string{"？", "无聊", "又来", "行吧", "你好闲"}
+var aiDismissalPool = [...]string{"又来这套", "行吧随你怎么想", "一天天净想这些", "换点新鲜的聊呗", "随你啦"}
 
 var stageActionCues = [...]string{
 	"懒懒", "小声", "轻声", "低声", "歪头", "低头", "抬头", "摇头",
@@ -63,6 +64,7 @@ var personaTicGroups = [...]personaTicGroup{
 	{label: "犯困/低电量", tokens: []string{"低电量", "没电了", "好困", "打哈欠", "犯困"}},
 	{label: "发呆/放空", tokens: []string{"发呆", "放空", "走神"}},
 	{label: "窗边/听雨", tokens: []string{"窗边", "窗台", "听雨"}},
+	{label: "好怪/无聊套话", tokens: []string{"你好怪", "好怪", "真怪", "无聊"}},
 }
 
 func isPartnerSystemQuery(event *entity.SensoryEvent, userRequest string) bool {
@@ -148,18 +150,23 @@ func isTheatricalStageDirection(inner string) bool {
 }
 
 func stripBotNamePrefix(text string) string {
-	botName := strings.TrimSpace(config.BotName())
-	if botName == "" {
-		return text
-	}
 	trimmed := strings.TrimLeft(text, " \t")
-	for _, prefix := range []string{
-		"[" + botName + "]:", "[" + botName + "]：",
-		botName + ":", botName + "：",
-	} {
-		if strings.HasPrefix(trimmed, prefix) {
-			return strings.TrimLeft(trimmed[len(prefix):], " \t")
+	if loc := leadingReplyTagPattern.FindStringIndex(trimmed); loc != nil {
+		trimmed = strings.TrimLeft(trimmed[loc[1]:], " \t")
+	}
+	botName := strings.TrimSpace(config.BotName())
+	if botName != "" {
+		for _, prefix := range []string{
+			"[" + botName + "]:", "[" + botName + "]：",
+			botName + ":", botName + "：",
+		} {
+			if strings.HasPrefix(trimmed, prefix) {
+				return strings.TrimLeft(trimmed[len(prefix):], " \t")
+			}
 		}
+	}
+	if trimmed != strings.TrimLeft(text, " \t") {
+		return trimmed
 	}
 	return text
 }
@@ -267,13 +274,17 @@ func recentPersonaTicHint(history []core.ChatMessage, currentRequest string) str
 		return ""
 	}
 	var assistantRecent []string
+	hasLeadingQuestionMark := false
 	for i := len(history) - 1; i >= 0 && len(assistantRecent) < 6; i-- {
 		if history[i].Role != core.RoleAssistant {
 			continue
 		}
-		txt := strings.TrimSpace(history[i].Content)
+		txt := strings.TrimSpace(leadingReplyTagPattern.ReplaceAllString(strings.TrimSpace(history[i].Content), ""))
 		if txt == "" || utf8.RuneCountInString(txt) > 180 {
 			continue
+		}
+		if strings.HasPrefix(txt, "？") || strings.HasPrefix(txt, "?") {
+			hasLeadingQuestionMark = true
 		}
 		assistantRecent = append(assistantRecent, txt)
 	}
@@ -282,6 +293,9 @@ func recentPersonaTicHint(history []core.ChatMessage, currentRequest string) str
 	}
 	joinedRecent := strings.Join(assistantRecent, "\n")
 	var repeated []string
+	if hasLeadingQuestionMark {
+		repeated = append(repeated, "单问号起手（？开头）")
+	}
 	for _, group := range personaTicGroups {
 		askedByUser := false
 		for _, tok := range group.tokens {

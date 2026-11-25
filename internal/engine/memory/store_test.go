@@ -276,3 +276,71 @@ func TestCommitSkipsSlashCommandsAndCleansEphemeralControlTurns(t *testing.T) {
 		t.Fatalf("expected zero polluted command/control messages in DB, got %+v (err=%v)", recents, err)
 	}
 }
+
+func TestGroupRecipientTrackingQuoteAnchorsAndInterjectionScope(t *testing.T) {
+	mgr := db.NewManager(t.TempDir())
+	t.Cleanup(func() { _ = mgr.Close() })
+	ctx := context.Background()
+	engine := NewMemoryEngine(nil)
+	engine.SetDBManager(mgr)
+	now := time.Now()
+
+	// 1. Alice asks Daidai -> Daidai answers Alice (ReplyToUID = alice)
+	aliceEv := &entity.SensoryEvent{
+		Platform: "qq", IsGroup: true, ChannelID: "g-99",
+		SenderID: "u-alice", SenderName: "Alice", Content: "帮我看下 Nix 编译报错",
+		RawMessageID: "m1", OccurredAt: now,
+	}
+	engine.Commit(ctx, aliceEv, "把完整报错贴出来看看")
+
+	// 2. Unaddressed room-wide interjection / chatter must NOT bind ReplyToUID to Bob
+	bobChatter := &entity.SensoryEvent{
+		Platform: "qq", IsGroup: true, ChannelID: "g-99",
+		SenderID: "u-bob", SenderName: "Bob", Content: "今天天气真不错",
+		RawMessageID: "m2", GroupInterjection: true, OccurredAt: now.Add(10 * time.Second),
+	}
+	engine.Commit(ctx, bobChatter, "适合晒太阳")
+
+	// 3. Bob quotes Alice's message with a short reaction ("笑死")
+	bobQuote := &entity.SensoryEvent{
+		Platform: "qq", IsGroup: true, ChannelID: "g-99",
+		SenderID: "u-bob", SenderName: "Bob", Content: "笑死",
+		ReplyContext: &entity.SensoryEvent{SenderName: "Alice", Content: "帮我看下 Nix 编译报错"},
+		RawMessageID: "m3", GroupMessageObserved: true, OccurredAt: now.Add(20 * time.Second),
+	}
+	if err := engine.RecordInbound(ctx, bobQuote); err != nil {
+		t.Fatal(err)
+	}
+
+	// 4. When Bob now talks to Daidai:
+	// - Alice's bot reply is marked "[对 Alice说]: ..."
+	// - Room-wide interjection has empty ReplyToUID (not bound to Bob's peer thread)
+	// - Bob's quote preserves "[回复 Alice: 「帮我看下 Nix 编译报错」] 笑死"
+	bobTurn := &entity.SensoryEvent{
+		Platform: "qq", IsGroup: true, ChannelID: "g-99",
+		SenderID: "u-bob", SenderName: "Bob", Content: "今晚吃啥",
+		RawMessageID: "m4", OccurredAt: now.Add(30 * time.Second),
+	}
+	working := engine.WorkingContext(ctx, bobTurn, 10)
+	var all strings.Builder
+	for _, m := range working {
+		all.WriteString(m.Content + "\n")
+	}
+	got := all.String()
+	if !strings.Contains(got, "[对 Alice说]: 把完整报错贴出来看看") {
+		t.Fatalf("expected bot reply to other member to be labeled [对 Alice说], got:\n%s", got)
+	}
+	if !strings.Contains(got, "[Bob]: [回复 Alice: 「帮我看下 Nix 编译报错」] 笑死") {
+		t.Fatalf("expected quoted short reaction to retain compact quote anchor, got:\n%s", got)
+	}
+
+	stored, err := mgr.RecentMessages(ctx, "qq", "group", "g-99", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, msg := range stored {
+		if msg.IsBot && msg.Text == "适合晒太阳" && msg.ReplyToUID != "" {
+			t.Fatalf("unaddressed group interjection should have empty ReplyToUID, got %q", msg.ReplyToUID)
+		}
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"daidai/internal/config"
 	"daidai/internal/entity"
 )
 
@@ -71,6 +72,9 @@ func (q *QQChannel) resolveInboundQuote(d map[string]any, isGroup bool, convID, 
 				replyCtx.ContentKind = record.ContentKind
 				if record.Direction == "outbound" {
 					quotedBot = true
+					if replyCtx.SenderName == "" {
+						replyCtx.SenderName = config.BotName()
+					}
 				}
 				slog.Info("qq: 引用命中语义正文索引", "msgID", msgID, "hasRefIndex", strings.HasPrefix(cacheKey, "REFIDX_"), "contentKind", record.ContentKind, "textComplete", record.TextComplete, "refContentBytes", len(replyCtx.Content), "quotedBot", quotedBot)
 			}

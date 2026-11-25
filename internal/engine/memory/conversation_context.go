@@ -54,6 +54,7 @@ func (m *MemoryEngine) WorkingContext(ctx context.Context, event *entity.Sensory
 	}
 	activeStart := activeConversationStart(recents, anchorTime)
 	ambiguousNames := collidingGroupSpeakerNames(recents[activeStart:], event)
+	memberNames := groupMemberNamesByID(recents, event, ambiguousNames)
 
 	// 从最新向最旧反向累计字符预算；闲置断档已由 activeConversationStart 统一裁定。
 	var selected []core.ChatMessage
@@ -72,6 +73,11 @@ func (m *MemoryEngine) WorkingContext(ctx context.Context, event *entity.Sensory
 				replyTarget = "other_member"
 				if h.ReplyToUID == event.SenderID {
 					replyTarget = "current_speaker"
+				}
+				if (event.GroupInterjection || h.ReplyToUID != event.SenderID) && !strings.HasPrefix(strings.TrimSpace(content), "[") {
+					if targetLabel := memberNames[h.ReplyToUID]; targetLabel != "" {
+						content = fmt.Sprintf("[对 %s说]: %s", targetLabel, content)
+					}
 				}
 			}
 		} else if h.IsGroup {
@@ -148,6 +154,36 @@ func formatGroupSpeakerLabel(name, userID string, colliding map[string]bool) str
 		}
 	}
 	return trimmed
+}
+
+func groupMemberNamesByID(messages []db.StoredMessage, event *entity.SensoryEvent, colliding map[string]bool) map[string]string {
+	if event == nil || !event.IsGroup {
+		return nil
+	}
+	names := make(map[string]string)
+	put := func(userID, name string) {
+		uid := strings.TrimSpace(userID)
+		if uid == "" {
+			return
+		}
+		if _, exists := names[uid]; exists && strings.TrimSpace(name) == "" {
+			return
+		}
+		names[uid] = formatGroupSpeakerLabel(name, uid, colliding)
+	}
+	for _, msg := range messages {
+		if !msg.IsBot {
+			put(msg.UserID, msg.Name)
+		}
+	}
+	for _, p := range event.GroupParticipants {
+		put(p.ID, p.Name)
+	}
+	for _, u := range event.MentionedUsers {
+		put(u.ID, u.Name)
+	}
+	put(event.SenderID, event.SenderName)
+	return names
 }
 
 // activeConversationStart returns the first message after the latest idle gap.

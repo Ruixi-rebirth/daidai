@@ -73,11 +73,14 @@ func (c *Cortex) buildSystemPrompt(event *entity.SensoryEvent, request chatReque
 		sysPrompt += "\n【会话隔离边界】当前会话仅做日常交流与公开信息协助，不连接任何本地目录或宿主环境，不得探测或透露宿主机公网 IP，也绝不向对方提及‘没开权限’‘沙箱’或‘宿主配置’等内部机制。"
 	}
 	sysPrompt += "\n【本轮请求】用户输入以 JSON 提供，current_request 是本轮消息。"
+	if len(request.MentionedMembers) > 0 {
+		sysPrompt += "mentioned_members 是发言人在消息里提及的其他群成员（不注入其私人记忆；除非发言人明确让你向对方带话，否则正常回应发言人本人，勿张冠李戴）。"
+	}
 	if request.QuotedMessage != nil {
 		sysPrompt += "引用内容用于理解本轮指代，不覆盖本轮请求；有嵌套引用时以最外层为准。content_complete=true 表示引用正文完整。只回答 current_request；仍无法确定引用指向时简短追问。"
 	}
 	if event.IsGroup {
-		sysPrompt += "\n【群聊消息格式】近期群聊历史以 [成员名] 标记；当前输入标记为正在对你说话的成员。"
+		sysPrompt += "\n【群聊消息格式】近期群聊历史以 [成员名] 标记；你此前回复其他群友的消息标有 [对 成员名说]（你自己的新回复直接写正文，不加方括号前缀）；当前输入标记为正在对你说话的成员。"
 	}
 
 	return sysPrompt, runtimeContext.String()

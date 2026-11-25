@@ -111,4 +111,20 @@ func TestRecentPersonaTicHintDetectsRepeatedPropsUnlessUserAsks(t *testing.T) {
 	if strings.Contains(catAskedHint, "猫/撸猫") {
 		t.Fatalf("should not suppress cat topic when user explicitly asks about cat: %q", catAskedHint)
 	}
+
+	groupHistory := []core.ChatMessage{
+		{Role: core.RoleAssistant, Content: "[对 小明说]: ？你好怪啊"},
+	}
+	groupHint := recentPersonaTicHint(groupHistory, "今天吃什么")
+	if !strings.Contains(groupHint, "单问号起手") || !strings.Contains(groupHint, "好怪/无聊套话") {
+		t.Fatalf("expected anti-tic hint to catch leading question mark and 你好怪 catchphrase across labeled group history, got %q", groupHint)
+	}
+	if strings.Contains(groupHint, "猫/撸猫") {
+		t.Fatalf("unrelated tic label triggered: %q", groupHint)
+	}
+
+	stripped, _, _ := sanitizePersonaText("[对 阿宅说]: 走，吃火锅去", "今晚吃啥", false, false)
+	if stripped != "走，吃火锅去" {
+		t.Fatalf("expected imitated [对 xxx说]: prefix to be stripped cleanly, got %q", stripped)
+	}
 }
