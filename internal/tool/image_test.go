@@ -187,16 +187,15 @@ func TestImageTool_GroupQuotaAndPartnerExemption(t *testing.T) {
 		t.Fatalf("expected collaborator to remain exempt when group guest drawing is disabled, got: %s", res.Text)
 	}
 
-	// Guest in private chat (authorized friend) is not limited by group quota.
-	guestPrivateCtx := entity.WithSensoryEvent(context.Background(), &entity.SensoryEvent{
-		Platform:             "qq",
-		ChannelID:            "guest-2",
-		SenderID:             "guest-2",
-		IsGroup:              false,
-		Role:                 entity.RoleGuest,
-		PrivateAccessGranted: true,
+	// Friend in private chat is not limited by group quota.
+	friendPrivateCtx := entity.WithSensoryEvent(context.Background(), &entity.SensoryEvent{
+		Platform:  "qq",
+		ChannelID: "guest-2",
+		SenderID:  "guest-2",
+		IsGroup:   false,
+		Role:      entity.RoleFriend,
 	})
-	res, err = imgTool.Execute(guestPrivateCtx, rawPrompt)
+	res, err = imgTool.Execute(friendPrivateCtx, rawPrompt)
 	if err != nil {
 		t.Fatalf("private guest Execute returned err: %v", err)
 	}

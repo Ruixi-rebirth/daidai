@@ -87,17 +87,17 @@ func TestMergedTurnPreservesEarliestHistoryBoundary(t *testing.T) {
 	}
 }
 
-func TestMergedTurnPreservesPrivateAccessAndInputMetadata(t *testing.T) {
+func TestMergedTurnPreservesRoleAndInputMetadata(t *testing.T) {
 	latest := &core.SensoryEvent{
 		Platform: "qq", ChannelID: "private", SenderID: "friend",
-		Role: core.RoleGuest, PrivateAccessGranted: true,
+		Role:          core.RoleFriend,
 		OmittedImages: 2, StillValid: func() bool { return false },
 	}
 	merged := mergeEvents([]*core.SensoryEvent{
-		{Content: "第一句", PrivateAccessGranted: true, OmittedImages: 1}, latest,
+		{Content: "第一句", Role: core.RoleFriend, OmittedImages: 1}, latest,
 	})
-	if !merged.PrivateAccessGranted || merged.StillValid == nil || merged.StillValid() {
-		t.Fatal("merged message lost its access or validity metadata")
+	if merged.Role != core.RoleFriend || merged.StillValid == nil || merged.StillValid() {
+		t.Fatal("merged message lost its role or validity metadata")
 	}
 	if merged.OmittedImages != 3 || latest.OmittedImages != 2 {
 		t.Fatalf("incorrect aggregate or mutated input: merged=%d latest=%d", merged.OmittedImages, latest.OmittedImages)

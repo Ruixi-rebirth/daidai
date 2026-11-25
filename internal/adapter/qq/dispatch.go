@@ -84,8 +84,7 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 		if q.immune != nil {
 			role = q.immune.ResolveRole(userID)
 		}
-		privateAccessGranted := !isGroup && (role == entity.RoleFriend || (role == entity.RoleGuest && q.immune != nil && q.immune.HasPrivateAccess(userID)))
-		if !isGroup && role == entity.RoleGuest && !privateAccessGranted {
+		if !isGroup && role == entity.RoleGuest {
 			q.handleUnprivilegedPrivateMessage(userID, senderName, msgID, content, currentImageCount, currentOmittedImages, currentFileCount, currentOmittedFiles)
 			return true
 		}
@@ -181,7 +180,6 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 			SenderID:              userID,
 			SenderName:            strings.TrimSpace(senderName),
 			Role:                  role,
-			PrivateAccessGranted:  privateAccessGranted,
 			Content:               strings.TrimSpace(content),
 			HistoryAttachmentNote: attachmentHistoryNote(currentImageCount, currentOmittedImages, currentFileCount, currentOmittedFiles),
 			Images:                images,
