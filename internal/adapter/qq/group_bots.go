@@ -8,13 +8,13 @@ import (
 	"strings"
 	"time"
 
-	"daidai/internal/db"
 	"daidai/internal/entity"
+	"daidai/internal/runtime"
 )
 
 func (q *QQChannel) handleGroupBotRegistryCommand(groupID, messageID, senderID string, role entity.UserRole, content string, eventData map[string]any) bool {
 	trimmed := strings.TrimSpace(content)
-	if !entity.IsAdapterSlashCommand("qq", trimmed) {
+	if !runtime.IsAdapterSlashCommand("qq", trimmed) {
 		return false
 	}
 	q.cancelPendingGroupInterjection(groupID)
@@ -36,14 +36,16 @@ func (q *QQChannel) handleGroupBotRegistryCommand(groupID, messageID, senderID s
 }
 
 func (q *QQChannel) loadKnownGroupBots(ctx context.Context) error {
-	value, err := db.DefaultManager().GetRuntimeState(ctx, "qq", "known_group_bots")
-	if err != nil {
-		return err
-	}
 	known := make(map[string]map[string]string)
-	if strings.TrimSpace(value) != "" {
-		if err := json.Unmarshal([]byte(value), &known); err != nil {
-			return fmt.Errorf("decode known group bots: %w", err)
+	if q.database != nil {
+		value, err := q.database.GetRuntimeState(ctx, "qq", "known_group_bots")
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(value) != "" {
+			if err := json.Unmarshal([]byte(value), &known); err != nil {
+				return fmt.Errorf("decode known group bots: %w", err)
+			}
 		}
 	}
 	q.knownGroupBotsMu.Lock()
@@ -61,14 +63,24 @@ func (q *QQChannel) isKnownGroupBot(groupID, memberID string) bool {
 func (q *QQChannel) setKnownGroupBot(ctx context.Context, groupID string, bot groupBotMention, marked bool) error {
 	q.knownGroupBotsMu.Lock()
 	defer q.knownGroupBotsMu.Unlock()
-	value, err := db.DefaultManager().GetRuntimeState(ctx, "qq", "known_group_bots")
-	if err != nil {
-		return err
-	}
 	known := make(map[string]map[string]string)
-	if strings.TrimSpace(value) != "" {
-		if err := json.Unmarshal([]byte(value), &known); err != nil {
-			return fmt.Errorf("decode known group bots: %w", err)
+	if q.database != nil {
+		value, err := q.database.GetRuntimeState(ctx, "qq", "known_group_bots")
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(value) != "" {
+			if err := json.Unmarshal([]byte(value), &known); err != nil {
+				return fmt.Errorf("decode known group bots: %w", err)
+			}
+		}
+	} else {
+		for gid, members := range q.knownGroupBots {
+			copied := make(map[string]string, len(members))
+			for mid, name := range members {
+				copied[mid] = name
+			}
+			known[gid] = copied
 		}
 	}
 	if known[groupID] == nil {
@@ -85,12 +97,14 @@ func (q *QQChannel) setKnownGroupBot(ctx context.Context, groupID string, bot gr
 			delete(known, groupID)
 		}
 	}
-	updated, err := json.Marshal(known)
-	if err != nil {
-		return err
-	}
-	if err := db.DefaultManager().SetRuntimeState(ctx, "qq", "known_group_bots", string(updated)); err != nil {
-		return err
+	if q.database != nil {
+		updated, err := json.Marshal(known)
+		if err != nil {
+			return err
+		}
+		if err := q.database.SetRuntimeState(ctx, "qq", "known_group_bots", string(updated)); err != nil {
+			return err
+		}
 	}
 	q.knownGroupBots = known
 	return nil

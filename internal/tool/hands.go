@@ -16,6 +16,7 @@ import (
 	"daidai/internal/entity"
 	"daidai/internal/groupchat"
 	"daidai/internal/media"
+	"daidai/internal/oci"
 	"daidai/internal/provider/llm"
 )
 
@@ -36,7 +37,7 @@ type HandsConfig struct {
 	AttachmentInbox  *media.Inbox
 	Database         *db.Manager
 	OCIConfig        *config.OCIConfig
-	OCIClient        *OCIClient
+	OCIClient        *oci.OCIClient
 	CloudflareConfig *config.CloudflareConfig
 	Briefing         *briefing.Service
 	BriefingOwners   map[string]string
@@ -74,7 +75,7 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 	if cfg.Vision != nil {
 		h.Register(NewImageAnalysisTool(cfg.Vision))
 	}
-	h.Register(NewSingboxLinksTool(cfg.Immune))
+	h.Register(oci.NewSingboxLinksTool(cfg.Immune))
 	if cfg.Workspaces != nil {
 		h.Register(NewWorkspaceTool(cfg.Workspaces, cfg.Immune, cfg.Delegates))
 	}
@@ -99,12 +100,12 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 		if cfg.OCIConfig != nil {
 			timezone = cfg.OCIConfig.Timezone
 		}
-		h.Register(NewOCIBillTool(cfg.OCIClient, timezone))
-		h.Register(NewOCIIPToolWithCloudflare(cfg.OCIClient, cfg.Immune, cfg.CloudflareConfig))
+		h.Register(oci.NewOCIBillTool(cfg.OCIClient, timezone))
+		h.Register(oci.NewOCIIPToolWithCloudflare(cfg.OCIClient, cfg.Immune, cfg.CloudflareConfig))
 	} else if cfg.OCIConfig != nil && cfg.OCIConfig.Enabled {
-		if ociClient, err := NewOCIClient(context.Background(), *cfg.OCIConfig); err == nil {
-			h.Register(NewOCIBillTool(ociClient, cfg.OCIConfig.Timezone))
-			h.Register(NewOCIIPToolWithCloudflare(ociClient, cfg.Immune, cfg.CloudflareConfig))
+		if ociClient, err := oci.NewOCIClient(context.Background(), *cfg.OCIConfig); err == nil {
+			h.Register(oci.NewOCIBillTool(ociClient, cfg.OCIConfig.Timezone))
+			h.Register(oci.NewOCIIPToolWithCloudflare(ociClient, cfg.Immune, cfg.CloudflareConfig))
 		} else {
 			slog.Warn("初始化 OCI 客户端失败，跳过 OCI 相关工具注册", "err", err)
 		}

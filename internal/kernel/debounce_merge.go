@@ -39,14 +39,26 @@ func mergeEvents(events []*core.SensoryEvent) *core.SensoryEvent {
 	// Only fields aggregated below start empty.
 	merged := *latest
 	merged.HistoryRecordIDs = nil
+	merged.MentionedUsers = nil
 	merged.OmittedImages, merged.OmittedFiles = 0, 0
 	merged.OmittedPendingImages, merged.OmittedPendingFiles = 0, 0
 
 	var textParts []string
 	var allImages []*core.Attachment
 	var allFiles []*core.Attachment
+	mentioned := make(map[string]struct{})
 
 	for _, ev := range events {
+		for _, user := range ev.MentionedUsers {
+			if user.ID == "" {
+				continue
+			}
+			if _, exists := mentioned[user.ID]; exists {
+				continue
+			}
+			mentioned[user.ID] = struct{}{}
+			merged.MentionedUsers = append(merged.MentionedUsers, user)
+		}
 		for _, id := range ev.HistoryRecordIDs {
 			if id > 0 {
 				merged.HistoryRecordIDs = append(merged.HistoryRecordIDs, id)

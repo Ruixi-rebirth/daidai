@@ -49,7 +49,6 @@ func NewMemoryEngine(provider core.LLMProvider) *MemoryEngine {
 	}
 	asyncCtx, asyncCancel := context.WithCancel(context.Background())
 	return &MemoryEngine{
-		db:          db.DefaultManager(),
 		llm:         provider,
 		embedder:    emb,
 		asyncCtx:    asyncCtx,

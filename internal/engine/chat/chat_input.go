@@ -58,19 +58,17 @@ func (c *Cortex) buildChatInput(ctx context.Context, event *entity.SensoryEvent)
 		imageSources = append(imageSources, entity.QuotedImageSource)
 	}
 
-	if event.IsGroup {
-		speaker := strings.TrimSpace(event.SenderName)
-		if speaker == "" {
-			sid := strings.TrimSpace(event.SenderID)
-			if len(sid) > 6 {
-				sid = sid[:6]
-			}
-			if sid != "" {
-				speaker = "群成员#" + sid
-			} else {
-				speaker = "群成员"
-			}
+	var episodicContext string
+	var workingHistory []core.ChatMessage
+	if c.memory != nil {
+		if episodic := c.memory.RecallEpisodic(ctx, event); episodic != "" {
+			episodicContext = episodic
 		}
+		workingHistory = c.memory.WorkingContext(ctx, event)
+	}
+
+	if event.IsGroup {
+		speaker := groupCurrentSpeakerLabel(event, workingHistory)
 		if !event.GroupInterjection {
 			userContent = fmt.Sprintf("[%s (正在对你说话)]: %s", speaker, userContent)
 		} else {
@@ -93,11 +91,9 @@ func (c *Cortex) buildChatInput(ctx context.Context, event *entity.SensoryEvent)
 	// System instructions are assembled separately from runtime facts so they
 	// remain easy to review without mixing policy text into the chat flow.
 	sysPrompt, runtimeFacts := c.buildSystemPrompt(event, request)
-
-	var episodicContext string
-	if c.memory != nil {
-		if episodic := c.memory.RecallEpisodic(ctx, event); episodic != "" {
-			episodicContext = episodic
+	if c.persona != nil {
+		if ticHint := recentPersonaTicHint(workingHistory, event.Content); ticHint != "" {
+			runtimeFacts += ticHint + "\n"
 		}
 	}
 
@@ -122,9 +118,7 @@ func (c *Cortex) buildChatInput(ctx context.Context, event *entity.SensoryEvent)
 	}
 
 	// 注入近期工作记忆上下文 (以字符预算 12000 字与 2 小时闲置断档为主的动态滑动窗口)
-	if c.memory != nil {
-		messages = append(messages, c.memory.WorkingContext(ctx, event)...)
-	}
+	messages = append(messages, workingHistory...)
 	workingHistoryEnd := len(messages)
 
 	requestContext, err := json.Marshal(request)
@@ -144,4 +138,27 @@ func (c *Cortex) buildChatInput(ctx context.Context, event *entity.SensoryEvent)
 		workingHistoryEnd:   workingHistoryEnd,
 		imageSources:        imageSources,
 	}, nil
+}
+
+func groupCurrentSpeakerLabel(event *entity.SensoryEvent, workingHistory []core.ChatMessage) string {
+	speaker := strings.TrimSpace(event.SenderName)
+	sid := strings.TrimSpace(event.SenderID)
+	if len(sid) > 6 {
+		sid = sid[:6]
+	}
+	if speaker == "" {
+		if sid != "" {
+			return "群成员#" + sid
+		}
+		return "群成员"
+	}
+	if sid != "" {
+		prefix := "[" + speaker + "#"
+		for _, msg := range workingHistory {
+			if msg.Role == core.RoleUser && strings.HasPrefix(msg.Content, prefix) {
+				return speaker + "#" + sid
+			}
+		}
+	}
+	return speaker
 }

@@ -21,19 +21,6 @@ type Manager struct {
 	conns   map[string]*sql.DB
 }
 
-var (
-	defaultMgr  *Manager
-	defaultOnce sync.Once
-)
-
-// DefaultManager 全局默认单例 (位于 data/db/)
-func DefaultManager() *Manager {
-	defaultOnce.Do(func() {
-		defaultMgr = NewManager("data/db")
-	})
-	return defaultMgr
-}
-
 // NewManager 指定目录新建数据库管理器
 func NewManager(baseDir string) *Manager {
 	return &Manager{

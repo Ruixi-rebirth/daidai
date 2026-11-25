@@ -166,8 +166,9 @@ type SensoryEvent struct {
 	GroupExpression       string        // 已核验的群内表达类型：chatter/dream；仅用于交付后的记忆处理
 	SkipFactExtraction    bool          // 本轮操作不参与自动提炼个人事实
 	GroupParticipants     []GroupParticipant
-	OnProgress            func(string) // 认知耗时操作（如签发重型工单）时的即时进度回执回调
-	StillValid            func() bool  // 可选的队列代际校验；等待会话锁后用于丢弃已被 reset 作废的事件
+	MentionedUsers        []GroupParticipant // 本条消息明确 @ 的群成员；供需要精确目标身份的功能校验
+	OnProgress            func(string)       // 认知耗时操作（如签发重型工单）时的即时进度回执回调
+	StillValid            func() bool        // 可选的队列代际校验；等待会话锁后用于丢弃已被 reset 作废的事件
 }
 
 // IsPartnerPrivate 判断当前感知事件是否为核心伙伴在私聊下发起的最高信任级交互

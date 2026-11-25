@@ -16,8 +16,9 @@ import (
 	"daidai/internal/provider/llm"
 )
 
-func newMemoryEngine(cfg *config.Config, provider core.LLMProvider) *memory.MemoryEngine {
+func newMemoryEngine(cfg *config.Config, database *db.Manager, provider core.LLMProvider) *memory.MemoryEngine {
 	memEngine := memory.NewMemoryEngine(provider)
+	memEngine.SetDBManager(database)
 	embBaseURL := strings.TrimSpace(cfg.LLM.Embedding.BaseURL)
 	if embBaseURL == "" {
 		embBaseURL = "https://api.siliconflow.cn/v1"

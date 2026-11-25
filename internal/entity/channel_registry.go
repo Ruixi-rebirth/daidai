@@ -32,7 +32,7 @@ func (e *channelStartError) Error() string {
 
 func (e *channelStartError) Unwrap() error { return e.startErr }
 
-func (e *channelStartError) rollbackFailed() bool { return e.rollbackErr != nil }
+func (e *channelStartError) RollbackFailed() bool { return e.rollbackErr != nil }
 
 func NewChannelRegistry() *ChannelRegistry {
 	return &ChannelRegistry{

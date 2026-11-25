@@ -45,9 +45,9 @@ func (q *QQChannel) notifyOwnerOfPrivateAccessRequest(userID, displayName, messa
 	}
 
 	var pendingRequests []db.PrivateAccessRequest
-	if q.accessRequests != nil {
+	if q.database != nil {
 		reqCtx, reqCancel := context.WithTimeout(context.Background(), 3*time.Second)
-		reqs, err := q.accessRequests.ListPendingPrivateAccessRequests(reqCtx, "qq", 10)
+		reqs, err := q.database.ListPendingPrivateAccessRequests(reqCtx, "qq", 10)
 		reqCancel()
 		if err != nil {
 			slog.Warn("qq_channel: 查询待处理私聊权限申请失败", "err", err)
@@ -151,8 +151,8 @@ func (q *QQChannel) notifyOwnerOfPrivateAccessRequest(userID, displayName, messa
 	dedupeKey := fmt.Sprintf("private-access:%s:%d", userID, time.Now().UnixNano())
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	queued := false
-	if q.accessRequests != nil {
-		inserted, queueErr := q.accessRequests.EnqueuePendingNotification(ctx, "qq", ownerID, dedupeKey, "private_access_request", body)
+	if q.database != nil {
+		inserted, queueErr := q.database.EnqueuePendingNotification(ctx, "qq", ownerID, dedupeKey, "private_access_request", body)
 		if queueErr != nil {
 			slog.Warn("qq_channel: 新私聊权限申请通知入队失败", "channelID", ownerID, "userID", userID, "err", queueErr)
 		} else if !inserted {
@@ -163,7 +163,7 @@ func (q *QQChannel) notifyOwnerOfPrivateAccessRequest(userID, displayName, messa
 		}
 	}
 	if queued {
-		if err := q.accessRequests.ClaimPendingNotificationByKey(ctx, "qq", ownerID, dedupeKey); err != nil {
+		if err := q.database.ClaimPendingNotificationByKey(ctx, "qq", ownerID, dedupeKey); err != nil {
 			slog.Warn("qq_channel: 无法确认权限申请通知发送状态，跳过主动发送", "channelID", ownerID, "userID", userID, "err", err)
 			cancel()
 			return
@@ -172,7 +172,7 @@ func (q *QQChannel) notifyOwnerOfPrivateAccessRequest(userID, displayName, messa
 	err := q.Transmit(ctx, utterance)
 	if err == nil {
 		if queued {
-			if deleteErr := q.accessRequests.DeletePendingNotificationByKey(ctx, "qq", ownerID, dedupeKey); deleteErr != nil {
+			if deleteErr := q.database.DeletePendingNotificationByKey(ctx, "qq", ownerID, dedupeKey); deleteErr != nil {
 				slog.Warn("qq_channel: 已发送权限申请提醒但未能清除待发副本", "channelID", ownerID, "userID", userID, "err", deleteErr)
 			}
 		}
@@ -188,13 +188,13 @@ func (q *QQChannel) notifyOwnerOfPrivateAccessRequest(userID, displayName, messa
 		} else if errors.As(err, &partial) {
 			remaining := strings.TrimSpace(partial.UndeliveredText)
 			if remaining == "" {
-				if deleteErr := q.accessRequests.DeletePendingNotificationByKey(ctx, "qq", ownerID, dedupeKey); deleteErr != nil {
+				if deleteErr := q.database.DeletePendingNotificationByKey(ctx, "qq", ownerID, dedupeKey); deleteErr != nil {
 					slog.Warn("qq_channel: 权限申请提醒部分送达后未能清除通知副本", "channelID", ownerID, "userID", userID, "err", deleteErr)
 				}
 				cancel()
 				return
 			}
-			if updateErr := q.accessRequests.UpdatePendingNotificationBodyByKey(ctx, "qq", ownerID, dedupeKey, remaining); updateErr != nil {
+			if updateErr := q.database.UpdatePendingNotificationBodyByKey(ctx, "qq", ownerID, dedupeKey, remaining); updateErr != nil {
 				slog.Warn("qq_channel: 权限申请提醒部分送达后无法保存剩余正文", "channelID", ownerID, "userID", userID, "err", updateErr)
 				state = db.PendingNotificationStateUncertain
 			} else {
@@ -202,7 +202,7 @@ func (q *QQChannel) notifyOwnerOfPrivateAccessRequest(userID, displayName, messa
 				return
 			}
 		}
-		if stateErr := q.accessRequests.SetPendingNotificationStateByKey(ctx, "qq", ownerID, dedupeKey, state); stateErr != nil {
+		if stateErr := q.database.SetPendingNotificationStateByKey(ctx, "qq", ownerID, dedupeKey, state); stateErr != nil {
 			slog.Warn("qq_channel: 无法更新权限申请通知状态", "channelID", ownerID, "userID", userID, "state", state, "err", stateErr)
 		}
 	}
@@ -212,9 +212,9 @@ func (q *QQChannel) notifyOwnerOfPrivateAccessRequest(userID, displayName, messa
 func (q *QQChannel) handleUnprivilegedPrivateMessage(userID, senderName, msgID, content string, imageCount, omittedImageCount, fileCount, omittedFileCount int) {
 	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(content)), "DAIDAI-") {
 		inviteCode, shapeOK := db.NormalizeAccessInviteCode(content)
-		if shapeOK && q.accessRequests != nil && q.immune != nil {
+		if shapeOK && q.database != nil && q.immune != nil {
 			redeemCtx, redeemCancel := context.WithTimeout(context.Background(), 3*time.Second)
-			redemption, redeemErr := q.accessRequests.RedeemPrivateAccessInvite(redeemCtx, "qq", db.HashAccessInviteCode(inviteCode), userID)
+			redemption, redeemErr := q.database.RedeemPrivateAccessInvite(redeemCtx, "qq", db.HashAccessInviteCode(inviteCode), userID)
 			redeemCancel()
 			if redeemErr == nil && redemption != nil {
 				if redemption.EffectiveRole == "collaborator" {
@@ -250,10 +250,10 @@ func (q *QQChannel) handleUnprivilegedPrivateMessage(userID, senderName, msgID, 
 		accessMessage = attachmentHistoryNote(imageCount, omittedImageCount, fileCount, omittedFileCount)
 	}
 	accessMessage = core.TruncateRunes(accessMessage, 500, "…")
-	if q.accessRequests != nil {
+	if q.database != nil {
 		accessCtx, accessCancel := context.WithTimeout(context.Background(), 2*time.Second)
 		var recordErr error
-		shouldNotifyOwner, recordErr = q.accessRequests.RecordPrivateAccessRequest(accessCtx, "qq", userID, senderName, accessMessage)
+		shouldNotifyOwner, recordErr = q.database.RecordPrivateAccessRequest(accessCtx, "qq", userID, senderName, accessMessage)
 		if recordErr != nil {
 			slog.Warn("qq: 保存访客私聊申请失败", "userID", userID, "err", recordErr)
 		}

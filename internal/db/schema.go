@@ -56,6 +56,21 @@ CREATE TABLE IF NOT EXISTS user_fact_sources (
 CREATE INDEX IF NOT EXISTS idx_fact_sources_message ON user_fact_sources(message_id, fact_id);
 CREATE INDEX IF NOT EXISTS idx_fact_sources_page ON user_fact_sources(fact_id, linked_at DESC, message_id DESC);
 
+CREATE TABLE IF NOT EXISTS user_relations (
+    platform           TEXT NOT NULL CHECK (length(platform) > 0),
+    user_id            TEXT NOT NULL CHECK (length(user_id) > 0),
+    scope_type         TEXT NOT NULL DEFAULT 'global' CHECK (scope_type IN ('global', 'group')),
+    scope_id           TEXT NOT NULL DEFAULT '',
+    interaction_count  INTEGER NOT NULL DEFAULT 0 CHECK (interaction_count >= 0),
+    impression         TEXT NOT NULL DEFAULT '',
+    impression_count   INTEGER NOT NULL DEFAULT 0 CHECK (impression_count >= 0),
+    recent_emotion     TEXT NOT NULL DEFAULT '',
+    emotion_updated_at INTEGER NOT NULL DEFAULT 0,
+    updated_at         INTEGER NOT NULL,
+    PRIMARY KEY (platform, user_id, scope_type, scope_id),
+    CHECK ((scope_type = 'global' AND scope_id = '') OR (scope_type = 'group' AND length(scope_id) > 0))
+);
+
 CREATE TABLE IF NOT EXISTS qq_quote_records (
     msg_id        TEXT NOT NULL,
     chat_type     TEXT NOT NULL CHECK (chat_type IN ('private', 'group')),

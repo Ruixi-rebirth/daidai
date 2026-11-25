@@ -37,10 +37,6 @@ func NewWorkspaceManager(defaultDir string, dbMgr *db.Manager) *WorkspaceManager
 		slog.Error("workspace: 收紧默认工作区权限失败", "path", def, "err", err)
 	}
 
-	if dbMgr == nil {
-		dbMgr = db.DefaultManager()
-	}
-
 	return &WorkspaceManager{
 		db:         dbMgr,
 		defaultDir: def,

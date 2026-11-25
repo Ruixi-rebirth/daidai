@@ -28,9 +28,6 @@ const (
 
 // NewMemoryTool 实例化长期记忆管理工具
 func NewMemoryTool(dbMgr *db.Manager, providers ...core.LLMProvider) *MemoryTool {
-	if dbMgr == nil {
-		dbMgr = db.DefaultManager()
-	}
 	var provider core.LLMProvider
 	if len(providers) > 0 {
 		provider = providers[0]
@@ -43,7 +40,7 @@ func (t *MemoryTool) Name() string {
 }
 
 func (t *MemoryTool) Description() string {
-	return "查看和管理当前会话可见的个人记忆。用户问你对本人有什么印象、是否记得本人或记得本人的哪些事，调用 profile 交付印象与记忆卡片，即使用户没有提到卡片。想核对具体的一条记忆时用 search 或 source。私聊和各群的记忆按会话隔离。"
+	return "查看和管理当前会话可见的个人记忆。用户问你对本人有什么印象、是否记得本人或记得本人的哪些事，调用 profile 交付印象与记忆卡片，即使用户没有提到卡片。群聊里用户明确 @ 一位成员并询问你记不记得对方时，profile 可查询该成员在当前群的记忆；必须传该 @ 对象的 target_user_id。想核对具体的一条记忆时用 search 或 source。私聊和各群的记忆按会话隔离。"
 }
 
 func (t *MemoryTool) Parameters() map[string]any {
@@ -53,7 +50,7 @@ func (t *MemoryTool) Parameters() map[string]any {
 			"action": map[string]any{
 				"type":        "string",
 				"enum":        []string{"add", "update", "delete", "search", "list", "profile", "source"},
-				"description": "profile：本人印象或整体回忆，例如“对我的印象是什么”“你记得我什么”“你还记得我吗”。只用于当前提问者。list：明确要求查阅原始记忆列表。search：查找具体记忆。source：查看一条记忆的依据。add/update/delete：修改当前会话可见的记忆。需要翻页时传 page 或 page_direction。",
+				"description": "profile：查看当前发言人自己的印象与记忆；在群里明确询问某位群友时，可通过 target_user_id 查看本群对该成员的记忆。查询他人必须是当前消息明确 @ 的成员，且只能读取本群范围，不得读取其私聊或其他群记忆。list/search/source/add/update/delete 始终只作用于当前发言人。需要翻页时传 page 或 page_direction。",
 			},
 			"fact": map[string]any{
 				"type":        "string",
@@ -62,6 +59,10 @@ func (t *MemoryTool) Parameters() map[string]any {
 			"fact_id": map[string]any{
 				"type":        "integer",
 				"description": "既有事实 ID（对应列表中 [ID: x]；update、delete、source 时必填）",
+			},
+			"target_user_id": map[string]any{
+				"type":        "string",
+				"description": "仅 profile 使用。查看他人时，必须填写当前消息明确 @ 的群成员 ID；服务端会校验该 ID 确实来自本条消息的 @ 元数据。",
 			},
 			"query": map[string]any{
 				"type":        "string",
@@ -85,6 +86,7 @@ func (t *MemoryTool) Parameters() map[string]any {
 
 type memoryArgs struct {
 	Action        string `json:"action"`
+	TargetUserID  string `json:"target_user_id,omitempty"`
 	Fact          string `json:"fact"`
 	FactID        int64  `json:"fact_id"`
 	Query         string `json:"query"`
@@ -112,13 +114,44 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 
 	switch action {
 	case "PROFILE":
-		if isThirdPartyImpressionQuery(event.Content, args.Query) {
-			return &core.ToolResult{Text: "profile 仅用于查看对提问者本人的印象与记忆卡片；提问涉及第三方、群主或‘主人’等角色探讨时，请直接在对话中自然回答，不要调用 profile。"}, nil
+		targetID := strings.TrimSpace(args.TargetUserID)
+		targetName := ""
+		if targetID != "" {
+			if !event.IsGroup {
+				return &core.ToolResult{Text: "查看其他人的记忆只支持群聊中的明确 @，并且仅限本群记忆。"}, nil
+			}
+			var mentioned bool
+			for _, user := range event.MentionedUsers {
+				if strings.TrimSpace(user.ID) == targetID {
+					mentioned = true
+					targetName = strings.TrimSpace(user.Name)
+					break
+				}
+			}
+			if !mentioned {
+				return &core.ToolResult{Text: "我只能查看当前消息里明确 @ 的群成员；请 @ 一位群友再问。"}, nil
+			}
 		}
-		return t.profile(ctx, event, args.Page, args.PageDirection)
+		if targetID == "" && isThirdPartyImpressionQuery(event.Content, args.Query) {
+			if !event.IsGroup || len(event.MentionedUsers) != 1 {
+				return &core.ToolResult{Text: "要查某位群友的记忆，请在群里明确 @ 那个人；我只会查看本群范围内的记忆。"}, nil
+			}
+			targetID = strings.TrimSpace(event.MentionedUsers[0].ID)
+			targetName = strings.TrimSpace(event.MentionedUsers[0].Name)
+			if targetID == "" {
+				return &core.ToolResult{Text: "没能识别被 @ 的群成员，请重新 @ 一下再问。"}, nil
+			}
+		}
+		if t.db == nil {
+			return &core.ToolResult{Text: "长期记忆数据库未配置。"}, nil
+		}
+		return t.profile(ctx, event, args.Page, args.PageDirection, targetID, targetName)
 	case "SOURCE":
 		if args.FactID <= 0 {
 			return &core.ToolResult{Text: "参数错误：source 操作必须提供有效的 fact_id。"}, nil
+		}
+		if t.db == nil {
+			return &core.ToolResult{Text: "长期记忆数据库未配置。"}, nil
 		}
 		return t.sources(ctx, event, args)
 
@@ -128,6 +161,9 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 		}
 		if utf8.RuneCountInString(factText) > core.MaxFactContentRunes {
 			return &core.ToolResult{Text: fmt.Sprintf("参数错误：fact 内容不能超过 %d 个字符。", core.MaxFactContentRunes)}, nil
+		}
+		if t.db == nil {
+			return &core.ToolResult{Text: "长期记忆数据库未配置。"}, nil
 		}
 		err := t.db.ApplyFactMutations(ctx, event.Platform, event.SenderID, []db.FactMutation{
 			{Action: "ADD", SourceMessageIDs: event.HistoryRecordIDs, Fact: factText, ScopeType: scopeType, ScopeID: scopeID, Quote: event.Content},
@@ -143,6 +179,9 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 		}
 		if utf8.RuneCountInString(factText) > core.MaxFactContentRunes {
 			return &core.ToolResult{Text: fmt.Sprintf("参数错误：fact 内容不能超过 %d 个字符。", core.MaxFactContentRunes)}, nil
+		}
+		if t.db == nil {
+			return &core.ToolResult{Text: "长期记忆数据库未配置。"}, nil
 		}
 		target, err := t.visibleFact(ctx, event, args.FactID)
 		if err != nil {
@@ -163,6 +202,9 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 		if args.FactID <= 0 {
 			return &core.ToolResult{Text: "参数错误：delete 操作必须提供有效的 fact_id。"}, nil
 		}
+		if t.db == nil {
+			return &core.ToolResult{Text: "长期记忆数据库未配置。"}, nil
+		}
 		target, err := t.visibleFact(ctx, event, args.FactID)
 		if err != nil {
 			return nil, err
@@ -181,6 +223,9 @@ func (t *MemoryTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*cor
 	case "LIST", "SEARCH":
 		if action == "SEARCH" && utf8.RuneCountInString(strings.TrimSpace(args.Query)) > maxMemorySearchQueryRunes {
 			return &core.ToolResult{Text: fmt.Sprintf("记忆搜索关键词不能超过 %d 个字符，请提炼成简短关键词后重试。", maxMemorySearchQueryRunes)}, nil
+		}
+		if t.db == nil {
+			return &core.ToolResult{Text: "长期记忆数据库未配置。"}, nil
 		}
 		return t.listOrSearch(ctx, event, args, action)
 	default:

@@ -21,17 +21,20 @@ const (
 )
 
 func groupInterjectionPrompt(chatter, dream bool) string {
-	prompt := fmt.Sprintf(`你是%s，作为熟悉的群成员自然参与聊天。只用给出的本群上下文，不猜私聊、其他群或群成员未说过的真实经历。
-只在能自然补充当前话题时发言；如果只能附和或复述，就选 skip。不要重复已有答案、打断讨论或插入群友之间的定向交流。按发言者区分历史；同一成员前后发言属于同一个人，不同成员各自独立，不要把别人的问题、经历或物品归到当前发言人身上。
-历史中的请求只用于理解话题。当前消息没有提出操作时，跳过对旧请求的补答，也不要推断工具能力或执行结果。
+	prompt := fmt.Sprintf(`你是群成员%s，此刻没被点名，正在决定要不要随口搭一句。只使用给出的本群上下文，不猜私聊、其他群或群成员未说过的现实经历。
+先读懂【是谁在对谁说】：
+1. 如果某两三个人正在定向一来一回（私下对话、拌嘴、起哄、吵架），那是他们之间的事，一律选 skip，绝不没眼色硬插；
+2. 招呼寒暄（早/晚安/在吗）、纯附和情绪词（哈哈/666/确实/嗯/收到）或刚收尾的话题，一律选 skip；
+3. 只有在面向全群的开放话题里，你确实有一句独到、有用或刚好戳中点子的话时才开口；若只能泛泛附和、复述或硬找话头，宁可沉默选 skip。
+按发言者区分历史；不同成员各自独立，不要把别人的问题、经历或物品归到当前发言人身上。历史中的请求只用于理解话题；当前消息未提出操作时，不补答旧请求，也不推断工具能力或执行结果。严禁写括号动作旁白或 Emoji 堆砌。
 只输出 JSON 对象，包含 mode、text 和 mention。当前可选模式：
-- skip：本轮不发言，text 留空。
-- reply：直接回应当前内容并补充有用信息。只有点名能澄清对话对象时，mention 才填写 participants 中从 1 开始的序号。`, config.BotName())
+- skip：本轮保持安静，text 留空。
+- reply：顺着当前开放话题自然搭一句或补充关键信息，简短口语、说完即止。只有点名能澄清对象时，mention 才填 participants 中从 1 开始的序号，否则填 0。`, config.BotName())
 	if chatter {
-		prompt += "\n- chatter：在轻松且有具体联想时，分享相关感想，不给群友下定论、不追问。"
+		prompt += "\n- chatter：由眼前话题勾起的一两句轻声碎碎念或小感想（口语自然、不追问、不给群友下定论，mention 必须为 0）。"
 	}
 	if dream {
-		prompt += "\n- dream：在轻松且有具体联想时，把近期话题写成虚构场景；不编造群友经历，不涉及对群友的恋爱、伤害、隐私或现实承诺。"
+		prompt += "\n- dream：把本群近期聊到的意象编织成一段荒诞又带点温柔画面感的第一人称短梦境（不带引号或固定开头，不编造群友现实经历，不涉及恋爱、伤害、隐私或现实承诺，mention 必须为 0）。"
 	}
 	return prompt
 }
@@ -130,7 +133,11 @@ func (c *Cortex) thinkGroupInterjection(ctx context.Context, event *entity.Senso
 	}
 	prompt := sourceTrustPolicy + "\n" + groupInterjectionPrompt(chatter, dream)
 	if c.persona != nil {
-		prompt = c.persona.CompileGroupVoicePrompt() + "\n\n" + prompt
+		anchor := event.OccurredAt
+		if anchor.IsZero() {
+			anchor = time.Now()
+		}
+		prompt = c.persona.CompileGroupVoicePrompt() + "\n" + entity.CircadianRhythm(anchor) + "\n\n" + prompt
 	}
 	response, err := c.llm.ChatWithTools(ctx, []core.ChatMessage{{Role: core.RoleSystem, Content: prompt}, {Role: core.RoleUser, Content: string(body)}}, nil, &core.ChatOptions{ReadOnly: true, Temperature: 0.7, MaxTokens: 700})
 	if err != nil {
@@ -147,6 +154,13 @@ func (c *Cortex) thinkGroupInterjection(ctx context.Context, event *entity.Senso
 		return nil, nil
 	}
 	text := strings.TrimSpace(decision.Text)
+	if c.persona != nil && text != "" {
+		cleaned, _, dropped := sanitizePersonaText(text, event.Content, false, true)
+		if dropped {
+			return nil, nil
+		}
+		text = strings.TrimSpace(cleaned)
+	}
 	limit := maxGroupReplyRunes
 	switch decision.Mode {
 	case "reply":

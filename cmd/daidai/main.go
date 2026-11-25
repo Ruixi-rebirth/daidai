@@ -26,7 +26,9 @@ import (
 	"daidai/internal/entity"
 	"daidai/internal/groupchat"
 	"daidai/internal/media"
+	"daidai/internal/oci"
 	"daidai/internal/provider/llm"
+	"daidai/internal/runtime"
 	"daidai/internal/tool"
 )
 
@@ -75,10 +77,10 @@ func run() int {
 	}
 	defer func() { _ = listener.Close() }()
 
-	var ociClient *tool.OCIClient
+	var ociClient *oci.OCIClient
 	if cfg.OCI.Enabled {
 		ociCtx, ociCancel := context.WithTimeout(context.Background(), 3*time.Second)
-		ociClient, err = tool.NewOCIClient(ociCtx, cfg.OCI)
+		ociClient, err = oci.NewOCIClient(ociCtx, cfg.OCI)
 		ociCancel()
 		if err != nil {
 			slog.Error("OCI 已启用但客户端初始化失败，停止启动", "err", err)
@@ -86,8 +88,9 @@ func run() int {
 		}
 	}
 
+	database := db.NewManager("data/db")
 	defer func() {
-		if err := db.DefaultManager().Close(); err != nil {
+		if err := database.Close(); err != nil {
 			slog.Warn("关闭 SQLite 数据库连接异常", "err", err)
 		} else {
 			slog.Info("SQLite 数据库连接池已关闭")
@@ -130,7 +133,7 @@ func run() int {
 		DefaultDir:  defaultWorkDir,
 		Provider:    agyMind,
 		Router:      mindRouter,
-		SessionDB:   db.DefaultManager(),
+		SessionDB:   database,
 	})
 
 	// 挂载 API 通道 (自动调用 OpenAI 兼容 GET /models 探测可用模型池)
@@ -145,7 +148,7 @@ func run() int {
 		Provider: agyMind,
 	})
 
-	memEngine := newMemoryEngine(cfg, apiProvider)
+	memEngine := newMemoryEngine(cfg, database, apiProvider)
 
 	mediaSources := &media.Sources{}
 	visEngine := vision.NewEngine(vision.Config{
@@ -161,13 +164,12 @@ func run() int {
 			slog.Error("--reset 需要配置 qq.owner_openid，无法确定要重置的私聊会话")
 			return 1
 		}
-		if err := db.DefaultManager().ResetSessionHistoryInChat("qq", "private", ownerOpenID); err != nil {
+		if err := database.ResetSessionHistoryInChat("qq", "private", ownerOpenID); err != nil {
 			slog.Error("重置会话历史失败，停止启动以避免误报成功", "ownerOpenID", ownerOpenID, "err", err)
 			return 1
 		}
 		slog.Info("已按 --reset 参数重置会话短期上下文游标", "ownerOpenID", ownerOpenID)
 	}
-	database := db.DefaultManager()
 	roleCtx, roleCancel := context.WithTimeout(rootCtx, 5*time.Second)
 	if err := database.BootstrapConfiguredCollaborators(roleCtx, "qq", cfg.QQ.Collaborators); err != nil {
 		slog.Warn("迁移配置中的 QQ 协作者失败", "err", err)
@@ -198,7 +200,7 @@ func run() int {
 	}
 
 	// 初始化通道级工作空间中枢 (SQLite 状态持久化 + 显式激活纳管)
-	workspaceMgr := entity.NewWorkspaceManager(defaultWorkDir, db.DefaultManager())
+	workspaceMgr := entity.NewWorkspaceManager(defaultWorkDir, database)
 	attachmentInbox, inboxErr := media.NewInbox("data/inbox")
 	if inboxErr != nil {
 		slog.Warn("初始化 QQ 文件附件暂存目录失败，文件处理能力不可用", "err", inboxErr)
@@ -312,16 +314,15 @@ func run() int {
 			OwnerOpenID: ownerOpenID,
 			BotName:     cfg.QQBotName(),
 			AGYCommand:  agyCommand,
-		}, immune)
+		}, database, immune)
 		qqChannel.SetAttachmentInbox(attachmentInbox)
-		qqChannel.SetAccessRequestStore(database)
 		qqChannel.SetHistoryRecorder(cortex.RecordInbound)
 		channelRegistry.Register(qqChannel)
 	}
 
 	// 依赖注入组装生命体核心聚合根
 	agyAuth := llm.NewAGYAuthManager(agyCommand, "")
-	superAgent := entity.NewSuperAgent(entity.Config{
+	superAgent := runtime.NewSuperAgent(runtime.Config{
 		Database:   database,
 		PartnerID:  ownerOpenID,
 		Persona:    persona,
@@ -379,7 +380,7 @@ func run() int {
 			ociSchedulerDone = make(chan struct{})
 			go func() {
 				defer close(ociSchedulerDone)
-				runOCIScheduler(rootCtx, cfg.OCI, ownerOpenID, channelRegistry, ociClient, database)
+				oci.RunScheduler(rootCtx, cfg.OCI, ownerOpenID, channelRegistry, ociClient, database)
 			}()
 		}
 	}

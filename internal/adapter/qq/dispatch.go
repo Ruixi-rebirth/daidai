@@ -10,6 +10,7 @@ import (
 	"daidai/internal/core"
 	"daidai/internal/entity"
 	"daidai/internal/media"
+	"daidai/internal/runtime"
 )
 
 func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) bool {
@@ -26,8 +27,14 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 	userID := message.UserID
 	senderName := message.SenderName
 	content := message.Content
-	msgID := message.MessageID
 	isGroup := message.IsGroup
+	var mentionedUsers []core.GroupParticipant
+	if isGroup {
+		for _, mention := range qqMentionedGroupMembers(d) {
+			mentionedUsers = append(mentionedUsers, core.GroupParticipant{ID: mention.ID, Name: mention.Name})
+		}
+	}
+	msgID := message.MessageID
 	botMentioned := message.BotMentioned
 	var (
 		images        []*core.Attachment
@@ -95,7 +102,7 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 		if isGroup && !botAddressed {
 			groupContinuation = q.evaluateGroupContinuation(convID, userID, content, d, replyCtx, quotedBot)
 		}
-		if isGroup && entity.IsAdapterSlashCommand("qq", content) {
+		if isGroup && runtime.IsAdapterSlashCommand("qq", content) {
 			q.handleGroupBotRegistryCommand(convID, msgID, userID, role, content, d)
 			return true
 		}
@@ -145,6 +152,7 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 				RawMessageID:          msgID,
 				OccurredAt:            time.Now(),
 				GroupMessageObserved:  true,
+				MentionedUsers:        mentionedUsers,
 			}
 			return q.ingestUnaddressedGroupMessage(observedEvent, canInterject)
 		}
@@ -195,6 +203,7 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 			OccurredAt:            time.Now(),
 			GroupMessageObserved:  groupContinuation,
 			GroupContinuation:     groupContinuation,
+			MentionedUsers:        mentionedUsers,
 		})
 		if !accepted {
 			return false

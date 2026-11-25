@@ -115,6 +115,11 @@ func (t *MemoryTool) listOrSearch(ctx context.Context, event *entity.SensoryEven
 			} else if len(msgs) > 0 {
 				var msgLines []string
 				for _, m := range msgs {
+					if event.IsGroup && m.IsBot {
+						if strings.HasPrefix(memory.GroupPersonalMemoryCardHistoryText(m.Text), "[呆呆已向当时的群成员展示个人记忆卡；") {
+							continue
+						}
+					}
 					speaker := "用户"
 					if m.IsBot {
 						speaker = config.BotName()

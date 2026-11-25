@@ -18,6 +18,7 @@ type ToolResult struct {
 	ImageOnly         bool     // 已准备视图交付时不附加模型正文，Caption 仍照常发送
 	ImageSources      []string // 与 Images 对齐的逐图语义正文
 	MediaHistory      string   // 仅在媒体确认送达后写入聊天历史的说明
+	HistoryText       string   // 媒体正文不应进入共享上下文时使用的安全历史替代文本
 	PageProgress      *PageReadProgress
 	Caption           string // 确定交付的索引等文字，不交给模型改写
 	InlineImages      bool

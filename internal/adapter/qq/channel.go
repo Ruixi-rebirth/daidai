@@ -66,7 +66,7 @@ type QQChannel struct {
 	msgCache            *msgCache
 	dedup               *dedupCache
 	inbox               *media.Inbox
-	accessRequests      *db.Manager
+	database            *db.Manager
 	stopCancel          context.CancelFunc
 	wsWG                sync.WaitGroup
 	lifecycleGeneration atomic.Uint64
@@ -127,8 +127,8 @@ func (q *QQChannel) clearWSSession() {
 }
 
 // NewQQChannel 实例化 QQ 全双工通道
-func NewQQChannel(cfg Config, immune *entity.ImmuneSystem) *QQChannel {
-	cache := newMsgCache(1000, db.DefaultManager())
+func NewQQChannel(cfg Config, database *db.Manager, immune *entity.ImmuneSystem) *QQChannel {
+	cache := newMsgCache(1000, database)
 	cli := NewClient(cfg.AppID, cfg.Secret)
 	channel := &QQChannel{
 		cfg:                 cfg,
@@ -136,6 +136,7 @@ func NewQQChannel(cfg Config, immune *entity.ImmuneSystem) *QQChannel {
 		immune:              immune,
 		msgCache:            cache,
 		dedup:               newDedupCache(2000),
+		database:            database,
 		groupActiveSessions: make(map[string]*groupActiveSession),
 	}
 	cli.SetOnMessageSent(func(msgID, refIndex, targetType, targetID string, metadata QuoteMetadata) {
@@ -170,10 +171,6 @@ func (q *QQChannel) SetAttachmentInbox(inbox *media.Inbox) {
 	q.inbox = inbox
 }
 
-func (q *QQChannel) SetAccessRequestStore(database *db.Manager) {
-	q.accessRequests = database
-}
-
 // GetVoiceMode 返回当前的语音识别模式 (fast / multi)
 func (q *QQChannel) GetVoiceMode() string {
 	if q == nil {
@@ -200,13 +197,12 @@ func (q *QQChannel) SetVoiceMode(mode string) error {
 	q.voiceMode = mode
 	q.voiceModeMu.Unlock()
 
+	if q.database == nil {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	mgr := q.accessRequests
-	if mgr == nil {
-		mgr = db.DefaultManager()
-	}
-	if err := mgr.SetRuntimeState(ctx, "qq", "voice_mode", mode); err != nil {
+	if err := q.database.SetRuntimeState(ctx, "qq", "voice_mode", mode); err != nil {
 		slog.Warn("qq: failed to persist voice mode to runtime_state", "err", err)
 		return err
 	}
@@ -226,14 +222,14 @@ func (q *QQChannel) Start(ctx context.Context, onSensory func(event *entity.Sens
 	}
 	loadBotsCancel()
 
-	loadVoiceCtx, loadVoiceCancel := context.WithTimeout(ctx, 3*time.Second)
-	voiceMgr := q.accessRequests
-	if voiceMgr == nil {
-		voiceMgr = db.DefaultManager()
+	var storedVoiceMode string
+	var voiceErr error
+	if q.database != nil {
+		loadVoiceCtx, loadVoiceCancel := context.WithTimeout(ctx, 3*time.Second)
+		storedVoiceMode, voiceErr = q.database.GetRuntimeState(loadVoiceCtx, "qq", "voice_mode")
+		loadVoiceCancel()
 	}
-	storedVoiceMode, voiceErr := voiceMgr.GetRuntimeState(loadVoiceCtx, "qq", "voice_mode")
-	loadVoiceCancel()
-	if voiceErr == nil && (storedVoiceMode == VoiceModeFast || storedVoiceMode == VoiceModeMulti) {
+	if q.database != nil && voiceErr == nil && (storedVoiceMode == VoiceModeFast || storedVoiceMode == VoiceModeMulti) {
 		q.voiceModeMu.Lock()
 		q.voiceMode = storedVoiceMode
 		q.voiceModeMu.Unlock()

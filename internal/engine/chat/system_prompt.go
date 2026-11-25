@@ -13,10 +13,16 @@ import (
 // separately so callers can keep them out of the instruction channel.
 func (c *Cortex) buildSystemPrompt(event *entity.SensoryEvent, request chatRequestContext) (string, string) {
 	now := time.Now()
+	if event != nil && !event.OccurredAt.IsZero() {
+		now = event.OccurredAt
+	}
 	weekdayCn := [...]string{"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"}[now.Weekday()]
 	var runtimeContext strings.Builder
 	fmt.Fprintf(&runtimeContext, "【当前时间】%s %s（%s）\n",
 		now.Format("2006-01-02 15:04:05"), weekdayCn, now.Location().String())
+	if c.persona != nil {
+		runtimeContext.WriteString(entity.CircadianRhythm(now) + "\n")
+	}
 
 	if mindStatus := c.MindStatus(); mindStatus != "" {
 		runtimeContext.WriteString(mindStatus + "\n")

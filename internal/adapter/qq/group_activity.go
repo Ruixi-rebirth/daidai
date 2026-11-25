@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"daidai/internal/core"
-	"daidai/internal/db"
 	"daidai/internal/entity"
 	"daidai/internal/kernel"
 )
@@ -162,9 +161,12 @@ func (q *QQChannel) ingestUnaddressedGroupMessage(event *entity.SensoryEvent, ca
 }
 
 func (q *QQChannel) recentGroupParticipants(groupID string) []core.GroupParticipant {
+	if q.database == nil {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	recent, err := db.DefaultManager().RecentMessages(ctx, "qq", "group", groupID, 30)
+	recent, err := q.database.RecentMessages(ctx, "qq", "group", groupID, 30)
 	if err != nil {
 		slog.Warn("qq_channel: 读取插话点名候选失败", "channelID", groupID, "err", err)
 		return nil

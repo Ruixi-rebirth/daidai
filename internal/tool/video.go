@@ -45,7 +45,6 @@ func NewVideoToolWithCommand(delegates *entity.Delegates, command, outDir string
 	if strings.TrimSpace(outDir) == "" {
 		outDir = filepath.Join("data", "workspace", "sandbox")
 	}
-	_ = os.MkdirAll(outDir, 0755)
 	var immuneSystem *entity.ImmuneSystem
 	if len(immune) > 0 {
 		immuneSystem = immune[0]

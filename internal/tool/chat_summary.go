@@ -34,9 +34,6 @@ type summaryMessage struct {
 }
 
 func NewChatSummaryTool(dbMgr *db.Manager, llm core.LLMProvider) *ChatSummaryTool {
-	if dbMgr == nil {
-		dbMgr = db.DefaultManager()
-	}
 	return &ChatSummaryTool{db: dbMgr, llm: llm}
 }
 
@@ -79,6 +76,9 @@ func (t *ChatSummaryTool) Execute(ctx context.Context, rawArgs json.RawMessage) 
 	event := entity.SensoryEventFromContext(ctx)
 	if event == nil || event.Platform == "" || strings.TrimSpace(event.ChannelID) == "" {
 		return &core.ToolResult{Text: "无法总结：当前会话缺少可识别的会话信息。"}, nil
+	}
+	if t.db == nil {
+		return &core.ToolResult{Text: "聊天总结暂时不可用：数据库未配置。"}, nil
 	}
 	if t.llm == nil {
 		return &core.ToolResult{Text: "聊天总结暂时不可用：语言模型未配置。"}, nil

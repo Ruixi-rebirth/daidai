@@ -10,6 +10,7 @@ import (
 
 	"daidai/internal/entity"
 	"daidai/internal/kernel"
+	"daidai/internal/runtime"
 )
 
 func (c *Channel) Start(ctx context.Context, handler func(*entity.SensoryEvent)) error {
@@ -30,7 +31,7 @@ func (c *Channel) Start(ctx context.Context, handler func(*entity.SensoryEvent))
 	if webhook.URL != "" {
 		return fmt.Errorf("telegram bot has an existing webhook; polling cannot start")
 	}
-	if err := c.jsonCall(ctx, "setMyCommands", map[string]any{"commands": entity.CommandMenu("telegram")}, nil); err != nil {
+	if err := c.jsonCall(ctx, "setMyCommands", map[string]any{"commands": runtime.CommandMenu("telegram")}, nil); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}

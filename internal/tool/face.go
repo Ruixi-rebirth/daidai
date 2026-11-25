@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode"
 
 	"daidai/assets"
@@ -40,7 +41,6 @@ func NewFaceToolWithCommand(delegates *entity.Delegates, command, baseDir string
 	if command == "" {
 		command = "agy"
 	}
-	_ = os.MkdirAll(baseDir, 0755)
 	var immuneSystem *entity.ImmuneSystem
 	if len(immune) > 0 {
 		immuneSystem = immune[0]
@@ -58,7 +58,7 @@ func (t *FaceTool) Name() string {
 }
 
 func (t *FaceTool) Description() string {
-	return fmt.Sprintf("发送%s本人的照片或表情贴纸，优先使用本地缓存；核心搭档和协作者可在未命中时现拍生成，访客仅可获取本地缓存或内置表情。", config.BotName())
+	return fmt.Sprintf("仅当用户明确要求看%s本人的自拍、正脸、全身照或特定换装造型时调用（日常聊天带小表情请直接在回复末尾写 [脸:X]，不必调用本工具）。优先读取本地缓存；核心搭档和协作者可在未命中时现拍生成，访客仅获取本地缓存或内置表情。", config.BotName())
 }
 
 func (t *FaceTool) Parameters() map[string]any {
@@ -255,7 +255,10 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 		return &core.ToolResult{Text: fmt.Sprintf("准备形象参考图失败：%v", err)}, nil
 	}
 	defer cleanupRef()
-	goal := fmt.Sprintf("请调用 image-generator 子智能体生成一张%s本人的二次元插画照片（主题/角度/神态：%s），请先读取参考基准图 %s 以保持同一人物的五官、发色（黑茶色微卷中长发）、白色小兔发夹、蓝灰眼眸与画风一致。将最终图片保存到指定路径 %s；必须确认该文件实际存在且非空后才能结束任务，文件内容必须是实际 PNG 格式（不能只修改扩展名）。", config.BotName(), emotion, refPath, absTmpPath)
+	goal := fmt.Sprintf(
+		"请调用 image-generator 子智能体生成一张%s本人的 2D 二次元平面赛璐璐插画（主题/角度/神态：%s；绝对不要真人照片、3D CG 或可读文字水印）。请先读取参考基准图 %s 以保持同一人物的五官、发色（黑茶色微卷中长发）、白色小兔发夹、蓝灰眼眸与温柔文艺的 INFP 气质一致。%s 将最终图片保存到指定路径 %s；必须确认该文件实际存在且非空后才能结束任务，文件内容必须是实际 PNG 格式（不能只修改扩展名）。",
+		config.BotName(), emotion, refPath, faceSceneAtmosphere(time.Now()), absTmpPath,
+	)
 
 	slog.Info("face_tool: 触发无状态后台动态生成新图片", "bot", config.BotName(), "emotion", emotion)
 	agyResult, execErr := runStatelessImageGen(ctx, t.command, goal, workDir)
@@ -310,4 +313,37 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 		return &core.ToolResult{Text: fmt.Sprintf("已生成【%s】图片，但暂时无法保存到形象缓存；请重试。", emotion)}, nil
 	}
 	return preparedFaceImage(normalized), nil
+}
+
+var faceSceneZone = time.FixedZone("CST", 8*3600)
+
+func faceSceneAtmosphere(now time.Time) string {
+	local := now.In(faceSceneZone)
+	var season string
+	switch local.Month() {
+	case time.March, time.April, time.May:
+		season = "春日清透窗边与柔和浅色针织日常穿搭"
+	case time.June, time.July, time.August:
+		season = "夏日清爽薄衬衫与绿植薄纱窗景"
+	case time.September, time.October, time.November:
+		season = "秋日温暖软针织与暖调木质房间氛围"
+	default:
+		season = "冬日温暖针织毛衣与温馨室内氛围"
+	}
+	var light string
+	switch h := local.Hour(); {
+	case h >= 0 && h < 6:
+		light = "深夜暖黄小夜灯/台灯柔光，窗外安静夜色"
+	case h >= 6 && h < 8:
+		light = "清晨淡蓝白透明晨光"
+	case h >= 8 && h < 16:
+		light = "白天自然通透的明亮窗光"
+	case h >= 16 && h < 18:
+		light = "傍晚橘金色柔和逆光"
+	case h >= 18 && h < 22:
+		light = "夜晚窗外夜景与室内暖黄台灯光晕"
+	default:
+		light = "深夜安静暗调与小台灯暖光"
+	}
+	return fmt.Sprintf("若主题未指定特殊服装或背景，环境参考当前季节与真实时段（%s；%s），身边可自然有一只治愈系小猫或书桌小物。", season, light)
 }

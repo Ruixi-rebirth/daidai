@@ -84,6 +84,11 @@ func (m *MemoryEngine) Commit(ctx context.Context, event *entity.SensoryEvent, r
 	replyText = core.TruncateRunes(replyText, core.MaxUserMessageRunes, "\n[消息过长，后续内容已截断]")
 	userText, userMsgID := m.commitInboundHistory(ctx, dbMgr, event, visionSummary)
 	botMsgID := m.commitBotHistory(ctx, dbMgr, event, chatType, replyText, userMsgID)
+	if userMsgID > 0 && botMsgID > 0 && event.SenderID != "" && event.GroupExpression == "" && !event.SkipFactExtraction {
+		if _, err := dbMgr.BumpUserRelationInteraction(ctx, event.Platform, event.SenderID, event.ChannelID, event.IsGroup, event.OccurredAt); err != nil {
+			slog.Warn("memory: 更新用户互动计数失败", "platform", event.Platform, "channel", event.ChannelID, "err", err)
+		}
+	}
 	m.schedulePostCommit(dbMgr, event, userText, replyText, userMsgID, botMsgID)
 }
 

@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	"daidai/internal/core"
 	"daidai/internal/db"
 	"daidai/internal/entity"
 )
@@ -106,8 +108,14 @@ func TestMemoryAddIsAdditiveAndRetainsRepeatedEvidence(t *testing.T) {
 	}
 }
 
-func TestMemoryProfileRejectsThirdPartyQuery(t *testing.T) {
-	tool := NewMemoryTool(nil)
+func TestMemoryProfileRejectsUnmentionedThirdPartyAndScopesMentionedMember(t *testing.T) {
+	store := db.NewManager(t.TempDir())
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	tool := NewMemoryTool(store)
 	thirdPartyQuestions := []string{
 		"你对主人的印象是什么？",
 		"你对群主的印象是什么？",
@@ -127,22 +135,58 @@ func TestMemoryProfileRejectsThirdPartyQuery(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error for %q: %v", q, err)
 		}
-		if !strings.Contains(result.Text, "profile 仅用于查看对提问者本人的印象") {
-			t.Fatalf("expected rejection for query %q, got: %s", q, result.Text)
+		if !strings.Contains(result.Text, "明确 @") {
+			t.Fatalf("expected @ requirement rejection for query %q, got: %s", q, result.Text)
 		}
 	}
 
+	ctx := context.Background()
+	if err := store.ApplyFactMutations(ctx, "qq", "user2", []db.FactMutation{
+		{Action: "ADD", Fact: "在本群爱聊 NixOS", ScopeType: "group", ScopeID: "group1"},
+		{Action: "ADD", Fact: "私聊秘密爱好", ScopeType: "global"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveUserRelationInsight(ctx, "qq", "user2", "group1", true, "嘴硬但聊起 NixOS 特别热心。", 12, "", ctxTimeZero()); err != nil {
+		t.Fatal(err)
+	}
+
+	mentionedCtx := entity.WithSensoryEvent(ctx, &entity.SensoryEvent{
+		Platform:       "qq",
+		ChannelID:      "group1",
+		SenderID:       "user1",
+		IsGroup:        true,
+		Content:        "@阿宅 你还记得他吗",
+		MentionedUsers: []core.GroupParticipant{{ID: "user2", Name: "阿宅"}},
+	})
+	args, _ := json.Marshal(memoryArgs{Action: "profile", TargetUserID: "user2"})
+	result, err := tool.Execute(mentionedCtx, args)
+	if err != nil {
+		t.Fatalf("unexpected error for mentioned member profile: %v", err)
+	}
+	if !strings.Contains(result.Text, "嘴硬但聊起 NixOS 特别热心") || !strings.Contains(result.Text, "在本群爱聊 NixOS") {
+		t.Fatalf("expected group impression and fact in profile card, got: %s", result.Text)
+	}
+	if strings.Contains(result.Text, "私聊秘密爱好") {
+		t.Fatalf("private fact leaked into group member profile card: %s", result.Text)
+	}
+
 	selfQuery := "你对我有什么印象？"
-	ctx := entity.WithSensoryEvent(context.Background(), &entity.SensoryEvent{
+	selfCtx := entity.WithSensoryEvent(context.Background(), &entity.SensoryEvent{
 		Platform:  "qq",
 		ChannelID: "group1",
 		SenderID:  "user1",
 		IsGroup:   true,
 		Content:   selfQuery,
 	})
-	args, _ := json.Marshal(memoryArgs{Action: "profile"})
-	result, _ := tool.Execute(ctx, args)
-	if result != nil && strings.Contains(result.Text, "profile 仅用于查看对提问者本人的印象") {
-		t.Fatalf("self query %q was unexpectedly rejected", selfQuery)
+	selfArgs, _ := json.Marshal(memoryArgs{Action: "profile"})
+	selfRes, err := tool.Execute(selfCtx, selfArgs)
+	if err != nil {
+		t.Fatalf("self query failed: %v", err)
+	}
+	if selfRes == nil || strings.Contains(selfRes.Text, "明确 @") {
+		t.Fatalf("self query %q was unexpectedly rejected: %+v", selfQuery, selfRes)
 	}
 }
+
+func ctxTimeZero() (zero time.Time) { return zero }

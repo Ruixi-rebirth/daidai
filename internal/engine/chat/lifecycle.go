@@ -15,6 +15,7 @@ import (
 // Think 对感知事件进行认知推理并一次性合成全息生命表达体 (Utterance)
 func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (out *entity.Utterance, thinkErr error) {
 	presentation := &thinkPresentation{}
+	var conversationalOutput bool
 
 	defer func() {
 		var processed []*core.Attachment
@@ -24,6 +25,16 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (out *en
 		}
 		if out == nil || thinkErr != nil {
 			return
+		}
+		var faceEmotion string
+		if c.persona != nil && conversationalOutput && !presentation.toolFixedPresentation && out.Text != "" {
+			cleaned, emo, dropped := sanitizePersonaText(out.Text, event.Content, isPartnerSystemQuery(event, event.Content), event.GroupInterjection)
+			if dropped {
+				out = nil
+				return
+			}
+			out.Text = cleaned
+			faceEmotion = emo
 		}
 		if out.Text != "" && (event.Platform == "qq" || event.Platform == "telegram") {
 			rendered, assets, err := render.RenderMermaidBlocks(ctx, out.Text)
@@ -53,6 +64,12 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (out *en
 		out.InlineImages = out.InlineImages || presentation.mediaInline
 		if textOnly {
 			useCardSourceText(out)
+		}
+		if c.persona != nil && conversationalOutput && !presentation.toolFixedPresentation {
+			if !c.attachPersonaSticker(ctx, event, out, faceEmotion, textOnly) {
+				out = nil
+				return
+			}
 		}
 		if len(presentation.mediaFailures) > 0 {
 			out.OnDeliveryFailed = func(ctx context.Context, err error) {
@@ -101,6 +118,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (out *en
 	if inputErr != nil {
 		return nil, inputErr
 	}
+	conversationalOutput = true
 	return c.runConversation(ctx, event, input, presentation)
 }
 

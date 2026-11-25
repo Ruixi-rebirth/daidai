@@ -11,14 +11,54 @@ import (
 )
 
 type factExtractionResponse struct {
-	Mutations []db.FactMutation `json:"mutations"`
+	Mutations  []db.FactMutation `json:"mutations"`
+	Emotion    string            `json:"emotion"`
+	Impression string            `json:"impression"`
 }
 
 const (
 	maxFactMutationResponseBytes = 64 << 10
 	maxFactMutationsPerTurn      = 20
 	maxFactContentRunes          = 40
+	maxRelationImpressionRunes   = 120
+	maxRelationImpressionLines   = 2
 )
+
+var allowedRelationEmotions = map[string]struct{}{
+	"疲惫": {},
+	"烦躁": {},
+	"低落": {},
+	"开心": {},
+	"专注": {},
+}
+
+// CleanRelationImpression normalizes a first-person subjective impression and
+// drops accidental meta/AI phrasing so persisted impressions stay natural.
+func CleanRelationImpression(raw string) string {
+	line := strings.Join(strings.Fields(raw), " ")
+	line = strings.Trim(line, "\"'“”‘’` ")
+	if line == "" {
+		return ""
+	}
+	lower := strings.ToLower(line)
+	for _, banned := range []string{"ai", "人工智能", "语言模型", "大模型", "机器人", "程序"} {
+		if strings.Contains(lower, banned) {
+			return ""
+		}
+	}
+	if bounded := core.LimitSentences(line, maxRelationImpressionRunes, maxRelationImpressionLines); bounded != "" {
+		return bounded
+	}
+	return core.TruncateRunes(line, maxRelationImpressionRunes, "…")
+}
+
+func normalizeRelationEmotion(raw string) string {
+	label := strings.TrimSpace(raw)
+	if _, ok := allowedRelationEmotions[label]; ok {
+		return label
+	}
+	return ""
+}
 
 // normalizeFactMutations binds model decisions to the facts actually supplied
 // to it. Similarity is useful for recall, but cannot authorize an overwrite.
@@ -58,10 +98,10 @@ func normalizeFactMutations(event *entity.SensoryEvent, known []*core.Fact, muta
 	return normalized
 }
 
-func parseFactMutations(raw string) []db.FactMutation {
+func parseFactExtraction(raw string) ([]db.FactMutation, string, string) {
 	text := strings.TrimSpace(raw)
 	if text == "" || len(text) > maxFactMutationResponseBytes {
-		return nil
+		return nil, "", ""
 	}
 	start := strings.IndexByte(text, '{')
 	end := strings.LastIndexByte(text, '}')
@@ -70,8 +110,10 @@ func parseFactMutations(raw string) []db.FactMutation {
 	}
 	var parsed factExtractionResponse
 	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
-		return nil
+		return nil, "", ""
 	}
+	emotion := normalizeRelationEmotion(parsed.Emotion)
+	impression := CleanRelationImpression(parsed.Impression)
 	capacity := min(len(parsed.Mutations), maxFactMutationsPerTurn)
 	valid := make([]db.FactMutation, 0, capacity)
 	seenFactIDs := make(map[int64]struct{})
@@ -109,5 +151,5 @@ func parseFactMutations(raw string) []db.FactMutation {
 			break
 		}
 	}
-	return valid
+	return valid, emotion, impression
 }
