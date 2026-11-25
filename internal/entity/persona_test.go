@@ -25,6 +25,9 @@ func TestCompilePromptScopesGroupAndPartnerRules(t *testing.T) {
 	if !strings.Contains(groupPrompt, "[脸:X]") {
 		t.Fatal("messaging channel prompt should include sticker instructions")
 	}
+	if strings.Contains(privatePrompt, "补一句可以换行") || !strings.Contains(privatePrompt, "写在同一行里") || !strings.Contains(privatePrompt, "不加生硬的句号") {
+		t.Fatal("casual chat expression rule should instruct single-line IM phrasing without trailing formal periods")
+	}
 
 	voice := persona.CompileGroupVoicePrompt()
 	for _, rule := range persona.Rules {

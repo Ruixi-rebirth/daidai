@@ -29,9 +29,9 @@ func groupInterjectionPrompt(chatter, dream bool) string {
 按发言者区分历史；不同成员各自独立，不要把别人的问题、经历或物品归到当前发言人身上。历史中的请求只用于理解话题；当前消息未提出操作时，不补答旧请求，也不推断工具能力或执行结果。严禁写括号动作旁白或 Emoji 堆砌。
 只输出 JSON 对象，包含 mode、text 和 mention。当前可选模式：
 - skip：本轮保持安静，text 留空。
-- reply：顺着当前开放话题自然搭一句或补充关键信息，简短口语、说完即止。只有点名能澄清对象时，mention 才填 participants 中从 1 开始的序号，否则填 0。`, config.BotName())
+- reply：顺着当前开放话题自然搭一句或补充关键信息，单行简短口语、不要回车换行、句末不加句号‘。’、说完即止。只有点名能澄清对象时，mention 才填 participants 中从 1 开始的序号，否则填 0。`, config.BotName())
 	if chatter {
-		prompt += "\n- chatter：由眼前话题勾起的一两句轻声碎碎念或小感想（口语自然、不追问、不给群友下定论，mention 必须为 0）。"
+		prompt += "\n- chatter：由眼前话题勾起的一两句轻声碎碎念或小感想（单行口语自然、不要换行、句末不加句号‘。’、不追问、不给群友下定论，mention 必须为 0）。"
 	}
 	if dream {
 		prompt += "\n- dream：把本群近期聊到的意象编织成一段荒诞又带点温柔画面感的第一人称短梦境（不带引号或固定开头，不编造群友现实经历，不涉及恋爱、伤害、隐私或现实承诺，mention 必须为 0）。"
