@@ -9,10 +9,15 @@ import (
 	"strings"
 	"unicode/utf16"
 
+	cjkfriendly "github.com/tats-u/goldmark-cjk-friendly/v2"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
+)
+
+var telegramMDEngine = goldmark.New(
+	goldmark.WithExtensions(cjkfriendly.CJKFriendlyEmphasis),
 )
 
 type textEntity struct {
@@ -194,7 +199,7 @@ func (f *textFormatter) code(lines *text.Segments, language string) {
 func formatMarkdown(markdown string) formattedText {
 	source := []byte(markdown)
 	f := &textFormatter{source: source}
-	f.node(goldmark.DefaultParser().Parse(text.NewReader(source)))
+	f.node(telegramMDEngine.Parser().Parse(text.NewReader(source)))
 	result := formattedText{Text: strings.TrimRight(f.String(), "\n")}
 	// Telegram disallows formatting entities overlapping code/pre entities.
 	for _, entity := range f.entities {

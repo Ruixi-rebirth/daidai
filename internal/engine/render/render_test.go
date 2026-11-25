@@ -78,10 +78,13 @@ func TestMarkdownToTypst_TableInlineFormatting(t *testing.T) {
 }
 
 func TestMarkdownToTypst_Strikethrough(t *testing.T) {
-	md := "这是 ~~已废弃内容~~ 文本"
+	md := "这是 ~~已废弃内容~~ 文本，以及旧的~~「废弃项」~~的内容"
 	res := MarkdownToTypst([]byte(md))
 	if !strings.Contains(res, `#strike[#"已废弃内容"]`) {
 		t.Fatalf("expected strikethrough compiled to #strike, got:\n%s", res)
+	}
+	if !strings.Contains(res, `#strike[#"「废弃项」"]`) {
+		t.Fatalf("expected CJK-bounded strikethrough compiled to #strike, got:\n%s", res)
 	}
 }
 

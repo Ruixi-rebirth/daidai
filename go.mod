@@ -5,6 +5,7 @@ go 1.26.10
 require (
 	github.com/filippo-agent/goldmark-mathml v0.4.0
 	github.com/gorilla/websocket v1.5.3
+	github.com/tats-u/goldmark-cjk-friendly/v2 v2.0.3
 	github.com/yuin/goldmark v1.8.7
 	golang.org/x/net v0.62.0
 	golang.org/x/sys v0.49.0

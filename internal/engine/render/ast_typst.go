@@ -7,6 +7,7 @@ import (
 	"unicode"
 
 	mathml "github.com/filippo-agent/goldmark-mathml"
+	cjkfriendly "github.com/tats-u/goldmark-cjk-friendly/v2"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
@@ -17,11 +18,10 @@ import (
 var mdEngine = goldmark.New(
 	goldmark.WithExtensions(
 		extension.Table,
-		extension.Strikethrough,
 		extension.TaskList,
+		cjkfriendly.CJKFriendlyEmphasisAndStrikethrough,
 		mathml.New(),
 	),
-	withCJKEmphasis(),
 )
 
 // typstQuote 将任意 UTF-8 文本编码为严格符合 Typst 词法规范的字符串字面量
