@@ -24,8 +24,6 @@ in
     users.users.daidai = {
       isSystemUser = true;
       group = "daidai";
-      home = "/var/lib/daidai";
-      createHome = true;
     };
 
     systemd.services.daidai = {

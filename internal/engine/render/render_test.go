@@ -152,3 +152,61 @@ func TestShouldRenderCard(t *testing.T) {
 		})
 	}
 }
+
+func TestMarkdownToTypst_CJKEmphasis(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    string
+		wantSub  string
+		forbid   string
+	}{
+		{
+			name:    "cjk before bold inline code",
+			input:   "你现在这套大概率走的是**`AGY`**通道",
+			wantSub: `#strong[#raw(block: false, "AGY")]`,
+			forbid:  `#"**"`,
+		},
+		{
+			name:    "cjk before bold cjk quotes",
+			input:   "你现在这套大概率走的是**「主链路」**方案",
+			wantSub: `#strong[#"「主链路」"]`,
+			forbid:  `#"**"`,
+		},
+		{
+			name:    "cjk before bold curly quotes",
+			input:   "你现在这套大概率走的是**“直连模式”**的逻辑",
+			wantSub: `#strong[#"“直连模式”"]`,
+			forbid:  `#"**"`,
+		},
+		{
+			name:    "cjk paren followed by cjk",
+			input:   "**中文（补充说明）**的内容",
+			wantSub: `#strong[#"中文（补充说明）"]`,
+			forbid:  `#"**"`,
+		},
+		{
+			name:    "literal multiplication preserved",
+			input:   "计算 a * b 的值，以及 user_id 不变",
+			wantSub: `user_`,
+			forbid:  `#emph[`,
+		},
+		{
+			name:    "inline code asterisks preserved",
+			input:   "代码 `**not bold**` 原样保留",
+			wantSub: `#raw(block: false, "**not bold**")`,
+			forbid:  `#strong[`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := MarkdownToTypst([]byte(tc.input))
+			if !strings.Contains(got, tc.wantSub) {
+				t.Fatalf("expected %q in output, got:\n%s", tc.wantSub, got)
+			}
+			if tc.forbid != "" && strings.Contains(got, tc.forbid) {
+				t.Fatalf("forbidden %q leaked into output:\n%s", tc.forbid, got)
+			}
+		})
+	}
+}

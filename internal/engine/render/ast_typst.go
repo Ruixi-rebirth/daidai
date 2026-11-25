@@ -21,6 +21,7 @@ var mdEngine = goldmark.New(
 		extension.TaskList,
 		mathml.New(),
 	),
+	withCJKEmphasis(),
 )
 
 // typstQuote 将任意 UTF-8 文本编码为严格符合 Typst 词法规范的字符串字面量

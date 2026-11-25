@@ -156,19 +156,22 @@ func (r *MindRouter) splitKnownModelAndEffort(raw string) (string, string) {
 	return SplitModelAndEffort(raw)
 }
 
-// SplitModelAndEffort 拆分模型名称末尾可能附带的标准思考强度后缀 (如 "gemini-4-argon-high" -> "gemini-4-argon", "high")
+// SplitModelAndEffort 拆分模型名称末尾可能附带的标准思考强度后缀 (如 "gemini-4-argon-high" 或 "Gemini 4 Hydrogen (High)" -> base, "high")
 func SplitModelAndEffort(raw string) (string, string) {
 	raw = strings.TrimSpace(raw)
 	lower := strings.ToLower(raw)
 
 	for _, eff := range []string{"xhigh", "medium", "high", "low", "max"} {
-		suffix := "-" + eff
-		if strings.HasSuffix(lower, suffix) {
-			return strings.TrimSuffix(raw[:len(raw)-len(suffix)], "-"), eff
+		for _, sep := range []string{"-", " "} {
+			suffix := sep + eff
+			if strings.HasSuffix(lower, suffix) {
+				base := strings.TrimSpace(raw[:len(raw)-len(suffix)])
+				return strings.TrimSuffix(base, "-"), eff
+			}
 		}
-		spaceSuffix := " " + eff
-		if strings.HasSuffix(lower, spaceSuffix) {
-			return strings.TrimSpace(raw[:len(raw)-len(spaceSuffix)]), eff
+		parenSuffix := "(" + eff + ")"
+		if strings.HasSuffix(lower, parenSuffix) {
+			return strings.TrimSpace(raw[:len(raw)-len(parenSuffix)]), eff
 		}
 	}
 	return raw, ""

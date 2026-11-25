@@ -380,3 +380,24 @@ func TestModelStatusShowsConfiguredFallback(t *testing.T) {
 		t.Fatal("preferred API duplicated as fallback", status)
 	}
 }
+
+func TestSplitModelAndEffort_Parenthesized(t *testing.T) {
+	cases := []struct {
+		raw        string
+		wantModel  string
+		wantEffort string
+	}{
+		{"Gemini 4 Hydrogen (High)", "Gemini 4 Hydrogen", "high"},
+		{"Gemini 4 Hydrogen (XHigh)", "Gemini 4 Hydrogen", "xhigh"},
+		{"gemini-4-hydrogen-low", "gemini-4-hydrogen", "low"},
+		{"gemini-4-hydrogen medium", "gemini-4-hydrogen", "medium"},
+		{"Claude Sonnet 4.6 (Thinking)", "Claude Sonnet 4.6 (Thinking)", ""},
+	}
+	for _, tc := range cases {
+		gotModel, gotEffort := SplitModelAndEffort(tc.raw)
+		if gotModel != tc.wantModel || gotEffort != tc.wantEffort {
+			t.Fatalf("SplitModelAndEffort(%q) = (%q, %q), want (%q, %q)",
+				tc.raw, gotModel, gotEffort, tc.wantModel, tc.wantEffort)
+		}
+	}
+}
