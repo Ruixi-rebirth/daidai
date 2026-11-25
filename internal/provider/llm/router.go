@@ -296,7 +296,7 @@ func (r *MindRouter) FormatCurrentStatus() string {
 		fmt.Fprintf(&sb, "💭 思考强度：%s\n", curr.Effort)
 	}
 	if fallbackProvider != nil && !strings.EqualFold(curr.Channel, fallbackChannel) {
-		fmt.Fprintf(&sb, "\n### 备用与访客聊天模型\n模型：`%s`\n通道：%s\n首选调用失败或访客请求时使用；不会改变首选设置。\n", providerModelID(fallbackProvider), fallbackChannel)
+		fmt.Fprintf(&sb, "\n### 备用与轻量分类模型\n模型：`%s`\n通道：%s\n首选通道调用失败/配额耗尽兜底及高频分类门控时使用；非搭档私聊的 AGY 调用运行于 bwrap 内核隔离沙箱。\n", providerModelID(fallbackProvider), fallbackChannel)
 	}
 	sb.WriteString("\n以上为路由设置，不代表每一轮实际使用的模型。")
 	return strings.TrimSpace(sb.String())

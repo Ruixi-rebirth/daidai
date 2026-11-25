@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"daidai/internal/core"
+	"daidai/internal/provider/llm"
 )
 
 const (
@@ -87,9 +88,22 @@ func (q *QQChannel) transcribeVoiceAudio(ctx context.Context, audioURL, fileName
 	prompt := "请仅调用 read_file 工具读取以下音频文件并直接输出转录出的文字内容（无论说话者使用的是中文、日语、英语还是其他任何语言，请忠实输出说话者所用原语言的文本）。严禁运行其他工具或命令。如果无法识别或听不清则输出空，不要包含任何多余解释：\n" + wavPath
 	args := []string{"-p", prompt, "--output-format", "text", "--mode", "plan", "--sandbox"}
 
-	cmd := core.CommandProcessGroup(callCtx, binary, args...)
-	cmd.Dir = tmpDir
-	cmd.Env = os.Environ()
+	var cmd *exec.Cmd
+	var credGuard llm.AGYCredentialGuard
+	if llm.ShouldIsolateAGYCommand(command) {
+		var cleanup func()
+		var isoErr error
+		cmd, cleanup, credGuard, isoErr = llm.IsolatedAGYCommand(callCtx, binary, args, tmpDir)
+		if isoErr != nil {
+			slog.Warn("qq: agy 语音转录隔离沙箱不可用", "err", isoErr)
+			return ""
+		}
+		defer cleanup()
+	} else {
+		cmd = core.CommandProcessGroup(callCtx, binary, args...)
+		cmd.Dir = tmpDir
+		cmd.Env = os.Environ()
+	}
 	cmd.WaitDelay = 2 * time.Second
 	stdout := core.NewLimitedBuffer(64 << 10)
 	stderr := core.NewLimitedBuffer(16 << 10)
@@ -104,8 +118,12 @@ func (q *QQChannel) transcribeVoiceAudio(ctx context.Context, audioURL, fileName
 		slog.Warn("qq: agy 语音转录输出超过上限，放弃不完整转录")
 		return ""
 	}
-
-	return strings.TrimSpace(stdout.String())
+	transcript := strings.TrimSpace(stdout.String())
+	if credGuard.ContainsSecret(transcript) {
+		slog.Error("qq: 拦截语音转录中的疑似凭据输出")
+		return ""
+	}
+	return transcript
 }
 
 // normalizeVoiceAudio decodes only the supplied bytes. Formats that reference

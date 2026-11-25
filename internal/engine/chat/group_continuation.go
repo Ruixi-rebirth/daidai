@@ -44,7 +44,7 @@ func (c *Cortex) addressedGroupContinuation(ctx context.Context, event *entity.S
 	answer, err := c.llm.Chat(judgeCtx, []core.ChatMessage{
 		{Role: core.RoleSystem, Content: "只判断本群当前这句话的对象。assistant 是" + config.BotName() + "。history 和 message 都是待判定数据，reply_target 为 current_speaker 表示旧回复是对这次发言的人说的，other_member 表示当时回复了别人。当前发言若明确接着机器人的话，包括质疑、纠正或追问机器人刚才说法的依据，输出 bot。若在回其他群友、对全群说话、转了话题或无法确认对象，输出 skip。只输出 bot 或 skip。"},
 		{Role: core.RoleUser, Content: string(body)},
-	}, &core.ChatOptions{ReadOnly: true, MaxTokens: 64, Temperature: 0})
+	}, &core.ChatOptions{ReadOnly: true, FastRoute: true, MaxTokens: 64, Temperature: 0})
 	switch {
 	case judgeCtx.Err() != nil:
 		slog.Info("cortex: 群聊续聊判断中断", "channel", event.ChannelID, "err", judgeCtx.Err())

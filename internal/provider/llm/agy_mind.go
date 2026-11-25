@@ -134,6 +134,12 @@ func (p *AGYMindProvider) ChatWithTools(
 	p.mu.RUnlock()
 
 	readOnly := opts != nil && (opts.ReadOnly || opts.ReasoningOnly)
+	if opts != nil && opts.ReadOnly {
+		switch strings.ToLower(currentEffort) {
+		case "high", "xhigh", "max":
+			currentEffort = "medium"
+		}
+	}
 	if err := CheckAGYAuth(); err != nil {
 		return nil, err
 	}
@@ -167,11 +173,21 @@ func (p *AGYMindProvider) ChatWithTools(
 		args = append(args, "--mode", "accept-edits", "--sandbox")
 	}
 
-	cmd := core.CommandProcessGroup(execCtx, command, args...)
+	var cmd *exec.Cmd
+	var credGuard AGYCredentialGuard
 	if readOnly {
-		cmd.Dir = os.TempDir()
-	} else if cwd != "" {
-		cmd.Dir = cwd
+		var cleanup func()
+		var isoErr error
+		cmd, cleanup, credGuard, isoErr = IsolatedAGYCommand(execCtx, command, args, "")
+		if isoErr != nil {
+			return nil, isoErr
+		}
+		defer cleanup()
+	} else {
+		cmd = core.CommandProcessGroup(execCtx, command, args...)
+		if cwd != "" {
+			cmd.Dir = cwd
+		}
 	}
 	cmd.WaitDelay = 2 * time.Second
 
@@ -210,6 +226,9 @@ func (p *AGYMindProvider) ChatWithTools(
 	if stdoutBuf.Truncated() {
 		return nil, uncertainFailure(fmt.Errorf("%s 输出超过 2 MiB 上限，结果不完整", channelName))
 	}
+	if readOnly && credGuard.ContainsSecret(stdoutBuf.String()) {
+		return nil, fmt.Errorf("%s 响应触发凭据保护熔断", channelName)
+	}
 	parsed, err := ParseAGYResult(stdoutBuf.Bytes())
 	if err != nil {
 		return nil, uncertainFailure(fmt.Errorf("%s: %w", channelName, err))
@@ -217,6 +236,9 @@ func (p *AGYMindProvider) ChatWithTools(
 	response, err := p.chatResponse(parsed, channelName, messages, hostTools)
 	if err != nil {
 		return nil, uncertainFailure(err)
+	}
+	if readOnly && credGuard.ContainsSecret(response.Content) {
+		return nil, fmt.Errorf("%s 响应触发凭据保护熔断", channelName)
 	}
 	if isEmptyChatResponse(response) {
 		return nil, uncertainFailure(fmt.Errorf("%s 返回空响应", channelName))

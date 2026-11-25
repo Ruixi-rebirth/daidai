@@ -104,19 +104,15 @@ func (r *MindRouter) ChatWithTools(
 	fallbackProvider := r.providers[r.fallbackChannel]
 	r.mu.RUnlock()
 
-	// 访客请求不进入 AGY 全能智能体通道；兜底通道不可用时也必须失败关闭。
-	if opts != nil && opts.ReadOnly && !strings.EqualFold(channel, r.fallbackChannel) {
-		if fallbackProvider == nil {
-			return nil, fmt.Errorf("访客请求无法路由：受限兜底通道 %q 未挂载", r.fallbackChannel)
-		}
+	// 高频机械分类/门控请求优先直连低延迟兜底通道，避免为布尔判定拉起 CLI 子进程。
+	if opts != nil && opts.FastRoute && !strings.EqualFold(channel, r.fallbackChannel) && fallbackProvider != nil {
 		resp, err := fallbackProvider.ChatWithTools(ctx, messages, tools, opts)
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if err == nil && isEmptyChatResponse(resp) {
-			return nil, fmt.Errorf("受限兜底通道 %q 返回空响应", r.fallbackChannel)
+		if err == nil && !isEmptyChatResponse(resp) {
+			return resp, nil
 		}
-		return resp, err
 	}
 	if activeProvider == nil {
 		if fallbackProvider == nil || strings.EqualFold(channel, r.fallbackChannel) {

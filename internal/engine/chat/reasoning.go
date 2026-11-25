@@ -22,7 +22,7 @@ type thinkPresentation struct {
 
 func (c *Cortex) runConversation(ctx context.Context, event *entity.SensoryEvent, input *chatInput, presentation *thinkPresentation) (_ *entity.Utterance, replyErr error) {
 	messages := input.messages
-	readOnly := event.Role != entity.RolePartner
+	readOnly := !event.IsPartnerPrivate()
 	toolDefs := toolsForEvent(c.hands, event, input.imageSources)
 	toolCtx := entity.WithSensoryEvent(ctx, event)
 	var hasToolResult bool

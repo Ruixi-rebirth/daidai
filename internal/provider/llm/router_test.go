@@ -355,13 +355,13 @@ func TestModelStatusShowsConfiguredFallback(t *testing.T) {
 	api := NewOpenAIProvider(OpenAIConfig{Model: "deepseek-chat"})
 	router.RegisterChannel(ChannelRegistration{Channel: "API", Provider: api, Models: []ModelInfo{{ID: "deepseek-chat", Channel: "API"}, {ID: "deepseek-reasoner", Channel: "API"}}})
 	status := router.FormatCurrentStatus()
-	for _, want := range []string{"首选聊天模型", "gemini-test", "备用与访客聊天模型", "deepseek-chat"} {
+	for _, want := range []string{"首选聊天模型", "gemini-test", "备用与轻量分类模型", "deepseek-chat"} {
 		if !strings.Contains(status, want) {
 			t.Fatalf("missing %q in %s", want, status)
 		}
 	}
 	model, usage := router.ChannelModelUsage("API")
-	if model != "deepseek-chat" || usage != "备用 / 访客聊天" {
+	if model != "deepseek-chat" || usage != "备用兜底 / 轻量门控" {
 		t.Fatalf("wrong fallback: %s %s", model, usage)
 	}
 	// Display the live provider configuration, not the first discovered model.
@@ -376,8 +376,40 @@ func TestModelStatusShowsConfiguredFallback(t *testing.T) {
 	if result.Status != "success" {
 		t.Fatalf("switch failed: %+v", result)
 	}
-	if status := router.FormatCurrentStatus(); strings.Contains(status, "备用与访客聊天模型") {
+	if status := router.FormatCurrentStatus(); strings.Contains(status, "备用与轻量分类模型") {
 		t.Fatal("preferred API duplicated as fallback", status)
+	}
+}
+
+func TestMindRouter_ReadOnlyPrefersActiveAGYWithFallbackAndFastRouteUsesAPI(t *testing.T) {
+	router := NewMindRouter(MindRouterConfig{StatePath: filepath.Join(t.TempDir(), "mind.json"), FallbackChannel: "API"})
+	agy := &mockFailingProvider{response: &core.ChatResponse{Content: "agy-sandbox-reply"}}
+	api := &mockFailingProvider{response: &core.ChatResponse{Content: "api-fallback-reply"}}
+	router.RegisterChannel(ChannelRegistration{Channel: "AGY", Provider: agy, Models: []ModelInfo{{ID: "gemini-4-hydrogen", Channel: "AGY"}}})
+	router.RegisterChannel(ChannelRegistration{Channel: "API", Provider: api, Models: []ModelInfo{{ID: "deepseek-chat", Channel: "API"}}})
+	if _, err := router.SwitchMind(SwitchRequest{Target: "gemini-4-hydrogen", Channel: "AGY"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Ordinary ReadOnly chat (non-partner / group) hits active AGY first.
+	resp, err := router.ChatWithTools(context.Background(), []core.ChatMessage{{Role: core.RoleUser, Content: "676767"}}, nil, &core.ChatOptions{ReadOnly: true})
+	if err != nil || resp.Content != "agy-sandbox-reply" || !agy.called || api.called {
+		t.Fatalf("expected ReadOnly chat to hit AGY primary first, got resp=%+v agy=%v api=%v err=%v", resp, agy.called, api.called, err)
+	}
+
+	// 2. FastRoute classifier hits low-latency API directly without spawning AGY.
+	agy.called, api.called = false, false
+	fastResp, err := router.ChatWithTools(context.Background(), []core.ChatMessage{{Role: core.RoleUser, Content: "classify"}}, nil, &core.ChatOptions{ReadOnly: true, FastRoute: true})
+	if err != nil || fastResp.Content != "api-fallback-reply" || agy.called || !api.called {
+		t.Fatalf("expected FastRoute to hit API directly, got resp=%+v agy=%v api=%v err=%v", fastResp, agy.called, api.called, err)
+	}
+
+	// 3. When AGY fails on ReadOnly chat (e.g. quota or missing bwrap), MindRouter falls back to API.
+	agy.called, api.called = false, false
+	agy.response = &core.ChatResponse{} // empty response triggers provider failure
+	fbResp, err := router.ChatWithTools(context.Background(), []core.ChatMessage{{Role: core.RoleUser, Content: "hello"}}, nil, &core.ChatOptions{ReadOnly: true})
+	if err != nil || fbResp.Content != "api-fallback-reply" || !agy.called || !api.called {
+		t.Fatalf("expected ReadOnly AGY failure to fall back to API, got resp=%+v agy=%v api=%v err=%v", fbResp, agy.called, api.called, err)
 	}
 }
 

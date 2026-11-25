@@ -34,7 +34,7 @@ func (r *MindRouter) ChannelModelUsage(channel string) (string, string) {
 		return r.active.Model, "首选聊天"
 	}
 	if strings.EqualFold(channel, r.fallbackChannel) {
-		return providerModelID(provider), "备用 / 访客聊天"
+		return providerModelID(provider), "备用兜底 / 轻量门控"
 	}
 	return providerModelID(provider), "通道配置"
 }

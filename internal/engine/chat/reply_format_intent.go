@@ -57,6 +57,7 @@ func (c *Cortex) detectTextOnlyIntent(ctx context.Context, content string) (res 
 		Temperature: 0,
 		MaxTokens:   160,
 		ReadOnly:    true,
+		FastRoute:   true,
 	})
 	if err != nil {
 		return false

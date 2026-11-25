@@ -29,6 +29,7 @@
               go
               gopls
               golangci-lint
+              bubblewrap
               mermaid-cli
               just
               sqlite
@@ -72,6 +73,7 @@
               wrapProgram $out/bin/daidai \
                 --prefix PATH : ${pkgs.lib.makeBinPath [
                   pkgs.typst
+                  pkgs.bubblewrap
                   pkgs.fontconfig
                   pkgs.mermaid-cli
                   pkgs.ffmpeg

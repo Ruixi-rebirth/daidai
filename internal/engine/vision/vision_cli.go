@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -80,9 +81,21 @@ func (e *Engine) describeWithCLI(ctx context.Context, imageURLs []string, userTe
 
 	args := []string{"-p", prompt, "--output-format", "text", "--mode", "plan", "--sandbox", "--dangerously-skip-permissions"}
 
-	cmd := core.CommandProcessGroup(ctx, cliCmd, args...)
-	cmd.Dir = tmpWorkDir
-	cmd.Env = os.Environ()
+	var cmd *exec.Cmd
+	var credGuard llm.AGYCredentialGuard
+	if llm.ShouldIsolateAGYCommand(cliCmd) {
+		var cleanup func()
+		var isoErr error
+		cmd, cleanup, credGuard, isoErr = llm.IsolatedAGYCommand(ctx, cliCmd, args, tmpWorkDir)
+		if isoErr != nil {
+			return "", nil, fmt.Errorf("vision cli sandbox unavailable: %w", isoErr)
+		}
+		defer cleanup()
+	} else {
+		cmd = core.CommandProcessGroup(ctx, cliCmd, args...)
+		cmd.Dir = tmpWorkDir
+		cmd.Env = os.Environ()
+	}
 	cmd.WaitDelay = 2 * time.Second
 	stdout := core.NewLimitedBuffer(2 << 20)
 	stderr := core.NewLimitedBuffer(256 << 10)
@@ -104,6 +117,9 @@ func (e *Engine) describeWithCLI(ctx context.Context, imageURLs []string, userTe
 	}
 
 	output := strings.TrimSpace(stdout.String())
+	if credGuard.ContainsSecret(output) {
+		return "", nil, fmt.Errorf("vision cli output blocked by credential guard")
+	}
 	if output == "" {
 		return "", nil, fmt.Errorf("empty output from vision cli")
 	}

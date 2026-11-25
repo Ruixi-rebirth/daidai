@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -153,8 +154,21 @@ func (t *WebSearchTool) run(ctx context.Context, request webRequest) (llm.AGYRes
 
 	slog.Info("web_search_tool: 启动受控沙箱联网检索", "inputBytes", len(input))
 
-	cmd := core.CommandProcessGroup(ctx, t.command, cmdArgs...)
-	cmd.Dir = tmpDir
+	var cmd *exec.Cmd
+	var credGuard llm.AGYCredentialGuard
+	if llm.ShouldIsolateAGYCommand(t.command) {
+		var cleanup func()
+		var isoErr error
+		cmd, cleanup, credGuard, isoErr = llm.IsolatedAGYCommand(ctx, t.command, cmdArgs, tmpDir)
+		if isoErr != nil {
+			slog.Warn("web_search_tool: 初始化 bwrap 内核隔离沙箱失败", "err", isoErr)
+			return empty, fmt.Errorf("联网检索沙箱不可用")
+		}
+		defer cleanup()
+	} else {
+		cmd = core.CommandProcessGroup(ctx, t.command, cmdArgs...)
+		cmd.Dir = tmpDir
+	}
 	cmd.WaitDelay = 2 * time.Second
 
 	stdoutBuf := core.NewLimitedBuffer(2 << 20)
@@ -171,6 +185,10 @@ func (t *WebSearchTool) run(ctx context.Context, request webRequest) (llm.AGYRes
 	}
 	if stdoutBuf.Truncated() {
 		return empty, fmt.Errorf("联网检索结果超出处理上限，未能完整解析")
+	}
+	if credGuard.ContainsSecret(stdoutBuf.String()) {
+		slog.Error("web_search_tool: 拦截疑似凭据泄露输出")
+		return empty, fmt.Errorf("联网检索输出被安全策略拦截")
 	}
 
 	parsed, parseErr := llm.ParseAGYResult(stdoutBuf.Bytes())

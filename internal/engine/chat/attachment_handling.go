@@ -203,7 +203,7 @@ func (c *Cortex) attachmentIntent(ctx context.Context, event *entity.SensoryEven
 	decision, err := c.llm.Chat(intentCtx, []core.ChatMessage{
 		{Role: core.RoleSystem, Content: attachmentIntentSystemPrompt},
 		{Role: core.RoleUser, Content: string(input)},
-	}, &core.ChatOptions{Temperature: 0, MaxTokens: 256, ReadOnly: true})
+	}, &core.ChatOptions{Temperature: 0, MaxTokens: 256, ReadOnly: true, FastRoute: true})
 	if err != nil {
 		return errorResult, err
 	}
