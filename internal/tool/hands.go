@@ -53,6 +53,11 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 	if cfg.GroupExpressions != nil {
 		h.Register(NewGroupExpressionTool(cfg.GroupExpressions))
 	}
+	var imageQuotaStore *groupchat.ImageQuotaStore
+	if cfg.Database != nil {
+		imageQuotaStore = &groupchat.ImageQuotaStore{Database: cfg.Database}
+		h.Register(NewGroupImageQuotaTool(imageQuotaStore))
+	}
 	if cfg.Briefing != nil {
 		h.Register(NewBriefingTool(cfg.Briefing, cfg.BriefingOwners, false))
 		h.Register(NewBriefingTool(cfg.Briefing, cfg.BriefingOwners, true))
@@ -84,7 +89,9 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 		if cfg.Workspaces != nil {
 			outDir = cfg.Workspaces.SandboxDir()
 		}
-		h.Register(NewImageToolWithCommand(cfg.Delegates, cfg.AGYCommand, outDir, cfg.Immune))
+		imgTool := NewImageToolWithCommand(cfg.Delegates, cfg.AGYCommand, outDir, cfg.Immune)
+		imgTool.SetImageQuotaStore(imageQuotaStore)
+		h.Register(imgTool)
 	}
 	if cfg.OCIClient != nil {
 		timezone := ""

@@ -39,6 +39,15 @@ func TestConversationSpecificToolVisibility(t *testing.T) {
 	if entity.ToolAllowedInConversation("manage_group_expressions", &entity.SensoryEvent{Platform: "qq", Role: entity.RolePartner}) {
 		t.Fatal("group expression settings should be hidden outside groups")
 	}
+	if !entity.ToolAllowedInConversation("manage_group_image_quota", &entity.SensoryEvent{Platform: "qq", ChannelID: "group", IsGroup: true, Role: entity.RolePartner}) {
+		t.Fatal("group image quota settings should be available to the partner in a group")
+	}
+	if entity.ToolAllowedInConversation("manage_group_image_quota", &entity.SensoryEvent{Platform: "qq", ChannelID: "group", IsGroup: true, Role: entity.RoleGuest}) {
+		t.Fatal("group image quota settings should be hidden from non-partners")
+	}
+	if !entity.GuestToolAllowed("generate_image") {
+		t.Fatal("generate_image should be available to guests")
+	}
 	if entity.ToolAllowedInConversation("manage_geek_briefing", &entity.SensoryEvent{Role: entity.RoleCollaborator}) {
 		t.Fatal("briefing management should be hidden from non-partners")
 	}

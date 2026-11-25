@@ -33,7 +33,7 @@ type Hands interface {
 // guest model and when enforcing tool execution at the registry boundary.
 func GuestToolAllowed(name string) bool {
 	switch name {
-	case "render_card", "get_system_status", "manage_memory", "summarize_chat", "search_web", "read_link", "screenshot_web", "search_nix_package", "express_face", "get_geek_briefing", "analyze_images":
+	case "render_card", "get_system_status", "manage_memory", "summarize_chat", "search_web", "read_link", "screenshot_web", "search_nix_package", "express_face", "generate_image", "get_geek_briefing", "analyze_images":
 		return true
 	default:
 		return false
@@ -51,7 +51,7 @@ func ToolAllowedInConversation(name string, event *SensoryEvent) bool {
 		return event.IsPartnerPrivate() && event.Platform == "qq"
 	case "singbox_links":
 		return event.IsPartnerPrivate()
-	case "manage_group_expressions":
+	case "manage_group_expressions", "manage_group_image_quota":
 		return event.Role == RolePartner && event.IsGroup && event.ChannelID != ""
 	case "get_geek_briefing":
 		return event.IsGroup || event.Role == RolePartner
