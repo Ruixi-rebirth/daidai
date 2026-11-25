@@ -47,7 +47,7 @@ func (t *BriefingTool) Execute(ctx context.Context, raw json.RawMessage) (*core.
 	if event == nil || t.owners[event.Platform] == "" || event.ChannelID == "" {
 		return &core.ToolResult{Text: "无法确认当前早报会话。"}, nil
 	}
-	if !entity.ToolAllowedInConversation(t.Name(), event) {
+	if !entity.ToolAllowed(t.Name(), event) {
 		return &core.ToolResult{Text: "早报订阅和生成由核心搭档管理；私聊仅向核心搭档开放。"}, nil
 	}
 	if event.Role != entity.RolePartner {

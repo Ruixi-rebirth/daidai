@@ -9,17 +9,14 @@ import (
 	"daidai/internal/entity"
 )
 
-func toolsForEvent(hands entity.Hands, event *entity.SensoryEvent, readOnly bool, imageSources []string) []core.ToolDefinition {
+func toolsForEvent(hands entity.Hands, event *entity.SensoryEvent, imageSources []string) []core.ToolDefinition {
 	if hands == nil {
 		return nil
 	}
 	var available []core.ToolDefinition
 	for _, definition := range hands.Definitions() {
 		name := definition.Function.Name
-		if !entity.ToolAllowedInConversation(name, event) {
-			continue
-		}
-		if readOnly && !entity.GuestToolAllowed(name) {
+		if !entity.ToolAllowed(name, event) {
 			continue
 		}
 		if name == "analyze_images" {

@@ -29,39 +29,6 @@ type Hands interface {
 	Execute(ctx context.Context, name string, rawArgs json.RawMessage) (*core.ToolResult, error)
 }
 
-// GuestToolAllowed is the single allowlist used both when exposing tools to a
-// guest model and when enforcing tool execution at the registry boundary.
-func GuestToolAllowed(name string) bool {
-	switch name {
-	case "render_card", "get_system_status", "manage_memory", "summarize_chat", "search_web", "read_link", "screenshot_web", "search_nix_package", "express_face", "generate_image", "get_geek_briefing", "analyze_images":
-		return true
-	default:
-		return false
-	}
-}
-
-// ToolAllowedInConversation checks the session requirements shared by tool
-// discovery and execution. Tools still validate operation-specific arguments.
-func ToolAllowedInConversation(name string, event *SensoryEvent) bool {
-	if event == nil {
-		return false
-	}
-	switch name {
-	case "manage_access":
-		return event.IsPartnerPrivate() && event.Platform == "qq"
-	case "singbox_links":
-		return event.IsPartnerPrivate()
-	case "manage_group_expressions", "manage_group_image_quota":
-		return event.Role == RolePartner && event.IsGroup && event.ChannelID != ""
-	case "get_geek_briefing":
-		return event.IsGroup || event.Role == RolePartner
-	case "manage_geek_briefing":
-		return event.Role == RolePartner
-	default:
-		return true
-	}
-}
-
 // Worker 异构任务执行单元接口；具体隔离能力取决于实现。
 type Worker interface {
 	Name() string

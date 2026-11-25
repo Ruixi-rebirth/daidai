@@ -111,13 +111,25 @@ func (im *ImmuneSystem) ResolveRole(senderID string) UserRole {
 		return RoleCollaborator
 	}
 
+	if _, ok := im.privateUsers[senderID]; ok {
+		return RoleFriend
+	}
+
 	return RoleGuest
 }
 
-// VerifyDelegationPerm 校验是否具备派发重型工程工单 (AGY) 的权限
+// VerifyDelegationPerm 校验是否具备系统控制、运维与重型工程工单 (AGY) 的权限（仅限核心搭档）
 func (im *ImmuneSystem) VerifyDelegationPerm(role UserRole) error {
+	if role != RolePartner {
+		return fmt.Errorf("权限不足：该系统操作仅限核心搭档发起")
+	}
+	return nil
+}
+
+// VerifyFaceGenPerm checks whether a role may dynamically generate and cache new bot face images.
+func (im *ImmuneSystem) VerifyFaceGenPerm(role UserRole) error {
 	if role != RolePartner && role != RoleCollaborator {
-		return fmt.Errorf("权限不足：该系统工程操作仅限核心搭档与协作者发起")
+		return fmt.Errorf("权限不足：动态生成形象图片仅限核心搭档与协作者发起")
 	}
 	return nil
 }

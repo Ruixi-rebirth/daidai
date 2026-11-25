@@ -182,11 +182,30 @@ func TestImmuneSystem_RoleAndDelegationPerm(t *testing.T) {
 	if immune.ResolveRole("99999") != RoleGuest {
 		t.Fatalf("expected 99999 to be resolved as RoleGuest")
 	}
+	immune.AddPrivateUser("30003")
+	if immune.ResolveRole("30003") != RoleFriend {
+		t.Fatalf("expected 30003 to be resolved as RoleFriend")
+	}
 	if err := immune.VerifyDelegationPerm(RoleGuest); err == nil {
 		t.Fatalf("expected RoleGuest delegation to be blocked")
 	}
+	if err := immune.VerifyDelegationPerm(RoleFriend); err == nil {
+		t.Fatalf("expected RoleFriend delegation to be blocked")
+	}
+	if err := immune.VerifyDelegationPerm(RoleCollaborator); err == nil {
+		t.Fatalf("expected RoleCollaborator delegation to be blocked")
+	}
 	if err := immune.VerifyDelegationPerm(RolePartner); err != nil {
 		t.Fatalf("expected RolePartner delegation to be permitted: %v", err)
+	}
+	if err := immune.VerifyFaceGenPerm(RoleGuest); err == nil {
+		t.Fatalf("expected RoleGuest face generation to be blocked")
+	}
+	if err := immune.VerifyFaceGenPerm(RoleFriend); err == nil {
+		t.Fatalf("expected RoleFriend face generation to be blocked")
+	}
+	if err := immune.VerifyFaceGenPerm(RoleCollaborator); err != nil {
+		t.Fatalf("expected RoleCollaborator face generation to be permitted: %v", err)
 	}
 }
 

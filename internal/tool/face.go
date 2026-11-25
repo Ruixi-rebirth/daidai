@@ -205,7 +205,7 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 		}
 		return &core.ToolResult{Text: "无法校验当前会话权限，不能生成新图片。"}, nil
 	}
-	if event.Role == entity.RoleGuest {
+	if event.Role != entity.RolePartner && event.Role != entity.RoleCollaborator {
 		for _, fallback := range []string{"开心", "正脸"} {
 			if data, ok := t.readCachedFace(ctx, fallback); ok {
 				return preparedFaceImage(data), nil
@@ -219,7 +219,7 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 		return &core.ToolResult{Text: "权限校验未配置，拒绝动态生成形象图片。"}, nil
 	}
 	role := t.immune.ResolveRole(event.SenderID)
-	if err := t.immune.VerifyDelegationPerm(role); err != nil {
+	if err := t.immune.VerifyFaceGenPerm(role); err != nil {
 		return &core.ToolResult{Text: err.Error()}, nil
 	}
 

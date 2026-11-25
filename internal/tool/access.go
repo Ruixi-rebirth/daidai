@@ -37,7 +37,7 @@ func (t *AccessTool) Parameters() map[string]any {
 			"user_id": map[string]any{
 				"type": "string", "description": "目标用户标识：可以是申请或已授权列表中的序号（如 #1、1、第1个）、申请人昵称或完整 QQ OpenID；grant/modify/revoke/get_role 必填",
 			},
-			"role":           map[string]any{"type": "string", "enum": []string{"friend", "collaborator"}, "description": "friend=仅私聊好友（普通对话）；collaborator=完整协作者（工程与沙箱权限）"},
+			"role":           map[string]any{"type": "string", "enum": []string{"friend", "collaborator"}, "description": "friend=仅私聊好友（日常对话）；collaborator=协作者（私聊、动态表情与群画图免限额）"},
 			"max_uses":       map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "description": "最大兑换次数，默认为 1"},
 			"validity_hours": map[string]any{"type": "integer", "minimum": 1, "maximum": 720, "description": "有效时长，默认为 168 小时"},
 			"invite_id":      map[string]any{"type": "string", "description": "invites 返回的邀请码 ID"},
@@ -57,7 +57,7 @@ type accessToolArgs struct {
 
 func (t *AccessTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.ToolResult, error) {
 	event := entity.SensoryEventFromContext(ctx)
-	if !entity.ToolAllowedInConversation(t.Name(), event) {
+	if !entity.ToolAllowed(t.Name(), event) {
 		return &core.ToolResult{Text: "权限管理仅限核心搭档本人 QQ 私聊使用。"}, nil
 	}
 	if t.db == nil || t.immune == nil {

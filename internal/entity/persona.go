@@ -50,7 +50,7 @@ func (p *Persona) CompilePromptFor(event *SensoryEvent, toolsAvailable bool) str
 	if event == nil {
 		return p.compilePrompt(false, false)
 	}
-	privileged := event.Role == RolePartner || event.Role == RoleCollaborator
+	privileged := event.Role == RolePartner
 	return p.compilePrompt(event.IsGroup, toolsAvailable && privileged)
 }
 

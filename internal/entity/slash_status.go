@@ -12,6 +12,10 @@ import (
 )
 
 func (a *SuperAgent) handleStatusCommand(ctx context.Context, event *SensoryEvent, _ string) {
+	if err := a.delegationPermissionError(event.Role); err != nil {
+		a.replyText(ctx, event, err.Error())
+		return
+	}
 	var sections []string
 	sections = append(sections, fmt.Sprintf("### %s生命体当前机能状态", config.BotName()))
 	if a.Channels != nil {

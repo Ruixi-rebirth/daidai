@@ -121,7 +121,7 @@ func (c *Cortex) ContinueDraft(ctx context.Context, event *entity.SensoryEvent, 
 	resp, err := c.llm.ChatWithTools(ctx, request, nil, &core.ChatOptions{
 		Temperature:   0.4,
 		MaxTokens:     4096,
-		ReadOnly:      event.Role == entity.RoleGuest,
+		ReadOnly:      event.Role != entity.RolePartner,
 		ReasoningOnly: true,
 	})
 	if err != nil {

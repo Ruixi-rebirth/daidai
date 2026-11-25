@@ -27,7 +27,7 @@ func (t *AccessTool) getRole(ctx context.Context, rawUserID string) (*core.ToolR
 	}
 	roleDesc := "私聊好友（friend，仅开放日常私聊对话）"
 	if role.Role == "collaborator" {
-		roleDesc = "协作者（collaborator，开放工程沙箱与协作者权限）"
+		roleDesc = "协作者（collaborator，开放私聊、动态表情与群画图免限额）"
 	}
 	return &core.ToolResult{
 		Text: fmt.Sprintf("用户 %s 的当前权限信息：\n- 权限角色：%s\n- 授权时间：%s\n- 授权操作人：`%s`",
@@ -59,7 +59,7 @@ func (t *AccessTool) grant(ctx context.Context, event *entity.SensoryEvent, rawU
 		role = "friend"
 	}
 	if role != "friend" && role != "collaborator" {
-		return &core.ToolResult{Text: "请指定授权角色：friend（私聊好友）或 collaborator（完整协作者）。"}, nil
+		return &core.ToolResult{Text: "请指定授权角色：friend（私聊好友）或 collaborator（协作者）。"}, nil
 	}
 
 	target, err := t.resolveMutableTarget(ctx, rawUserID, false)
@@ -78,7 +78,7 @@ func (t *AccessTool) grant(ctx context.Context, event *entity.SensoryEvent, rawU
 		if role != effectiveRole {
 			return &core.ToolResult{Text: fmt.Sprintf("%s 已拥有协作者权限，本次添加好友保留现有协作者权限。若要降级，请明确要求修改权限为好友。", target.displayDesc())}, nil
 		}
-		return &core.ToolResult{Text: fmt.Sprintf("已将 %s 加为 QQ 协作者，已开放完整工程沙箱与协作者权限，即时生效。", target.displayDesc())}, nil
+		return &core.ToolResult{Text: fmt.Sprintf("已将 %s 加为 QQ 协作者，已开放私聊对话、动态表情与群画图免限额，即时生效。", target.displayDesc())}, nil
 	}
 	t.immune.AddPrivateUser(target.UserID)
 	return &core.ToolResult{Text: fmt.Sprintf("已将 %s 加为 QQ 好友，已开放日常私聊对话权限，即时生效。", target.displayDesc())}, nil
@@ -91,7 +91,7 @@ func (t *AccessTool) modify(ctx context.Context, event *entity.SensoryEvent, raw
 	}
 	role = strings.ToLower(strings.TrimSpace(role))
 	if role != "friend" && role != "collaborator" {
-		return &core.ToolResult{Text: "请指定目标角色：friend（私聊好友）或 collaborator（完整协作者）。"}, nil
+		return &core.ToolResult{Text: "请指定目标角色：friend（私聊好友）或 collaborator（协作者）。"}, nil
 	}
 
 	target, err := t.resolveMutableTarget(ctx, rawUserID, true)
@@ -106,7 +106,7 @@ func (t *AccessTool) modify(ctx context.Context, event *entity.SensoryEvent, raw
 	if role == "collaborator" {
 		t.immune.AddCollaborator(target.UserID)
 		t.immune.AddPrivateUser(target.UserID)
-		return &core.ToolResult{Text: fmt.Sprintf("已将 %s 的权限修改为 协作者（collaborator），已开放工程沙箱与协作者权限，即时生效。", target.displayDesc())}, nil
+		return &core.ToolResult{Text: fmt.Sprintf("已将 %s 的权限修改为 协作者（collaborator），已开放私聊对话、动态表情与群画图免限额，即时生效。", target.displayDesc())}, nil
 	}
 	t.immune.RemoveCollaborator(target.UserID)
 	t.immune.AddPrivateUser(target.UserID)

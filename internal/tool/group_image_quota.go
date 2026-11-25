@@ -70,7 +70,7 @@ func (t *GroupImageQuotaTool) Execute(ctx context.Context, rawArgs json.RawMessa
 		return nil, fmt.Errorf("group image quota store not configured")
 	}
 	event := entity.SensoryEventFromContext(ctx)
-	if !entity.ToolAllowedInConversation(t.Name(), event) {
+	if !entity.ToolAllowed(t.Name(), event) {
 		return &core.ToolResult{Text: "仅伙伴可在群聊内管理本群画图配额。"}, nil
 	}
 

@@ -30,7 +30,7 @@ func (*GroupExpressionTool) Parameters() map[string]any {
 }
 func (t *GroupExpressionTool) Execute(ctx context.Context, raw json.RawMessage) (*core.ToolResult, error) {
 	event := entity.SensoryEventFromContext(ctx)
-	if !entity.ToolAllowedInConversation(t.Name(), event) {
+	if !entity.ToolAllowed(t.Name(), event) {
 		return &core.ToolResult{Text: "碎碎念和做梦仅由核心搭档在当前群里管理。"}, nil
 	}
 	var args struct {

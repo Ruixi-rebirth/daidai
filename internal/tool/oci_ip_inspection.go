@@ -173,7 +173,7 @@ func (t *OCIIPTool) handleCheck(ctx context.Context, targetIP string, requestedP
 			return &core.ToolResult{Text: "权限校验不可用，拒绝临时绑定候选 IP 进行探测"}, nil
 		}
 		if permErr := t.immune.VerifyDelegationPerm(event.Role); permErr != nil {
-			return &core.ToolResult{Text: "权限拦截：探测未绑定候选 IP 需临时创建辅助私网，仅限搭档或协作者发起"}, nil
+			return &core.ToolResult{Text: "权限拦截：探测未绑定候选 IP 需临时创建辅助私网，仅限核心搭档在私聊中发起"}, nil
 		}
 		probeText, probeErr := t.probeCandidateConnectivity(ctx, targetItem, requestedPort)
 		if probeErr != nil {

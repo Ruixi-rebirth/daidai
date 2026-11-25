@@ -153,7 +153,7 @@ func (t *OCIIPTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 			return &core.ToolResult{Text: "权限校验不可用，拒绝执行 OCI 变更"}, nil
 		}
 		if permErr := t.immune.VerifyDelegationPerm(event.Role); permErr != nil {
-			return &core.ToolResult{Text: fmt.Sprintf("权限拦截：%s 操作仅限搭档或协作者发起", action)}, nil
+			return &core.ToolResult{Text: fmt.Sprintf("权限拦截：%s 操作仅限核心搭档在私聊中发起", action)}, nil
 		}
 		// OCI 的绑定、解绑和释放是有状态的云端变更；本地串行化避免
 		// cleanup/roll/bind 并发修改同一批预留 IP。

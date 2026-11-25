@@ -502,7 +502,7 @@ func (m *mockFixedToolLLM) ChatWithTools(ctx context.Context, messages []core.Ch
 					ID:   "call_fixed_1",
 					Type: "function",
 					Function: core.ToolCallFunction{
-						Name:      "fixed_tool",
+						Name:      "singbox_links",
 						Arguments: "{}",
 					},
 				},
@@ -516,7 +516,7 @@ func (m *mockFixedToolLLM) ChatWithTools(ctx context.Context, messages []core.Ch
 
 type mockFixedTool struct{}
 
-func (t *mockFixedTool) Name() string               { return "fixed_tool" }
+func (t *mockFixedTool) Name() string               { return "singbox_links" }
 func (t *mockFixedTool) Description() string        { return "fixed presentation tool" }
 func (t *mockFixedTool) Parameters() map[string]any { return map[string]any{"type": "object"} }
 func (t *mockFixedTool) Execute(ctx context.Context, args json.RawMessage) (*core.ToolResult, error) {

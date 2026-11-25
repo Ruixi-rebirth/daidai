@@ -27,9 +27,10 @@ func (e *ReplyDeadlineWithDraft) Unwrap() error { return ErrReplyDeadlineWithDra
 type UserRole = core.UserRole
 
 const (
-	RolePartner      = core.RolePartner      // 核心搭档/死党 (最高信任级，拥有全部权限与 Delegates 调度权)
-	RoleCollaborator = core.RoleCollaborator // 协作者/好友 (允许日常工具与工程审查)
-	RoleGuest        = core.RoleGuest        // 普通群友/访客 (受限权限；工具执行入口另行强制校验)
+	RolePartner      = core.RolePartner      // 核心搭档/机主 (最高信任级，拥有全部运维、账号、模型与工程权)
+	RoleCollaborator = core.RoleCollaborator // 协作者 (私聊许可、动态表情与群画图免限额；无系统运维或工程权)
+	RoleFriend       = core.RoleFriend       // 已授权私聊好友 (允许日常私聊对话与公开工具)
+	RoleGuest        = core.RoleGuest        // 普通群友/访客 (受限权限；工具执行入口统一强制校验)
 )
 
 // SensoryEvent 经由 Channel 归一化与防抖合并后的物理感知事件 (零前缀规范)

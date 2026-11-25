@@ -101,9 +101,10 @@ func FormatSystemStatusWithPerm(allowSensitive bool) string {
 type UserRole string
 
 const (
-	RolePartner      UserRole = "partner"      // 核心搭档/死党 (最高信任级，拥有全部权限与 Delegates 调度权)
-	RoleCollaborator UserRole = "collaborator" // 协作者/好友 (允许日常工具与工程审查)
-	RoleGuest        UserRole = "guest"        // 普通群友/访客 (受限权限，由执行层强制校验可用工具)
+	RolePartner      UserRole = "partner"      // 核心搭档/机主 (最高信任级，拥有全部运维、账号、模型与工程权)
+	RoleCollaborator UserRole = "collaborator" // 协作者 (私聊许可、动态表情与群画图免限额；无系统运维或工程权)
+	RoleFriend       UserRole = "friend"       // 已授权私聊好友 (允许日常私聊对话与公开工具；无动态表情与群管理)
+	RoleGuest        UserRole = "guest"        // 普通群友/未授权访客 (受限权限，由统一策略与配额约束)
 )
 
 // AttachmentKind 表示附件类型
@@ -170,6 +171,14 @@ type SensoryEvent struct {
 // IsPartnerPrivate 判断当前感知事件是否为核心伙伴在私聊下发起的最高信任级交互
 func (e *SensoryEvent) IsPartnerPrivate() bool {
 	return e != nil && !e.IsGroup && e.Role == RolePartner
+}
+
+// CanPrivateChat reports whether the sender is permitted to hold a private chat.
+func (e *SensoryEvent) CanPrivateChat() bool {
+	if e == nil {
+		return false
+	}
+	return e.Role == RolePartner || e.Role == RoleCollaborator || e.Role == RoleFriend || (e.Role == RoleGuest && e.PrivateAccessGranted)
 }
 
 // HistoryBoundaryID is the earliest original record, before which prior
