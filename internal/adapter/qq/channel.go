@@ -35,6 +35,7 @@ const (
 type qqOutgoingPart struct {
 	text   string
 	image  []byte
+	video  []byte
 	source string
 }
 

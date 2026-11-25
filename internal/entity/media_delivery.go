@@ -41,13 +41,30 @@ func ImageDeliveryText(sources []string, delivered int) (complete, pending strin
 	return strings.Join(done, "\n\n"), strings.Join(todo, "\n\n")
 }
 
-// WithoutEmptyImages keeps image positions aligned with their source text.
+// WithoutEmptyImages keeps image positions aligned with their source text and drops empty video entries.
 func (u *Utterance) WithoutEmptyImages() *Utterance {
+	if u == nil {
+		return nil
+	}
+	hasEmptyImage := false
 	for _, image := range u.Images {
-		if len(image) != 0 {
-			continue
+		if len(image) == 0 {
+			hasEmptyImage = true
+			break
 		}
-		filtered := *u
+	}
+	hasEmptyVideo := false
+	for _, video := range u.Videos {
+		if len(video) == 0 {
+			hasEmptyVideo = true
+			break
+		}
+	}
+	if !hasEmptyImage && !hasEmptyVideo {
+		return u
+	}
+	filtered := *u
+	if hasEmptyImage {
 		filtered.Images = nil
 		filtered.ImageSources = nil
 		filtered.InlineNonTextImageCount = 0
@@ -68,7 +85,14 @@ func (u *Utterance) WithoutEmptyImages() *Utterance {
 			}
 		}
 		filtered.InlineImages = len(filtered.Images) > 0 && u.InlineImages
-		return &filtered
 	}
-	return u
+	if hasEmptyVideo {
+		filtered.Videos = nil
+		for _, video := range u.Videos {
+			if len(video) > 0 {
+				filtered.Videos = append(filtered.Videos, video)
+			}
+		}
+	}
+	return &filtered
 }

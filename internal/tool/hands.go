@@ -92,6 +92,7 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 		imgTool := NewImageToolWithCommand(cfg.Delegates, cfg.AGYCommand, outDir, cfg.Immune)
 		imgTool.SetImageQuotaStore(imageQuotaStore)
 		h.Register(imgTool)
+		h.Register(NewVideoToolWithCommand(cfg.Delegates, cfg.AGYCommand, outDir, cfg.Immune))
 	}
 	if cfg.OCIClient != nil {
 		timezone := ""

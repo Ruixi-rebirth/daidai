@@ -59,8 +59,9 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 	if len(images) == 0 && len(u.CardData) > 0 {
 		images = [][]byte{u.CardData}
 	}
+	videos := u.Videos
 	content := u.Text
-	if content == "" && len(images) == 0 {
+	if content == "" && len(images) == 0 && len(videos) == 0 {
 		return nil
 	}
 
@@ -87,7 +88,7 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 	}
 	// Mentions are Markdown markup. Keep the mention and image in the same
 	// Markdown message rather than dropping it on the rich-media branch.
-	if len(u.InlineAssets) > 0 || (len(images) > 0 && (u.InlineImages || (u.IsGroup && len(u.MentionUserIDs) > 0))) {
+	if len(videos) == 0 && (len(u.InlineAssets) > 0 || (len(images) > 0 && (u.InlineImages || (u.IsGroup && len(u.MentionUserIDs) > 0)))) {
 		return q.transmitInlineImages(ctx, u, images, content, partLimit, replyWindow)
 	}
 
@@ -105,7 +106,7 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 	if len(chunks) > partLimit {
 		return fmt.Errorf("%w: QQ 单次发送最多 %d 条，当前文字需要 %d 条，请缩短回复", entity.ErrMessageTooLong, partLimit, len(chunks))
 	}
-	parts := make([]qqOutgoingPart, 0, len(chunks)+len(images)-1)
+	parts := make([]qqOutgoingPart, 0, len(chunks)+len(images)+len(videos))
 	sources := make([]string, len(images))
 	for index := range images {
 		sources[index] = u.FallbackText
@@ -118,6 +119,8 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 		if i == 0 && len(images) > 0 {
 			part.image = images[0]
 			part.source = sources[0]
+		} else if i == 0 && len(images) == 0 && len(videos) > 0 {
+			part.video = videos[0]
 		}
 		parts = append(parts, part)
 	}
@@ -125,6 +128,13 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 		for index, image := range images[1:] {
 			parts = append(parts, qqOutgoingPart{image: image, source: sources[index+1]})
 		}
+	}
+	startVideo := 0
+	if len(chunks) > 0 && len(images) == 0 && len(videos) > 0 {
+		startVideo = 1
+	}
+	for _, video := range videos[startVideo:] {
+		parts = append(parts, qqOutgoingPart{video: video})
 	}
 	if len(parts) > partLimit {
 		return fmt.Errorf("%w: 图文内容需要发送 %d 条，超过 QQ 单次最多 %d 条的限制", entity.ErrMessageTooLong, len(parts), partLimit)
@@ -144,7 +154,7 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if sentParts == 0 && u.IsGroup && len(u.MentionUserIDs) > 0 && len(part.image) == 0 {
+		if sentParts == 0 && u.IsGroup && len(u.MentionUserIDs) > 0 && len(part.image) == 0 && len(part.video) == 0 {
 			if at := qqMentionMarkup(u.MentionUserIDs); at != "" {
 				wireText = at + wireText
 				if len([]rune(wireText)) > 1200 {
@@ -157,6 +167,13 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 			// after QQ accepted it, but local validation failures must not consume quota.
 			q.commitPassiveReplyAttempt(budget)
 			reservedCount--
+		}
+		if len(part.video) > 0 {
+			metadata := mediaQuoteMetadata(part.text)
+			if strings.TrimSpace(part.text) == "" {
+				metadata.Kind = qqQuoteFile
+			}
+			return q.client.sendVideoMessage(ctx, targetType, u.ChannelID, wireText, part.video, u.QuoteMsgID, metadata)
 		}
 		if len(part.image) == 0 {
 			return q.client.sendMessageWithContext(ctx, targetType, u.ChannelID, wireText, u.QuoteMsgID, QuoteMetadata{Text: part.text, Kind: qqQuoteText, TextComplete: true})
@@ -262,7 +279,9 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 				}
 				if canSendNotice {
 					notice := "部分内容发送失败，前面的内容已送达。"
-					if len(part.image) > 0 {
+					if len(part.video) > 0 {
+						notice = "部分视频发送失败，前面的内容已送达。"
+					} else if len(part.image) > 0 {
 						notice = "部分图片发送失败，前面的内容已送达。"
 					}
 					if noticeErr := sendTrackedPart(qqOutgoingPart{text: notice}, notice); noticeErr != nil {

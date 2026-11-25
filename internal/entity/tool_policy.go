@@ -46,6 +46,7 @@ var defaultToolPolicies = map[string]toolPolicy{
 	"switch_model":         {scope: scopeAny, roles: partnerOnlyRoles},
 	"switch_workspace":     {scope: scopeAny, roles: partnerOnlyRoles},
 	"delegate_ticket":      {scope: scopeAny, roles: partnerOnlyRoles},
+	"generate_video":       {scope: scopeAny, roles: partnerOnlyRoles},
 
 	// Shared tools (per-tool role/quota rules remain enforced inside execution).
 	"render_card":        {scope: scopeAny, roles: publicToolRoles},

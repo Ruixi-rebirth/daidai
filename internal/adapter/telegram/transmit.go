@@ -29,6 +29,7 @@ func (c *Channel) Transmit(ctx context.Context, u *entity.Utterance) error {
 	}
 	u = u.WithoutEmptyImages()
 	images := u.Images
+	videos := u.Videos
 	sources := append([]string(nil), u.ImageSources...)
 	if len(images) == 0 && len(u.CardData) > 0 {
 		images = [][]byte{u.CardData}
@@ -51,9 +52,14 @@ func (c *Channel) Transmit(ctx context.Context, u *entity.Utterance) error {
 			return &entity.UnsentError{Err: err}
 		}
 	}
+	for _, data := range videos {
+		if len(data) == 0 || len(data) > core.MaxVideoBytes {
+			return &entity.UnsentError{Err: fmt.Errorf("telegram video is empty or exceeds size limit")}
+		}
+	}
 	text := u.Text
 	caption := ""
-	if len(u.InlineAssets) == 0 && len(images) > 0 && len([]rune(text)) <= 500 {
+	if len(u.InlineAssets) == 0 && (len(images) > 0 || len(videos) > 0) && len([]rune(text)) <= 500 {
 		caption, text = text, ""
 	}
 	delivered := ""
@@ -108,6 +114,36 @@ func (c *Channel) Transmit(ctx context.Context, u *entity.Utterance) error {
 			}
 		}
 		start = end
+	}
+	for idx, videoData := range videos {
+		videoCaption := ""
+		if idx == 0 && len(images) == 0 {
+			videoCaption = caption
+		}
+		result, err := c.sendVideo(ctx, u.ChannelID, reply, videoData, videoCaption)
+		if err != nil {
+			var receiptErr *entity.PartialDeliveryError
+			if sent || errors.As(err, &receiptErr) {
+				remaining := core.InlineAssetText(text, u.InlineAssets, false)
+				if !sent {
+					remaining = joinDeliveryText(caption, remaining)
+				}
+				return partial(err, remaining)
+			}
+			return err
+		}
+		sent = true
+		if videoCaption != "" {
+			delivered = joinDeliveryText(delivered, videoCaption)
+		}
+		r := &quoteRecord{Content: "[机器人发送的视频]", Kind: "media", SenderName: c.bot.FirstName}
+		if videoCaption != "" {
+			r.Content = videoCaption
+		}
+		r.Images, r.Files = attachments(&result, true)
+		if err := c.storeQuote(ctx, u.ChannelID, result.ID, r); err != nil {
+			slog.Warn("telegram: video source persistence failed", "err", err)
+		}
 	}
 	if len(u.InlineAssets) > 0 {
 		replyText, err := c.transmitInlineAssets(ctx, u, reply)
@@ -275,6 +311,66 @@ func (c *Channel) sendImages(ctx context.Context, chat string, reply int64, imag
 		seen[result.ID] = struct{}{}
 	}
 	return results, nil
+}
+
+func (c *Channel) sendVideo(ctx context.Context, chat string, reply int64, videoData []byte, caption string) (sentMsg message, sendErr error) {
+	attempted := false
+	defer func() {
+		if sendErr != nil && !attempted {
+			sendErr = &entity.UnsentError{Err: sendErr}
+		}
+	}()
+	var buffer bytes.Buffer
+	w := multipart.NewWriter(&buffer)
+	dest, err := destination(chat)
+	if err != nil {
+		return message{}, err
+	}
+	for name, value := range dest {
+		if err := w.WriteField(name, fmt.Sprint(value)); err != nil {
+			return message{}, err
+		}
+	}
+	if reply > 0 {
+		p, _ := json.Marshal(map[string]any{"message_id": reply, "allow_sending_without_reply": true})
+		if err := w.WriteField("reply_parameters", string(p)); err != nil {
+			return message{}, err
+		}
+	}
+	if err := w.WriteField("supports_streaming", "true"); err != nil {
+		return message{}, err
+	}
+	part, err := w.CreateFormFile("video", "video.mp4")
+	if err != nil {
+		return message{}, err
+	}
+	if _, err := part.Write(videoData); err != nil {
+		return message{}, err
+	}
+	if caption != "" {
+		formattedCaption := formatMarkdown(caption)
+		if err := w.WriteField("caption", formattedCaption.Text); err != nil {
+			return message{}, err
+		}
+		if len(formattedCaption.Entities) > 0 {
+			encoded, _ := json.Marshal(formattedCaption.Entities)
+			if err := w.WriteField("caption_entities", string(encoded)); err != nil {
+				return message{}, err
+			}
+		}
+	}
+	if err := w.Close(); err != nil {
+		return message{}, err
+	}
+	var result message
+	attempted = true
+	if err := c.call(ctx, "sendVideo", &buffer, w.FormDataContentType(), &result); err != nil {
+		return message{}, err
+	}
+	if result.ID <= 0 {
+		return message{}, &entity.PartialDeliveryError{Err: fmt.Errorf("telegram video receipt has no message ID")}
+	}
+	return result, nil
 }
 
 func destination(address string) (map[string]any, error) {

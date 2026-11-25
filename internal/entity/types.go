@@ -115,6 +115,7 @@ type Utterance struct {
 	FallbackText            string             // 媒体发送失败时替代图片的文字内容
 	CardData                []byte             // 美学卡片长图 (Maple Mono 排版图卷)
 	Images                  [][]byte           // 一条表达携带的多张图片；CardData 保留用于兼容单图调用
+	Videos                  [][]byte           // 一条表达携带的标准化 MP4 视频
 	InlineAssets            []core.InlineAsset // 正文中按 Markdown 标记定位的程序生成图片
 	ImageSources            []string           // 与 Images 对齐；文字渲染图保留正文，真实图片留空
 	InlineImages            bool               // 将多张图片作为 Markdown 图片引用放进同一条消息
@@ -165,7 +166,7 @@ func (e *PartialDeliveryError) Unwrap() error {
 	return e.Err
 }
 
-// HasMedia 是否携带富媒体图片
+// HasMedia 是否携带富媒体图片或视频
 func (u *Utterance) HasMedia() bool {
 	if len(u.InlineAssets) > 0 {
 		return true
@@ -175,6 +176,11 @@ func (u *Utterance) HasMedia() bool {
 	}
 	for _, image := range u.Images {
 		if len(image) > 0 {
+			return true
+		}
+	}
+	for _, video := range u.Videos {
+		if len(video) > 0 {
 			return true
 		}
 	}

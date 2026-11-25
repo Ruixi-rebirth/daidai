@@ -19,10 +19,14 @@ import (
 
 func (c *Client) UploadMedia(ctx context.Context, targetType, targetID string, fileType int, data []byte) (string, error) {
 	if len(data) == 0 {
-		return "", fmt.Errorf("upload media failed: image data is empty")
+		return "", fmt.Errorf("upload media failed: media data is empty")
 	}
-	if len(data) > maxQQMediaBytes {
-		return "", fmt.Errorf("upload media failed: image exceeds %d byte limit", maxQQMediaBytes)
+	limit := maxQQMediaBytes
+	if fileType == 2 {
+		limit = maxQQVideoBytes
+	}
+	if len(data) > limit {
+		return "", fmt.Errorf("upload media failed: media exceeds %d byte limit", limit)
 	}
 	url := fmt.Sprintf("%s/v2/%s/%s/files", apiBaseURL, targetType, targetID)
 	payload := map[string]any{

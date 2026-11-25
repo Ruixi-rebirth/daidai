@@ -9,6 +9,7 @@ import (
 
 type toolMediaDelivery struct {
 	images       [][]byte
+	videos       [][]byte
 	imageSources []string
 	fallbackText string
 	mediaHistory string
@@ -32,7 +33,18 @@ func (m *toolMediaDelivery) absorb(toolName string, result *core.ToolResult, pre
 		m.images = append(m.images, image)
 		m.imageSources = append(m.imageSources, source)
 	}
-	if len(m.images) > firstImage {
+
+	firstVideo := len(m.videos)
+	if len(result.VideoData) > 0 {
+		m.videos = append(m.videos, result.VideoData)
+	}
+	for _, video := range result.Videos {
+		if len(video) > 0 {
+			m.videos = append(m.videos, video)
+		}
+	}
+
+	if len(m.images) > firstImage || len(m.videos) > firstVideo {
 		m.mediaHistory = strings.TrimSpace(m.mediaHistory + "\n" + result.MediaHistory)
 		fallback := strings.TrimSpace(result.FallbackText)
 		if fallback == "" {
@@ -52,7 +64,7 @@ func (m *toolMediaDelivery) absorb(toolName string, result *core.ToolResult, pre
 	if result.Caption != "" {
 		presentation.mediaCaption = strings.TrimSpace(presentation.mediaCaption + "\n\n" + result.Caption)
 	}
-	hasDelivery = len(m.images) > firstImage || result.Caption != ""
+	hasDelivery = len(m.images) > firstImage || len(m.videos) > firstVideo || result.Caption != ""
 	if result.OnDelivered != nil {
 		presentation.mediaCommits = append(presentation.mediaCommits, result.OnDelivered)
 	}
@@ -64,7 +76,7 @@ func (m *toolMediaDelivery) absorb(toolName string, result *core.ToolResult, pre
 }
 
 func (m *toolMediaDelivery) hasContent(presentation *thinkPresentation) bool {
-	return len(m.images) > 0 || presentation.mediaCaption != ""
+	return len(m.images) > 0 || len(m.videos) > 0 || presentation.mediaCaption != ""
 }
 
 func (m *toolMediaDelivery) utterance(event *entity.SensoryEvent, text string) *entity.Utterance {
@@ -77,10 +89,14 @@ func (m *toolMediaDelivery) utterance(event *entity.SensoryEvent, text string) *
 		MediaHistory: m.mediaHistory,
 		FallbackText: m.fallbackText,
 		Images:       m.images,
+		Videos:       m.videos,
 		ImageSources: m.imageSources,
 	}
 }
 
 func (m *toolMediaDelivery) fallbackUtterance(event *entity.SensoryEvent) *entity.Utterance {
+	if len(m.videos) > 0 && len(m.images) == 0 {
+		return m.utterance(event, "视频已准备好，但总结和回答没能完成。要我重新处理并补上吗？")
+	}
 	return m.utterance(event, "图片已准备好，但总结和回答没能完成。要我重新处理并补上吗？")
 }

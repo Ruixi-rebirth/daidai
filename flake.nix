@@ -17,6 +17,11 @@
             ];
           };
           mitexPath = "${pkgs.typstPackages.mitex}/lib/typst-packages/mitex/${pkgs.typstPackages.mitex.version}";
+          pythonEnv = pkgs.python3.withPackages (ps: with ps; [
+            pillow
+            numpy
+            matplotlib
+          ]);
         in {
           devShells.default = pkgs.mkShell {
             name = "daidai-dev-shell";
@@ -31,8 +36,9 @@
               jq
               git
               ripgrep
-              python3
+              pythonEnv
               typst
+              fontconfig
               ffmpeg
               chromium
               iproute2
@@ -66,6 +72,7 @@
               wrapProgram $out/bin/daidai \
                 --prefix PATH : ${pkgs.lib.makeBinPath [
                   pkgs.typst
+                  pkgs.fontconfig
                   pkgs.mermaid-cli
                   pkgs.ffmpeg
                   pkgs.chromium
@@ -75,7 +82,7 @@
                   pkgs.imagemagick
                   pkgs.curl
                   pkgs.jq
-                  pkgs.python3
+                  pythonEnv
                   pkgs.git
                   pkgs.ripgrep
                   pkgs.sqlite
