@@ -224,7 +224,7 @@ func (t *VideoTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 	}
 
 	slog.Info("video_tool: 触发无状态后台代码生成视频", "promptBytes", len(prompt), "durationSec", durationSec)
-	agyResult, execErr := runStatelessAGYMediaGen(genCtx, t.command, goal, workDir, "生成视频")
+	agyResult, execErr := runStatelessAGYMediaGen(genCtx, t.command, goal, workDir, "生成视频", true)
 	if execErr != nil {
 		slog.Warn("video_tool: 生成视频失败", "err", execErr)
 		return &core.ToolResult{Text: fmt.Sprintf("生成视频失败：%v", execErr)}, nil

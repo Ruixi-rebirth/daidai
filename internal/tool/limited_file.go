@@ -185,7 +185,20 @@ func readAGYConversationArtifact(ctx context.Context, conversationID string, max
 	return nil, "", os.ErrNotExist
 }
 
-func runStatelessAGYMediaGen(ctx context.Context, command, goal, workDir, taskLabel string) (llm.AGYResult, error) {
+func buildStatelessAGYArgs(goal string, allowShellTools bool) []string {
+	args := []string{
+		"-p", goal,
+		"--output-format", "json",
+	}
+	if allowShellTools {
+		args = append(args, "--mode", "auto", "--sandbox", "--dangerously-skip-permissions")
+	} else {
+		args = append(args, "--sandbox")
+	}
+	return args
+}
+
+func runStatelessAGYMediaGen(ctx context.Context, command, goal, workDir, taskLabel string, allowShellTools bool) (llm.AGYResult, error) {
 	if ctx == nil {
 		return llm.AGYResult{}, fmt.Errorf("%s requires a caller context", taskLabel)
 	}
@@ -197,11 +210,7 @@ func runStatelessAGYMediaGen(ctx context.Context, command, goal, workDir, taskLa
 		command = "agy"
 	}
 
-	args := []string{
-		"-p", goal,
-		"--output-format", "json",
-		"--sandbox",
-	}
+	args := buildStatelessAGYArgs(goal, allowShellTools)
 
 	cmd := core.CommandProcessGroup(ctx, command, args...)
 	if workDir != "" {

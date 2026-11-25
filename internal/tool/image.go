@@ -20,7 +20,7 @@ import (
 
 // runStatelessImageGen 无状态调用一次 agy 执行生图子任务（不占用工程工单槽位，不累积幽灵会话上下文）
 func runStatelessImageGen(ctx context.Context, command, goal, workDir string) (llm.AGYResult, error) {
-	return runStatelessAGYMediaGen(ctx, command, goal, workDir, "生图")
+	return runStatelessAGYMediaGen(ctx, command, goal, workDir, "生图", false)
 }
 
 const maxImagePromptRunes = 2000
