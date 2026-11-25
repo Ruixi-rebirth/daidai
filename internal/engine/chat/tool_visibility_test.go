@@ -2,10 +2,13 @@ package chat
 
 import (
 	"context"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"daidai/internal/core"
+	"daidai/internal/db"
 	"daidai/internal/engine/vision"
 	"daidai/internal/entity"
 	"daidai/internal/tool"
@@ -63,8 +66,8 @@ func TestConversationSpecificToolVisibility(t *testing.T) {
 			}
 		}
 	}
-	// Private-only infra tools must also stay hidden from Partner in groups.
-	for _, toolName := range []string{"oci_bill", "oci_ip", "singbox_links", "manage_access"} {
+	// Private-only infra, workspace, and engineering tools must stay hidden from Partner in groups.
+	for _, toolName := range []string{"oci_bill", "oci_ip", "singbox_links", "manage_access", "switch_workspace", "delegate_ticket"} {
 		if entity.ToolAllowed(toolName, &entity.SensoryEvent{Platform: "qq", ChannelID: "group", IsGroup: true, Role: entity.RolePartner}) {
 			t.Fatalf("%s must remain private-only even for partner", toolName)
 		}
@@ -111,6 +114,44 @@ func TestImageToolAdvertisesOnlyReadableSources(t *testing.T) {
 		}
 		if !slices.Equal(sources, tc.want) {
 			t.Fatalf("current=%t quoted=%t: sources=%v, want %v", tc.current, tc.quoted, sources, tc.want)
+		}
+	}
+}
+
+func TestSystemPromptInjectsWorkspaceOnlyInPartnerPrivateChat(t *testing.T) {
+	base := t.TempDir()
+	store := db.NewManager(filepath.Join(base, "db"))
+	t.Cleanup(func() { _ = store.Close() })
+	sandbox := filepath.Join(base, "sandbox")
+	workspaces := entity.NewWorkspaceManager(sandbox, store)
+	cortex := NewCortex(CortexConfig{
+		LLM:        &preparedViewModel{},
+		Persona:    entity.NewDefaultPersona(),
+		Workspaces: workspaces,
+	})
+
+	_, privateRuntime := cortex.buildSystemPrompt(&entity.SensoryEvent{
+		Platform: "qq", ChannelID: "owner", Role: entity.RolePartner,
+	}, chatRequestContext{})
+	if !strings.Contains(privateRuntime, "【当前工作空间】") || !strings.Contains(privateRuntime, sandbox) {
+		t.Fatalf("partner private prompt should include active workspace, got: %s", privateRuntime)
+	}
+
+	for _, ev := range []*entity.SensoryEvent{
+		{Platform: "qq", ChannelID: "group", IsGroup: true, Role: entity.RolePartner},
+		{Platform: "qq", ChannelID: "collab", Role: entity.RoleCollaborator},
+		{Platform: "qq", ChannelID: "friend", Role: entity.RoleFriend},
+		{Platform: "qq", ChannelID: "group", IsGroup: true, Role: entity.RoleGuest},
+	} {
+		sys, rt := cortex.buildSystemPrompt(ev, chatRequestContext{})
+		if strings.Contains(rt, "【当前工作空间】") || strings.Contains(rt, sandbox) {
+			t.Fatalf("non-partner-private event (%+v) leaked workspace in runtime context: %s", ev, rt)
+		}
+		if ev.Role != entity.RolePartner && strings.Contains(rt, "模型：") {
+			t.Fatalf("non-partner event (%+v) should not receive internal model telemetry in runtime context: %s", ev, rt)
+		}
+		if ev.IsGroup && ev.Role == entity.RolePartner && !strings.Contains(sys, "私聊找你处理") {
+			t.Fatalf("partner in group should receive clear private-chat redirect boundary instead of misleading permission toggle phrasing: %s", sys)
 		}
 	}
 }

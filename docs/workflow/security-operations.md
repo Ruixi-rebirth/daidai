@@ -14,8 +14,8 @@ manage_group_expressions 仅核心搭档在当前群内可调用，不接受其�
 
 ## Worker 与工作区
 
-- 工作区可以按目录名或路径切换、注销；多个书签目录同名时，名称操作会拒绝并列出完整路径。
-- AGY 工程 Worker 使用 `--mode accept-edits --sandbox --dangerously-skip-permissions`，后一个参数让 CLI 自动批准工具权限请求。工程任务由应用入口限制为伙伴和协作者可发起；实际文件与网络范围由 CLI 终端沙箱及宿主服务账户权限共同决定。
+- 工作区可以按目录名或路径切换、注销，仅限核心搭档私聊操作；多个书签目录同名时，名称操作会拒绝并列出完整路径。群聊与非搭档私聊不绑定或注入宿主机工作区上下文。
+- AGY 工程 Worker 使用 `--mode accept-edits --sandbox --dangerously-skip-permissions`，后一个参数让 CLI 自动批准工具权限请求。`delegate_ticket` 与 `switch_workspace` 在工具策略层与执行层双重限制为仅核心搭档私聊可发起；非核心搭档私聊的所有 AGY 对话、网页检索、图片观察与语音转录子进程均运行在 `bwrap` 内核命名空间沙箱中。
 - QQ 与 Telegram 附件只在用户明确要求处理后才会读取；意图不明确时先询问。普通文件仅在对应任务中通过 `--add-dir` 授权给 AGY，图片仅在用户明确要求分析后交给视觉 Provider；附件内容始终视为非可信输入。未明确要求时不下载或授权附件目录。
 - CLI 沙箱只约束 AGY 工具操作，不会改变机器人进程的系统账户。当前 Worker 进程仍以 `ruixi` 运行，因此不应把 CLI 沙箱当作完整的进程级隔离。
 - 图片生成子任务使用 AGY `--sandbox`，并在指定输出目录生成文件；它和工程 Worker 的权限边界不同。
@@ -26,7 +26,7 @@ manage_group_expressions 仅核心搭档在当前群内可调用，不接受其�
 
 NixOS 模块默认使用专用 `daidai` 系统用户，但 OCI 宿主配置覆盖了这个默认值：当前服务以 `ruixi` 运行。AGY Worker 因此拥有 `ruixi` 账户可访问的权限；指定工作区并不能隔离用户凭据或其他文件。改用专用账户前，需要迁移或重新登录 AGY 凭据，并重新配置服务读取 OCI、Sing-box 等秘密的权限。
 
-配置中的 AGY `default_dir` 是 `/home/ruixi`，但启动时 `ResolveSandboxDir` 会把主目录根路径收敛为 `/home/ruixi/sandbox`，因此默认工作目录本身是专用目录。伙伴和协作者都能发起工程工单；机器人及 Worker 子进程以 `ruixi` 运行，CLI 工具授权会自动批准。工作区用于组织任务目录，终端沙箱的限制能力取决于实际 CLI 实现。
+配置中的 AGY `default_dir` 是 `/home/ruixi`，但启动时 `ResolveSandboxDir` 会把主目录根路径收敛为 `/home/ruixi/sandbox`，因此默认工作目录本身是专用目录。仅核心搭档私聊可发起工程工单与切换工作区；机器人及搭档私聊 Worker 子进程以 `ruixi` 运行，CLI 工具授权会自动批准。非搭档私聊统一经 `bwrap` 隔离宿主文件系统与环境变量。
 
 ## OCI
 

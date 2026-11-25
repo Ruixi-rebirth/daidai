@@ -10,8 +10,16 @@ import (
 
 // MindStatus 返回当前激活的心智运行状态摘要
 func (c *Cortex) MindStatus() string {
+	return c.MindStatusFor(&entity.SensoryEvent{Role: entity.RolePartner})
+}
+
+func (c *Cortex) MindStatusFor(event *entity.SensoryEvent) string {
 	if c.llm == nil {
 		return ""
+	}
+	partnerPrivate := event.IsPartnerPrivate()
+	if scoped, ok := c.llm.(interface{ FormatStatusFor(bool) string }); ok {
+		return scoped.FormatStatusFor(partnerPrivate)
 	}
 	if formatter, ok := c.llm.(interface{ FormatCurrentStatus() string }); ok {
 		return formatter.FormatCurrentStatus()

@@ -133,6 +133,10 @@ func (p *AGYMindProvider) ChatWithTools(
 	timeout := p.timeout
 	p.mu.RUnlock()
 
+	if opts != nil && strings.TrimSpace(opts.Model) != "" {
+		currentModel = strings.TrimSpace(opts.Model)
+		currentEffort = strings.TrimSpace(opts.Effort)
+	}
 	readOnly := opts != nil && (opts.ReadOnly || opts.ReasoningOnly)
 	if opts != nil && opts.ReadOnly {
 		switch strings.ToLower(currentEffort) {

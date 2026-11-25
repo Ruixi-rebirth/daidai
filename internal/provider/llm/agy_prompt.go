@@ -13,7 +13,7 @@ func (p *AGYMindProvider) assemblePrompt(messages []core.ChatMessage, tools []co
 
 	var systemInstructions []string
 	if readOnly {
-		systemInstructions = append(systemInstructions, "【只读推理】仅处理提供的会话资料与应用工具结果，不读取宿主机代码、配置或敏感环境信息，不执行命令或修改文件。")
+		systemInstructions = append(systemInstructions, "【只读推理】仅处理提供的会话资料与应用工具结果，不读取宿主机代码、配置或敏感环境信息，不执行命令或修改文件；对外正常回应，不把内部受限模式表述成‘没开权限’或‘需改配置’。")
 	}
 	var historyLines []string
 	var toolResults []string

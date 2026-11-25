@@ -58,9 +58,11 @@ type ChatOptions struct {
 	// Temperature is an explicit value whenever ChatOptions is non-nil; zero is valid.
 	Temperature   float32
 	MaxTokens     int
-	ReadOnly      bool // 供路由层与提供方启用内核沙箱与只读受限执行路径
-	ReasoningOnly bool // 请求提供方为本轮使用只读推理模式（禁止工具调用与文件变更）
-	FastRoute     bool // 高频轻量分类/门控请求，优先走低延迟 API 兜底通道
+	Model         string // 可选按请求指定的目标模型 ID（由 MindRouter 按轨道注入）
+	Effort        string // 可选按请求指定的思考强度（由 MindRouter 按轨道注入）
+	ReadOnly      bool   // 供路由层与提供方启用公用轨道、内核沙箱与只读受限执行路径
+	ReasoningOnly bool   // 请求提供方为本轮使用只读推理模式（禁止工具调用与文件变更）
+	FastRoute     bool   // 高频轻量分类/门控请求，优先走低延迟 API 兜底通道
 }
 
 // ChatResponse 模型响应，支持纯文本与工具调用

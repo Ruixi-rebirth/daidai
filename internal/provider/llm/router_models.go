@@ -340,6 +340,11 @@ func (r *MindRouter) RefreshModels(ctx context.Context) {
 			r.syncProviderLocked(r.active.Channel, r.active.Model, r.active.Effort)
 		}
 	}
+	if !r.publicPinned || r.public.Channel == "" || r.public.Model == "" {
+		r.public = r.selectDefaultPublicMindLocked()
+	} else if pubModels := refreshedModels[r.public.Channel]; len(pubModels) > 0 {
+		r.reconcilePublicMindLocked(r.public.Channel, pubModels, false)
+	}
 }
 
 // Channels 列出当前已挂载的所有通道标识

@@ -2,13 +2,31 @@ package runtime
 
 import (
 	"context"
-	"daidai/internal/entity"
+	"fmt"
 	"strings"
+
+	"daidai/internal/config"
+	"daidai/internal/entity"
 )
 
-func (a *SuperAgent) handlePwdCommand(ctx context.Context, event *entity.SensoryEvent, _ string) {
+func (a *SuperAgent) requirePrivateWorkspaceCommand(ctx context.Context, event *entity.SensoryEvent) bool {
+	if err := a.delegationPermissionError(event.Role); err != nil {
+		a.replyText(ctx, event, err.Error())
+		return false
+	}
+	if event.IsGroup {
+		a.replyText(ctx, event, fmt.Sprintf("工作空间仅用于私聊工程协作，请在与%s的私聊中查看或切换。", config.BotName()))
+		return false
+	}
 	if a.Workspaces == nil {
 		a.replyText(ctx, event, "工作空间管理器未配置。")
+		return false
+	}
+	return true
+}
+
+func (a *SuperAgent) handlePwdCommand(ctx context.Context, event *entity.SensoryEvent, _ string) {
+	if !a.requirePrivateWorkspaceCommand(ctx, event) {
 		return
 	}
 	unlock := a.lockSession(event)
@@ -18,8 +36,7 @@ func (a *SuperAgent) handlePwdCommand(ctx context.Context, event *entity.Sensory
 }
 
 func (a *SuperAgent) handleWorkspaceListCommand(ctx context.Context, event *entity.SensoryEvent, _ string) {
-	if a.Workspaces == nil {
-		a.replyText(ctx, event, "工作空间管理器未配置。")
+	if !a.requirePrivateWorkspaceCommand(ctx, event) {
 		return
 	}
 	unlock := a.lockSession(event)
@@ -29,32 +46,29 @@ func (a *SuperAgent) handleWorkspaceListCommand(ctx context.Context, event *enti
 }
 
 func (a *SuperAgent) handleWorkspaceExitCommand(ctx context.Context, event *entity.SensoryEvent, _ string) {
-	unlock := a.lockSession(event)
-	defer unlock()
-	if a.Workspaces == nil {
-		a.replyText(ctx, event, "工作空间管理器未配置。")
+	if !a.requirePrivateWorkspaceCommand(ctx, event) {
 		return
 	}
+	unlock := a.lockSession(event)
+	defer unlock()
 	a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.Platform, event.ChannelID, event.Role, a.Immune, "exit", "", a.Delegates))
 }
 
 func (a *SuperAgent) handleWorkspaceCleanCommand(ctx context.Context, event *entity.SensoryEvent, _ string) {
-	unlock := a.lockSession(event)
-	defer unlock()
-	if a.Workspaces == nil {
-		a.replyText(ctx, event, "工作空间管理器未配置。")
+	if !a.requirePrivateWorkspaceCommand(ctx, event) {
 		return
 	}
+	unlock := a.lockSession(event)
+	defer unlock()
 	a.replyText(ctx, event, a.Workspaces.ExecuteAction(event.Platform, event.ChannelID, event.Role, a.Immune, "clean", "", a.Delegates))
 }
 
 func (a *SuperAgent) handleWorkspaceRemoveCommand(ctx context.Context, event *entity.SensoryEvent, content string) {
-	unlock := a.lockSession(event)
-	defer unlock()
-	if a.Workspaces == nil {
-		a.replyText(ctx, event, "工作空间管理器未配置。")
+	if !a.requirePrivateWorkspaceCommand(ctx, event) {
 		return
 	}
+	unlock := a.lockSession(event)
+	defer unlock()
 	target := strings.TrimSpace(strings.TrimPrefix(content, "/workspaces rm "))
 	if strings.HasPrefix(content, "/ws rm ") {
 		target = strings.TrimSpace(strings.TrimPrefix(content, "/ws rm "))
@@ -63,12 +77,11 @@ func (a *SuperAgent) handleWorkspaceRemoveCommand(ctx context.Context, event *en
 }
 
 func (a *SuperAgent) handleCDCommand(ctx context.Context, event *entity.SensoryEvent, content string) {
-	unlock := a.lockSession(event)
-	defer unlock()
-	if a.Workspaces == nil {
-		a.replyText(ctx, event, "工作空间管理器未配置。")
+	if !a.requirePrivateWorkspaceCommand(ctx, event) {
 		return
 	}
+	unlock := a.lockSession(event)
+	defer unlock()
 	target := strings.TrimSpace(strings.TrimPrefix(content, "/cd"))
 	if target == "" {
 		target = "~"

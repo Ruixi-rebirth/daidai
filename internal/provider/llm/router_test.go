@@ -433,3 +433,106 @@ func TestSplitModelAndEffort_Parenthesized(t *testing.T) {
 		}
 	}
 }
+
+type recordingProvider struct {
+	lastOpts *core.ChatOptions
+	fail     bool
+	reply    string
+}
+
+func (p *recordingProvider) Name() string { return "recording" }
+func (p *recordingProvider) Chat(ctx context.Context, msgs []core.ChatMessage, opts *core.ChatOptions) (string, error) {
+	resp, err := p.ChatWithTools(ctx, msgs, nil, opts)
+	if err != nil {
+		return "", err
+	}
+	return resp.Content, nil
+}
+func (p *recordingProvider) ChatWithTools(_ context.Context, _ []core.ChatMessage, _ []core.ToolDefinition, opts *core.ChatOptions) (*core.ChatResponse, error) {
+	if opts != nil {
+		copied := *opts
+		p.lastOpts = &copied
+	} else {
+		p.lastOpts = nil
+	}
+	if p.fail {
+		return nil, context.DeadlineExceeded
+	}
+	return &core.ChatResponse{Content: p.reply}, nil
+}
+func (*recordingProvider) SetModel(string)  {}
+func (*recordingProvider) SetEffort(string) {}
+
+func TestMindRouter_DualTrackPartnerAndPublicIsolation(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "active_mind.json")
+	router := NewMindRouter(MindRouterConfig{StatePath: statePath, FallbackChannel: "API"})
+
+	agy := &recordingProvider{reply: "agy-ok"}
+	api := &recordingProvider{reply: "api-ok"}
+	agyModels := ParseCLIModelsOutput(testAGYModelsOutput(), "AGY")
+	apiModels := []ModelInfo{{ID: "deepseek-chat", Name: "deepseek-chat"}}
+
+	router.RegisterChannel(ChannelRegistration{Channel: "API", Provider: api, Models: apiModels})
+	router.RegisterChannel(ChannelRegistration{Channel: "AGY", Provider: agy, Models: agyModels})
+
+	// 1. Default public mind automatically prefers lightweight AGY flash model.
+	if pub := router.PublicMind(); pub.Channel != "AGY" || pub.Model != "gemini-3.8-flash" || pub.Effort != "medium" {
+		t.Fatalf("expected default public mind AGY/gemini-3.8-flash/medium, got %+v", pub)
+	}
+
+	// 2. Partner switches private mind to Claude Opus High; public mind stays Gemini 3.8 Flash Medium.
+	res, err := router.SwitchMind(SwitchRequest{Target: "claude-opus", Effort: "high"})
+	if err != nil || res.Status != "success" {
+		t.Fatalf("partner switch failed: %+v, %v", res, err)
+	}
+	if curr := router.CurrentMind(); curr.Model != "claude-opus-5-5" || curr.Effort != "high" {
+		t.Fatalf("unexpected partner mind: %+v", curr)
+	}
+	if pub := router.PublicMind(); pub.Model != "gemini-3.8-flash" || pub.Effort != "medium" {
+		t.Fatalf("partner switch leaked into public mind: %+v", pub)
+	}
+
+	// 3. Per-request routing passes isolated (Model, Effort) pairs without cross-talk.
+	if _, err := router.ChatWithTools(context.Background(), []core.ChatMessage{{Role: core.RoleUser, Content: "partner work"}}, nil, &core.ChatOptions{Temperature: 0.7}); err != nil {
+		t.Fatal(err)
+	}
+	if agy.lastOpts == nil || agy.lastOpts.Model != "claude-opus-5-5" || agy.lastOpts.Effort != "high" {
+		t.Fatalf("partner call got wrong model/effort: %+v", agy.lastOpts)
+	}
+
+	if _, err := router.ChatWithTools(context.Background(), []core.ChatMessage{{Role: core.RoleUser, Content: "group banter"}}, nil, &core.ChatOptions{Temperature: 0.7, ReadOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	if agy.lastOpts == nil || agy.lastOpts.Model != "gemini-3.8-flash" || agy.lastOpts.Effort != "medium" {
+		t.Fatalf("public call got wrong model/effort: %+v", agy.lastOpts)
+	}
+
+	// 4. Fallback to API strips AGY model ID so API uses its own configured model.
+	agy.fail = true
+	if fbResp, err := router.ChatWithTools(context.Background(), []core.ChatMessage{{Role: core.RoleUser, Content: "group banter"}}, nil, &core.ChatOptions{Temperature: 0.7, ReadOnly: true}); err != nil || fbResp.Content != "api-ok" {
+		t.Fatalf("expected API fallback on AGY failure, got resp=%+v err=%v", fbResp, err)
+	}
+	if api.lastOpts != nil && api.lastOpts.Model != "" {
+		t.Fatalf("fallback leaked primary channel model ID into API options: %+v", api.lastOpts)
+	}
+	agy.fail = false
+
+	// 5. Explicit public switch caps high effort to medium and persists across restart without touching partner mind.
+	pubRes, err := router.SwitchMind(SwitchRequest{Target: "gemini-4-argon", Effort: "high", Scope: MindScopePublic})
+	if err != nil || pubRes.Status != "success" || pubRes.Effort != "medium" {
+		t.Fatalf("expected public switch to cap effort at medium, got %+v, %v", pubRes, err)
+	}
+	if curr := router.CurrentMind(); curr.Model != "claude-opus-5-5" || curr.Effort != "high" {
+		t.Fatalf("public switch modified partner mind: %+v", curr)
+	}
+
+	restored := NewMindRouter(MindRouterConfig{StatePath: statePath, FallbackChannel: "API"})
+	restored.RegisterChannel(ChannelRegistration{Channel: "API", Provider: api, Models: apiModels})
+	restored.RegisterChannel(ChannelRegistration{Channel: "AGY", Provider: agy, Models: agyModels})
+	if curr := restored.CurrentMind(); curr.Model != "claude-opus-5-5" || curr.Effort != "high" {
+		t.Fatalf("restored partner mind mismatch: %+v", curr)
+	}
+	if pub := restored.PublicMind(); pub.Model != "gemini-4-argon" || pub.Effort != "medium" {
+		t.Fatalf("restored public mind mismatch: %+v", pub)
+	}
+}

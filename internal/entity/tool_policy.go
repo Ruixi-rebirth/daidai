@@ -30,22 +30,22 @@ var (
 )
 
 var defaultToolPolicies = map[string]toolPolicy{
-	// Partner-only private management, credentials, and infrastructure controls.
-	"manage_access": {scope: scopePrivateOnly, platform: "qq", roles: partnerOnlyRoles},
-	"singbox_links": {scope: scopePrivateOnly, roles: partnerOnlyRoles},
-	"oci_bill":      {scope: scopePrivateOnly, roles: partnerOnlyRoles},
-	"oci_ip":        {scope: scopePrivateOnly, roles: partnerOnlyRoles},
+	// Partner-only private management, credentials, workspaces, engineering tickets, and infrastructure controls.
+	"manage_access":    {scope: scopePrivateOnly, platform: "qq", roles: partnerOnlyRoles},
+	"singbox_links":    {scope: scopePrivateOnly, roles: partnerOnlyRoles},
+	"oci_bill":         {scope: scopePrivateOnly, roles: partnerOnlyRoles},
+	"oci_ip":           {scope: scopePrivateOnly, roles: partnerOnlyRoles},
+	"switch_workspace": {scope: scopePrivateOnly, roles: partnerOnlyRoles},
+	"delegate_ticket":  {scope: scopePrivateOnly, roles: partnerOnlyRoles},
 
 	// Partner-only group configuration tools.
 	"manage_group_expressions": {scope: scopeGroupOnly, roles: partnerOnlyRoles},
 	"manage_group_image_quota": {scope: scopeGroupOnly, roles: partnerOnlyRoles},
 
-	// Partner-only system, model, workspace, engineering, and briefing controls.
+	// Partner-only system, model, media, and briefing controls.
 	"manage_geek_briefing": {scope: scopeAny, roles: partnerOnlyRoles},
 	"get_system_status":    {scope: scopeAny, roles: partnerOnlyRoles},
 	"switch_model":         {scope: scopeAny, roles: partnerOnlyRoles},
-	"switch_workspace":     {scope: scopeAny, roles: partnerOnlyRoles},
-	"delegate_ticket":      {scope: scopeAny, roles: partnerOnlyRoles},
 	"generate_video":       {scope: scopeAny, roles: partnerOnlyRoles},
 
 	// Shared tools (per-tool role/quota rules remain enforced inside execution).

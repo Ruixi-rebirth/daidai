@@ -111,4 +111,40 @@ func TestModelSwitchTool_Flow(t *testing.T) {
 	if !strings.Contains(unknownChanRes.Text, "未探测到 FOO 通道模型") {
 		t.Fatalf("expected unknown channel hint, got: %s", unknownChanRes.Text)
 	}
+
+	// 8. 双轨语境感知切换：私聊默认仅切搭档私聊轨；群聊默认仅切公用轨；私聊显式 scope=public 可远程切公用轨；协作者无权切换
+	if _, err := switchTool.Execute(partnerCtx, json.RawMessage(`{"action":"switch","model":"claude-opus","effort":"high"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if router.CurrentMind().Model != "claude-opus-5-5" || router.PublicMind().Model != "gemini-3.8-flash" {
+		t.Fatalf("private switch should only change partner track: partner=%+v public=%+v", router.CurrentMind(), router.PublicMind())
+	}
+
+	groupPartnerCtx := entity.WithSensoryEvent(context.Background(), &entity.SensoryEvent{
+		SenderID: "10001",
+		IsGroup:  true,
+		Role:     entity.RolePartner,
+	})
+	if _, err := switchTool.Execute(groupPartnerCtx, json.RawMessage(`{"action":"switch","model":"claude-sonnet"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if router.CurrentMind().Model != "claude-opus-5-5" || router.PublicMind().Model != "claude-sonnet-5-5" {
+		t.Fatalf("group switch should only change public track: partner=%+v public=%+v", router.CurrentMind(), router.PublicMind())
+	}
+
+	if _, err := switchTool.Execute(partnerCtx, json.RawMessage(`{"action":"switch","model":"gemini-3.8-flash","scope":"public"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if router.CurrentMind().Model != "claude-opus-5-5" || router.PublicMind().Model != "gemini-3.8-flash" {
+		t.Fatalf("explicit scope=public from private chat failed: partner=%+v public=%+v", router.CurrentMind(), router.PublicMind())
+	}
+
+	collabCtx := entity.WithSensoryEvent(context.Background(), &entity.SensoryEvent{
+		SenderID: "20002",
+		Role:     entity.RoleCollaborator,
+	})
+	collabRes, _ := switchTool.Execute(collabCtx, json.RawMessage(`{"action":"switch","model":"claude-opus"}`))
+	if collabRes == nil || !strings.Contains(collabRes.Text, "权限不足") {
+		t.Fatalf("collaborator must not switch models, got: %+v", collabRes)
+	}
 }

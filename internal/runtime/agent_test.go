@@ -6,6 +6,8 @@ import (
 	"daidai/internal/db"
 	"daidai/internal/entity"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -567,5 +569,94 @@ func TestPendingNotificationDoesNotImmediatelyResendAmbiguousCard(t *testing.T) 
 	complete, _, err := agent.transmitPendingNotification(context.Background(), event, "通知", "等待发送")
 	if complete || !errors.Is(err, transportErr) || sends != 1 {
 		t.Fatalf("ambiguous card was retried immediately: complete=%v sends=%d err=%v", complete, sends, err)
+	}
+}
+
+type noopWorker struct{}
+
+func (noopWorker) Name() string        { return "agy" }
+func (noopWorker) Description() string { return "noop" }
+func (noopWorker) ExecuteTicket(context.Context, *entity.Ticket) (string, error) {
+	return "ok", nil
+}
+
+func TestGroupSlashCommandsDecoupleWorkspacesAndTickets(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	store := db.NewManager(filepath.Join(base, "db"))
+	t.Cleanup(func() { _ = store.Close() })
+	sandbox := filepath.Join(base, "sandbox")
+	project := filepath.Join(base, "secret-project")
+	if err := os.MkdirAll(project, 0755); err != nil {
+		t.Fatal(err)
+	}
+	workspaces := entity.NewWorkspaceManager(sandbox, store)
+	if _, err := workspaces.Switch("qq", "group-1", project); err != nil {
+		t.Fatal(err)
+	}
+	delegates := entity.NewDelegates(noopWorker{})
+	channel := &mockChannel{name: "qq"}
+	registry := entity.NewChannelRegistry()
+	registry.Register(channel)
+
+	agent := NewSuperAgent(Config{
+		PartnerID:  "owner",
+		Database:   store,
+		Channels:   registry,
+		Workspaces: workspaces,
+		Delegates:  delegates,
+		Cognition:  &mockCognition{reply: "ok"},
+	})
+
+	partnerGroup := func(cmd string) string {
+		channel.sentUtter = nil
+		agent.Process(ctx, &entity.SensoryEvent{
+			Platform:  "qq",
+			ChannelID: "group-1",
+			IsGroup:   true,
+			SenderID:  "owner",
+			Role:      entity.RolePartner,
+			Content:   cmd,
+		})
+		if channel.sentUtter == nil {
+			t.Fatalf("expected reply for %q", cmd)
+		}
+		return channel.sentUtter.Text
+	}
+
+	for _, cmd := range []string{"/ws", "/workspaces", "/pwd", "/cd ~", "/ws exit", "/ws clean", "/clean", "/ws rm secret-project", "/ws reset", "/tasks", "/task T001", "/stop T001"} {
+		reply := partnerGroup(cmd)
+		if !strings.Contains(reply, "私聊") {
+			t.Fatalf("expected %q in group to direct partner to private chat, got: %s", cmd, reply)
+		}
+		if strings.Contains(reply, "secret-project") || strings.Contains(reply, base) {
+			t.Fatalf("%q in group leaked workspace path: %s", cmd, reply)
+		}
+	}
+
+	// Guest in group gets permission error on /ws rather than private-chat invitation.
+	channel.sentUtter = nil
+	agent.Process(ctx, &entity.SensoryEvent{
+		Platform:  "qq",
+		ChannelID: "group-1",
+		IsGroup:   true,
+		SenderID:  "guest",
+		Role:      entity.RoleGuest,
+		Content:   "/ws",
+	})
+	if channel.sentUtter == nil || !strings.Contains(channel.sentUtter.Text, "权限不足") {
+		t.Fatalf("expected guest /ws in group to be denied by role, got: %+v", channel.sentUtter)
+	}
+
+	// Partner /status in group must omit workspace path and active ticket summary.
+	statusReply := partnerGroup("/status")
+	if strings.Contains(statusReply, "secret-project") || strings.Contains(statusReply, base) || strings.Contains(statusReply, "后台工程工单") {
+		t.Fatalf("group /status leaked workspace or ticket details: %s", statusReply)
+	}
+
+	// Partner /reset in group resets group conversation memory without leaking workspace paths.
+	resetReply := partnerGroup("/reset")
+	if !strings.Contains(resetReply, "当前群聊会话已完成重开") || strings.Contains(resetReply, "secret-project") || strings.Contains(resetReply, base) {
+		t.Fatalf("group /reset leaked workspace or used wrong message: %s", resetReply)
 	}
 }

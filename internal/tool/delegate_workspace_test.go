@@ -1,6 +1,8 @@
 package tool
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,5 +60,24 @@ func TestResolveTicketWorkspaceRequiresManagerForExplicitPath(t *testing.T) {
 	}
 	if _, err := tool.resolveTicketWorkspace("qq", "group", "/tmp/project"); err == nil || !strings.Contains(err.Error(), "无法校验目标工作区") {
 		t.Fatalf("explicit path without manager was not rejected: %v", err)
+	}
+}
+
+func TestDelegateToolRejectsGroupInvocationEvenForPartner(t *testing.T) {
+	delegates := entity.NewDelegates(attachmentSelectionWorker{name: "agy"})
+	tool := NewDelegateToolWithWorkspace(delegates, entity.NewImmuneSystem("owner"), nil)
+	ctx := entity.WithSensoryEvent(context.Background(), &entity.SensoryEvent{
+		Platform:  "qq",
+		ChannelID: "group_1",
+		IsGroup:   true,
+		SenderID:  "owner",
+		Role:      entity.RolePartner,
+	})
+	res, err := tool.Execute(ctx, json.RawMessage(`{"goal":"check repo"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res == nil || !strings.Contains(res.Text, "私聊") {
+		t.Fatalf("expected group delegate_ticket to require private chat, got: %+v", res)
 	}
 }

@@ -54,12 +54,27 @@ type ModelInfo struct {
 	DefaultEffort    string   `json:"default_effort,omitempty"`
 }
 
-// ActiveMindState 持久化心智状态
-type ActiveMindState struct {
+const (
+	MindScopePartner = "partner"
+	MindScopePublic  = "public"
+	MindScopeBoth    = "both"
+)
+
+// MindSlotState 单条心智轨道模型配置
+type MindSlotState struct {
 	Channel   string `json:"channel"`
 	Model     string `json:"model"`
 	Effort    string `json:"effort,omitempty"`
-	UpdatedAt string `json:"updated_at"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+}
+
+// ActiveMindState 持久化心智状态（顶层字段为搭档私聊主轨，Public 为显式固定的公用/群聊轨）
+type ActiveMindState struct {
+	Channel   string         `json:"channel"`
+	Model     string         `json:"model"`
+	Effort    string         `json:"effort,omitempty"`
+	UpdatedAt string         `json:"updated_at"`
+	Public    *MindSlotState `json:"public,omitempty"`
 }
 
 // ChannelRegistration 通道驱动与模型池注册描述
@@ -74,11 +89,13 @@ type SwitchRequest struct {
 	Target  string // 目标模型 ID 或关键字
 	Channel string // 可选指定通道类型
 	Effort  string // 可选指定思考强度 (low, medium, high, xhigh, max)
+	Scope   string // 可选作用轨道: "partner" (默认), "public", "both"
 }
 
 // SwitchResult 切换结果
 type SwitchResult struct {
 	Status     string      `json:"status"` // "success", "ambiguous", "error"
+	Scope      string      `json:"scope,omitempty"`
 	Channel    string      `json:"channel,omitempty"`
 	Model      string      `json:"model,omitempty"`
 	Name       string      `json:"name,omitempty"`
@@ -87,12 +104,14 @@ type SwitchResult struct {
 	Candidates []ModelInfo `json:"candidates,omitempty"`
 }
 
-// MindRouter 异构多心智开放路由器 (实现 core.LLMProvider，支持动态模型自发现)
+// MindRouter 异构多心智开放路由器 (实现 core.LLMProvider，支持搭档私聊主轨与公用沙箱轨双轨独立调度)
 type MindRouter struct {
 	mu                    sync.RWMutex
 	statePath             string
 	fallbackChannel       string
 	active                ActiveMindState
+	public                MindSlotState
+	publicPinned          bool
 	providers             map[string]core.LLMProvider
 	models                []ModelInfo
 	discoveryStatus       map[string]ModelDiscoveryStatus
@@ -238,6 +257,128 @@ func (r *MindRouter) RegisterChannel(reg ChannelRegistration) {
 		}
 		r.syncProviderLocked(channelKey, r.active.Model, r.active.Effort)
 	}
+	r.reconcilePublicMindLocked(channelKey, models, discoveryFailed)
+}
+
+func capEffortValue(effort string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "high", "xhigh", "max":
+		return "medium", true
+	default:
+		return strings.ToLower(strings.TrimSpace(effort)), false
+	}
+}
+
+func capPublicEffortForModel(m ModelInfo, requested string) (string, bool) {
+	if !m.SupportsEffort {
+		return "", false
+	}
+	eff, capped := capEffortValue(requested)
+	if eff != "" && isEffortAllowed(m, eff) {
+		return eff, capped
+	}
+	for _, candidate := range []string{"medium", "low"} {
+		if isEffortAllowed(m, candidate) {
+			return candidate, capped
+		}
+	}
+	if def, _ := capEffortValue(m.DefaultEffort); def != "" && isEffortAllowed(m, def) {
+		return def, capped
+	}
+	if len(m.SupportedEfforts) > 0 {
+		first, firstCapped := capEffortValue(m.SupportedEfforts[0])
+		if isEffortAllowed(m, first) {
+			return first, capped || firstCapped
+		}
+		return m.SupportedEfforts[0], capped
+	}
+	return "", capped
+}
+
+func publicModelRank(id string) int {
+	lower := strings.ToLower(strings.TrimSpace(id))
+	switch {
+	case strings.Contains(lower, "flash"):
+		return 1
+	case strings.Contains(lower, "argon") || strings.Contains(lower, "carbon") || strings.Contains(lower, "sonnet"):
+		return 2
+	case !strings.Contains(lower, "opus") && !strings.Contains(lower, "orchestrator"):
+		return 3
+	default:
+		return 4
+	}
+}
+
+func (r *MindRouter) selectDefaultPublicMindLocked() MindSlotState {
+	if r.providers["AGY"] != nil {
+		var best *ModelInfo
+		bestRank := 99
+		for i := range r.models {
+			if !strings.EqualFold(r.models[i].Channel, "AGY") {
+				continue
+			}
+			rank := publicModelRank(r.models[i].ID)
+			if best == nil || rank < bestRank {
+				best = &r.models[i]
+				bestRank = rank
+			}
+		}
+		if best != nil {
+			eff, _ := capPublicEffortForModel(*best, best.DefaultEffort)
+			return MindSlotState{
+				Channel:   best.Channel,
+				Model:     best.ID,
+				Effort:    eff,
+				UpdatedAt: time.Now().Format(time.RFC3339),
+			}
+		}
+	}
+	if r.active.Channel != "" && r.active.Model != "" {
+		eff, _ := capEffortValue(r.active.Effort)
+		for i := range r.models {
+			if strings.EqualFold(r.models[i].Channel, r.active.Channel) && strings.EqualFold(r.models[i].ID, r.active.Model) {
+				eff, _ = capPublicEffortForModel(r.models[i], r.active.Effort)
+				break
+			}
+		}
+		return MindSlotState{
+			Channel:   r.active.Channel,
+			Model:     r.active.Model,
+			Effort:    eff,
+			UpdatedAt: r.active.UpdatedAt,
+		}
+	}
+	return MindSlotState{}
+}
+
+func (r *MindRouter) reconcilePublicMindLocked(channelKey string, channelModels []ModelInfo, discoveryFailed bool) {
+	if !r.publicPinned || r.public.Channel == "" || r.public.Model == "" {
+		r.public = r.selectDefaultPublicMindLocked()
+		return
+	}
+	if !strings.EqualFold(r.public.Channel, channelKey) || discoveryFailed || len(channelModels) == 0 {
+		return
+	}
+	var matched *ModelInfo
+	for i := range channelModels {
+		if strings.EqualFold(channelModels[i].ID, r.public.Model) {
+			matched = &channelModels[i]
+			break
+		}
+	}
+	previous := r.public
+	if matched == nil {
+		r.publicPinned = false
+		r.public = r.selectDefaultPublicMindLocked()
+		r.saveActiveStateLocked(r.public.Channel)
+		return
+	}
+	eff, _ := capPublicEffortForModel(*matched, r.public.Effort)
+	if eff != previous.Effort {
+		r.public.Effort = eff
+		r.public.UpdatedAt = time.Now().Format(time.RFC3339)
+		r.saveActiveStateLocked(r.public.Channel)
+	}
 }
 
 // saveActiveStateLocked persists a recovered active model. Keep the usable
@@ -248,11 +389,29 @@ func (r *MindRouter) saveActiveStateLocked(channel string) {
 	}
 }
 
-// CurrentMind 获取当前激活的心智与思考强度
+// CurrentMind 获取当前搭档私聊主轨激活的心智与思考强度
 func (r *MindRouter) CurrentMind() ActiveMindState {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.active
+	st := r.active
+	st.Public = nil
+	return st
+}
+
+// PublicMind 获取当前群聊与非搭档公用轨激活的心智与思考强度
+func (r *MindRouter) PublicMind() MindSlotState {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.public.Channel != "" && r.public.Model != "" {
+		return r.public
+	}
+	eff, _ := capEffortValue(r.active.Effort)
+	return MindSlotState{
+		Channel:   r.active.Channel,
+		Model:     r.active.Model,
+		Effort:    eff,
+		UpdatedAt: r.active.UpdatedAt,
+	}
 }
 
 // HasConfiguredRoute reports whether the selected model is registered and backed by a provider.
@@ -262,10 +421,32 @@ func (r *MindRouter) HasConfiguredRoute() bool {
 	return r.active.Model != "" && r.providers[r.active.Channel] != nil
 }
 
-// FormatCurrentStatus 格式化当前激活的心智运行状态摘要
+func resolveDisplayModelName(models []ModelInfo, channel, modelID string) string {
+	for _, m := range models {
+		if m.ID == modelID && (channel == "" || strings.EqualFold(m.Channel, channel)) {
+			if strings.TrimSpace(m.Name) != "" {
+				return m.Name
+			}
+			break
+		}
+	}
+	return modelID
+}
+
+// FormatCurrentStatus 格式化完整双轨心智运行状态摘要（供 /model 与搭档视图使用）
 func (r *MindRouter) FormatCurrentStatus() string {
+	return r.FormatStatusFor(true)
+}
+
+// FormatStatusFor 按会话范围格式化心智运行状态：搭档私聊展示双轨完整视图，其他会话仅展示公用轨状态。
+func (r *MindRouter) FormatStatusFor(partnerPrivate bool) string {
 	r.mu.RLock()
 	curr := r.active
+	pub := r.public
+	if pub.Channel == "" || pub.Model == "" {
+		eff, _ := capEffortValue(curr.Effort)
+		pub = MindSlotState{Channel: curr.Channel, Model: curr.Model, Effort: eff}
+	}
 	models := cloneModelInfos(r.models)
 	fallbackChannel := r.fallbackChannel
 	fallbackProvider := r.providers[fallbackChannel]
@@ -275,28 +456,46 @@ func (r *MindRouter) FormatCurrentStatus() string {
 		return ""
 	}
 
-	modelName := curr.Model
-	for _, m := range models {
-		if m.ID == curr.Model && (curr.Channel == "" || strings.EqualFold(m.Channel, curr.Channel)) {
-			if strings.TrimSpace(m.Name) != "" {
-				modelName = m.Name
-			}
-			break
-		}
-	}
-
 	var sb strings.Builder
-	sb.WriteString("### 首选聊天模型\n")
-	fmt.Fprintf(&sb, "🤖 模型：%s\n", modelName)
-	if modelName != curr.Model {
-		fmt.Fprintf(&sb, "模型 ID：`%s`\n", curr.Model)
-	}
-	fmt.Fprintf(&sb, "🔌 通道：%s\n", curr.Channel)
-	if curr.Effort != "" {
-		fmt.Fprintf(&sb, "💭 思考强度：%s\n", curr.Effort)
-	}
-	if fallbackProvider != nil && !strings.EqualFold(curr.Channel, fallbackChannel) {
-		fmt.Fprintf(&sb, "\n### 备用与轻量分类模型\n模型：`%s`\n通道：%s\n首选通道调用失败/配额耗尽兜底及高频分类门控时使用；非搭档私聊的 AGY 调用运行于 bwrap 内核隔离沙箱。\n", providerModelID(fallbackProvider), fallbackChannel)
+	if partnerPrivate {
+		modelName := resolveDisplayModelName(models, curr.Channel, curr.Model)
+		sb.WriteString("### 首选聊天模型（搭档私聊）\n")
+		fmt.Fprintf(&sb, "🤖 模型：%s\n", modelName)
+		if modelName != curr.Model {
+			fmt.Fprintf(&sb, "模型 ID：`%s`\n", curr.Model)
+		}
+		fmt.Fprintf(&sb, "🔌 通道：%s\n", curr.Channel)
+		if curr.Effort != "" {
+			fmt.Fprintf(&sb, "💭 思考强度：%s\n", curr.Effort)
+		}
+
+		if pub.Model != "" {
+			pubName := resolveDisplayModelName(models, pub.Channel, pub.Model)
+			sb.WriteString("\n### 群聊与公用模型（bwrap 沙箱）\n")
+			fmt.Fprintf(&sb, "🤖 模型：%s\n", pubName)
+			if pubName != pub.Model {
+				fmt.Fprintf(&sb, "模型 ID：`%s`\n", pub.Model)
+			}
+			fmt.Fprintf(&sb, "🔌 通道：%s\n", pub.Channel)
+			if pub.Effort != "" {
+				fmt.Fprintf(&sb, "💭 思考强度：%s（上限 medium）\n", pub.Effort)
+			}
+		}
+
+		if fallbackProvider != nil && !strings.EqualFold(curr.Channel, fallbackChannel) {
+			fmt.Fprintf(&sb, "\n### 备用与轻量分类模型\n模型：`%s`\n通道：%s\n首选通道调用失败/配额耗尽兜底及高频分类门控时使用；非搭档私聊的 AGY 调用运行于 bwrap 内核隔离沙箱。\n", providerModelID(fallbackProvider), fallbackChannel)
+		}
+	} else {
+		pubName := resolveDisplayModelName(models, pub.Channel, pub.Model)
+		sb.WriteString("### 当前会话模型（公用轨）\n")
+		fmt.Fprintf(&sb, "🤖 模型：%s\n", pubName)
+		if pubName != pub.Model {
+			fmt.Fprintf(&sb, "模型 ID：`%s`\n", pub.Model)
+		}
+		fmt.Fprintf(&sb, "🔌 通道：%s\n", pub.Channel)
+		if pub.Effort != "" {
+			fmt.Fprintf(&sb, "💭 思考强度：%s\n", pub.Effort)
+		}
 	}
 	sb.WriteString("\n以上为路由设置，不代表每一轮实际使用的模型。")
 	return strings.TrimSpace(sb.String())

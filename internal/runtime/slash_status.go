@@ -28,7 +28,7 @@ func (a *SuperAgent) handleStatusCommand(ctx context.Context, event *entity.Sens
 		}
 	}
 	sections = append(sections, core.FormatSystemStatusWithPerm(event.IsPartnerPrivate()))
-	if event.Role != entity.RoleGuest {
+	if event.IsPartnerPrivate() {
 		if a.Workspaces != nil {
 			sections = append(sections, a.Workspaces.FormatCurrent(event.Platform, event.ChannelID))
 		}
@@ -159,6 +159,10 @@ func (a *SuperAgent) handleStopCommand(ctx context.Context, event *entity.Sensor
 	}
 	parts := strings.Fields(strings.TrimSpace(content))
 	if len(parts) > 1 {
+		if event.IsGroup {
+			a.replyText(ctx, event, fmt.Sprintf("工程工单仅用于私聊工程协作，请在与%s的私聊中管理。", config.BotName()))
+			return
+		}
 		if len(parts) != 2 || a.Delegates == nil {
 			a.replyText(ctx, event, "用法：/stop [工单编号]")
 			return
@@ -194,7 +198,7 @@ func (a *SuperAgent) handleStopCommand(ctx context.Context, event *entity.Sensor
 	}
 	a.clearReplyContinuation(event)
 	aborted, stopping := 0, 0
-	if a.Delegates != nil {
+	if !event.IsGroup && a.Delegates != nil {
 		aborted = a.Delegates.AbortByRequester(event.Platform, event.ChannelID, event.SenderID)
 		for _, ticket := range a.Delegates.ActiveTicketsFor(event.Platform, event.SenderID, event.ChannelID) {
 			if ticket.Status == entity.TicketStopping {
@@ -203,6 +207,9 @@ func (a *SuperAgent) handleStopCommand(ctx context.Context, event *entity.Sensor
 		}
 	}
 	msg := "当前没有正在运行中的思考任务或后台工单。"
+	if event.IsGroup {
+		msg = "当前没有正在进行的思考任务。"
+	}
 	switch {
 	case aborted > 0 && stoppedThinking:
 		msg = fmt.Sprintf("已紧急中断当前思考进程，并向 %d 个后台工单发出停止请求（尚未启动的任务已取消；运行中任务退出后释放执行容量）。", aborted)
@@ -218,16 +225,20 @@ func (a *SuperAgent) handleStopCommand(ctx context.Context, event *entity.Sensor
 	a.replyText(ctx, event, msg)
 }
 
-func (a *SuperAgent) handleResetCommand(ctx context.Context, event *entity.SensoryEvent, _ string) {
+func (a *SuperAgent) handleResetCommand(ctx context.Context, event *entity.SensoryEvent, content string) {
 	if err := a.delegationPermissionError(event.Role); err != nil {
 		a.replyText(ctx, event, err.Error())
+		return
+	}
+	if event.IsGroup && strings.HasPrefix(strings.TrimSpace(content), "/ws") {
+		a.replyText(ctx, event, fmt.Sprintf("工作空间仅用于私聊工程协作，请在与%s的私聊中查看或切换。", config.BotName()))
 		return
 	}
 	a.cancelThinkingSession(event)
 	unlock := a.lockSession(event)
 	defer unlock()
 	currWs, wsName := "", ""
-	if a.Workspaces != nil {
+	if !event.IsGroup && a.Workspaces != nil {
 		var err error
 		currWs, wsName, err = a.Workspaces.GetCurrent(event.Platform, event.ChannelID)
 		if err != nil {
@@ -235,7 +246,7 @@ func (a *SuperAgent) handleResetCommand(ctx context.Context, event *entity.Senso
 			return
 		}
 	}
-	if a.Delegates != nil {
+	if !event.IsGroup && a.Delegates != nil {
 		_ = a.Delegates.AbortByChannel(event.Platform, event.ChannelID)
 	}
 	chatType := "private"
@@ -248,7 +259,11 @@ func (a *SuperAgent) handleResetCommand(ctx context.Context, event *entity.Senso
 	}
 	if err := a.database.ResetConversation(event.Platform, chatType, event.ChannelID); err != nil {
 		slog.Error("superagent: 重开会话时清理近期历史失败", "platform", event.Platform, "channelID", event.ChannelID, "err", err)
-		a.replyText(ctx, event, "【会话重开失败】\n近期对话历史未能清理，AGY 会话记录未清空；已中断的任务不会自动恢复。请稍后重试。")
+		if event.IsGroup {
+			a.replyText(ctx, event, "【会话重开失败】\n本群近期对话历史未能清理，请稍后重试。")
+		} else {
+			a.replyText(ctx, event, "【会话重开失败】\n近期对话历史未能清理，AGY 会话记录未清空；已中断的任务不会自动恢复。请稍后重试。")
+		}
 		return
 	}
 	a.clearSessionReplyContinuations(event)
@@ -260,6 +275,10 @@ func (a *SuperAgent) handleResetCommand(ctx context.Context, event *entity.Senso
 			a.replyText(ctx, event, "近期对话已重置，但早报指代上下文未能清除，请稍后重试。 ")
 			return
 		}
+	}
+	if event.IsGroup {
+		a.replyText(ctx, event, "【当前群聊会话已完成重开】\n已清空本群近期对话记忆，长期画像完好保留。")
+		return
 	}
 	if a.Delegates != nil {
 		if err := a.Delegates.ResetSession(event.Platform, event.ChannelID, currWs); err != nil {

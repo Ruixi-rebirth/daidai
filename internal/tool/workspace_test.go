@@ -66,6 +66,22 @@ func TestWorkspaceTool_CurrentListAndSwitch(t *testing.T) {
 		t.Errorf("expected guest to be blocked, got: %s", resGuest.Text)
 	}
 
+	// 2b. 搭档在群聊中尝试工作空间工具也应被拒绝且不暴露路径
+	groupPartnerCtx := entity.WithSensoryEvent(context.Background(), &entity.SensoryEvent{
+		Platform:  "qq",
+		ChannelID: "chan_qq_1",
+		IsGroup:   true,
+		SenderID:  "partner_101",
+		Role:      entity.RolePartner,
+	})
+	resGroup, err := wsTool.Execute(groupPartnerCtx, json.RawMessage(`{"action":"current"}`))
+	if err != nil {
+		t.Fatalf("execute group current failed: %v", err)
+	}
+	if !strings.Contains(resGroup.Text, "私聊") || strings.Contains(resGroup.Text, "project-1") || strings.Contains(resGroup.Text, tempBase) {
+		t.Errorf("expected group workspace tool call to require private chat without leaking path, got: %s", resGroup.Text)
+	}
+
 	// 3. 搭档切换并激活 project-2
 	resSwitch, err := wsTool.Execute(partnerCtx, json.RawMessage(`{"action":"switch","target":"`+projB+`"}`))
 	if err != nil {

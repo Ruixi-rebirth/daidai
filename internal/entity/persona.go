@@ -82,7 +82,7 @@ func (p *Persona) CompilePromptFor(event *SensoryEvent, toolsAvailable bool) str
 	}
 	isPartner := event.Role == RolePartner
 	supportsStickers := (event.Platform == "qq" || event.Platform == "telegram") && !event.GroupInterjection
-	return p.compilePrompt(event.IsGroup, isPartner, supportsStickers, toolsAvailable && isPartner)
+	return p.compilePrompt(event.IsGroup, isPartner, supportsStickers, toolsAvailable && event.IsPartnerPrivate())
 }
 
 // CompileGroupVoicePrompt keeps short group interjections to identity, inner core, and voice rules.

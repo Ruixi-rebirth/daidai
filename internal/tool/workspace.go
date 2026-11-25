@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"daidai/internal/config"
 	"daidai/internal/core"
 	"daidai/internal/entity"
 )
@@ -74,6 +75,9 @@ func (t *WorkspaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*
 	role := entity.RoleGuest
 	event := entity.SensoryEventFromContext(ctx)
 	if event != nil {
+		if event.IsGroup {
+			return &core.ToolResult{Text: fmt.Sprintf("工作空间仅用于私聊工程协作，请在与%s的私聊中查看或切换。", config.BotName())}, nil
+		}
 		platform = event.Platform
 		channelID = event.ChannelID
 		role = event.Role

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"daidai/internal/config"
 	"daidai/internal/core"
 	"daidai/internal/entity"
 	"daidai/internal/media"
@@ -128,6 +129,9 @@ func (t *DelegateTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*c
 	}
 	if permErr := t.immune.VerifyDelegationPerm(event.Role); permErr != nil {
 		return &core.ToolResult{Text: permErr.Error()}, nil
+	}
+	if event.IsGroup {
+		return &core.ToolResult{Text: fmt.Sprintf("工程工单仅用于私聊工程协作，请在与%s的私聊中发起。", config.BotName())}, nil
 	}
 
 	var args delegateArgs

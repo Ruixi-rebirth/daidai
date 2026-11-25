@@ -9,12 +9,24 @@ import (
 	"strings"
 	"time"
 
+	"daidai/internal/config"
 	"daidai/internal/core"
 )
 
-func (a *SuperAgent) handleTaskCommand(ctx context.Context, event *entity.SensoryEvent, content string) {
+func (a *SuperAgent) requirePrivateTicketCommand(ctx context.Context, event *entity.SensoryEvent) bool {
 	if err := a.delegationPermissionError(event.Role); err != nil {
 		a.replyText(ctx, event, err.Error())
+		return false
+	}
+	if event.IsGroup {
+		a.replyText(ctx, event, fmt.Sprintf("工程工单仅用于私聊工程协作，请在与%s的私聊中查看或管理。", config.BotName()))
+		return false
+	}
+	return true
+}
+
+func (a *SuperAgent) handleTaskCommand(ctx context.Context, event *entity.SensoryEvent, content string) {
+	if !a.requirePrivateTicketCommand(ctx, event) {
 		return
 	}
 	parts := strings.Fields(content)
@@ -98,8 +110,7 @@ func (a *SuperAgent) handleTaskCommand(ctx context.Context, event *entity.Sensor
 }
 
 func (a *SuperAgent) handleTasksCommand(ctx context.Context, event *entity.SensoryEvent, _ string) {
-	if err := a.delegationPermissionError(event.Role); err != nil {
-		a.replyText(ctx, event, err.Error())
+	if !a.requirePrivateTicketCommand(ctx, event) {
 		return
 	}
 	if a.Delegates == nil {

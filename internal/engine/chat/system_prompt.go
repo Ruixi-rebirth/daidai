@@ -24,11 +24,13 @@ func (c *Cortex) buildSystemPrompt(event *entity.SensoryEvent, request chatReque
 		runtimeContext.WriteString(entity.CircadianRhythm(now) + "\n")
 	}
 
-	if mindStatus := c.MindStatus(); mindStatus != "" {
-		runtimeContext.WriteString(mindStatus + "\n")
+	if event != nil && event.Role == entity.RolePartner {
+		if mindStatus := c.MindStatusFor(event); mindStatus != "" {
+			runtimeContext.WriteString(mindStatus + "\n")
+		}
 	}
 
-	if c.workspaces != nil && event != nil && event.Role != entity.RoleGuest {
+	if c.workspaces != nil && event.IsPartnerPrivate() {
 		wsPath, wsName, wsErr := c.workspaces.GetCurrent(event.Platform, event.ChannelID)
 		if wsErr != nil {
 			runtimeContext.WriteString("【当前工作空间】：读取失败；无法确认工作目录。\n")
@@ -51,8 +53,10 @@ func (c *Cortex) buildSystemPrompt(event *entity.SensoryEvent, request chatReque
 	}
 	sysPrompt += "\n" + actionEvidencePolicy
 	sysPrompt += "\n【流程图】复杂流程或关系只有在图示能明显帮助理解时才使用 Mermaid 代码块；流程图以外仍正常回答。服务端会把 mermaid 代码块渲染成图片并嵌入回复。用户明确指定 HTML 等格式时，按用户要求输出。"
-	if !event.IsPartnerPrivate() {
-		sysPrompt += "\n【宿主机隐私】当前会话不得探测、查询或透露宿主机公网 IP。"
+	if event != nil && event.IsGroup && event.Role == entity.RolePartner {
+		sysPrompt += "\n【会话隔离边界】群聊与宿主机目录、工作空间及工程命令硬隔离（固定安全边界，无法在群里开启），且不得透露宿主机公网 IP。若搭档在群里要求查看本地目录、操作项目文件或跑命令，直接自然提醒群里不连本地目录、私聊找你处理，绝不说‘没开权限’或‘去改宿主配置’。"
+	} else if !event.IsPartnerPrivate() {
+		sysPrompt += "\n【会话隔离边界】当前会话仅做日常交流与公开信息协助，不连接任何本地目录或宿主环境，不得探测或透露宿主机公网 IP，也绝不向对方提及‘没开权限’‘沙箱’或‘宿主配置’等内部机制。"
 	}
 	sysPrompt += "\n【本轮请求】用户输入以 JSON 提供，current_request 是本轮消息。"
 	if request.QuotedMessage != nil {

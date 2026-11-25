@@ -25,6 +25,17 @@ func (r *MindRouter) loadState() error {
 	if st.Channel == "" || st.Model == "" {
 		return fmt.Errorf("invalid state format")
 	}
+	if st.Public != nil && st.Public.Channel != "" && st.Public.Model != "" {
+		eff, _ := capEffortValue(st.Public.Effort)
+		r.public = MindSlotState{
+			Channel:   st.Public.Channel,
+			Model:     st.Public.Model,
+			Effort:    eff,
+			UpdatedAt: st.Public.UpdatedAt,
+		}
+		r.publicPinned = true
+	}
+	st.Public = nil
 	r.active = st
 	return nil
 }
@@ -34,7 +45,14 @@ func (r *MindRouter) saveState() error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(r.active, "", "  ")
+	persisted := r.active
+	if r.publicPinned && r.public.Channel != "" && r.public.Model != "" {
+		pubCopy := r.public
+		persisted.Public = &pubCopy
+	} else {
+		persisted.Public = nil
+	}
+	data, err := json.MarshalIndent(persisted, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -97,16 +115,28 @@ func (r *MindRouter) ChatWithTools(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	usePublic := opts != nil && opts.ReadOnly
 	r.mu.RLock()
-	channel := r.active.Channel
-	model := r.active.Model
+	slot := MindSlotState{
+		Channel: r.active.Channel,
+		Model:   r.active.Model,
+		Effort:  r.active.Effort,
+	}
+	if usePublic && r.public.Channel != "" && r.public.Model != "" {
+		slot = r.public
+	}
+	channel := slot.Channel
+	model := slot.Model
 	activeProvider := r.providers[channel]
 	fallbackProvider := r.providers[r.fallbackChannel]
 	r.mu.RUnlock()
 
+	fallbackOpts := stripRouteModelOpts(opts)
+	primaryOpts := withRouteModelOpts(opts, slot.Model, slot.Effort)
+
 	// 高频机械分类/门控请求优先直连低延迟兜底通道，避免为布尔判定拉起 CLI 子进程。
 	if opts != nil && opts.FastRoute && !strings.EqualFold(channel, r.fallbackChannel) && fallbackProvider != nil {
-		resp, err := fallbackProvider.ChatWithTools(ctx, messages, tools, opts)
+		resp, err := fallbackProvider.ChatWithTools(ctx, messages, tools, fallbackOpts)
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -123,7 +153,7 @@ func (r *MindRouter) ChatWithTools(
 		}
 		slog.Warn("当前激活的心智通道未挂载，降级至兜底通道",
 			"channel", channel, "fallbackChannel", r.fallbackChannel)
-		resp, err := fallbackProvider.ChatWithTools(ctx, messages, tools, opts)
+		resp, err := fallbackProvider.ChatWithTools(ctx, messages, tools, fallbackOpts)
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -136,7 +166,7 @@ func (r *MindRouter) ChatWithTools(
 		return resp, nil
 	}
 
-	resp, err := activeProvider.ChatWithTools(ctx, messages, tools, opts)
+	resp, err := activeProvider.ChatWithTools(ctx, messages, tools, primaryOpts)
 	if ctx.Err() != nil {
 		var unsafeErr *core.UncertainExecutionError
 		if errors.As(err, &unsafeErr) {
@@ -159,7 +189,7 @@ func (r *MindRouter) ChatWithTools(
 		slog.Warn("当前心智通道执行遇到异常，启动弹性降级机制至兜底通道",
 			"channel", channel, "model", model, "fallbackChannel", r.fallbackChannel, "err", err)
 
-		fbResp, fbErr := fallbackProvider.ChatWithTools(ctx, messages, tools, opts)
+		fbResp, fbErr := fallbackProvider.ChatWithTools(ctx, messages, tools, fallbackOpts)
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -173,6 +203,33 @@ func (r *MindRouter) ChatWithTools(
 	}
 
 	return nil, fmt.Errorf("%s 通道心智驱动执行失败: %w", channel, err)
+}
+
+func withRouteModelOpts(opts *core.ChatOptions, model, effort string) *core.ChatOptions {
+	if strings.TrimSpace(model) == "" && strings.TrimSpace(effort) == "" {
+		return opts
+	}
+	if opts == nil {
+		return &core.ChatOptions{
+			Temperature: 0.7,
+			Model:       model,
+			Effort:      effort,
+		}
+	}
+	copied := *opts
+	copied.Model = model
+	copied.Effort = effort
+	return &copied
+}
+
+func stripRouteModelOpts(opts *core.ChatOptions) *core.ChatOptions {
+	if opts == nil || (opts.Model == "" && opts.Effort == "") {
+		return opts
+	}
+	copied := *opts
+	copied.Model = ""
+	copied.Effort = ""
+	return &copied
 }
 
 func isEmptyChatResponse(resp *core.ChatResponse) bool {

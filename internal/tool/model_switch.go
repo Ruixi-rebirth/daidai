@@ -65,6 +65,11 @@ func (t *ModelSwitchTool) Parameters() map[string]any {
 				"enum":        []string{"low", "medium", "high", "xhigh", "max"},
 				"description": "可选指定的思考强度（推理深度），适用于支持推理深度调节的模型",
 			},
+			"scope": map[string]any{
+				"type":        "string",
+				"enum":        []string{"partner", "public", "both"},
+				"description": "切换作用轨道：'partner' 仅切换搭档私聊主轨模型，'public' 仅切换群聊与非搭档公用模型轨（思考强度上限 medium），'both' 双轨同步切换。留空时按当前会话自动决定（私聊默认 'partner'，群聊默认 'public'）",
+			},
 		},
 	}
 }
@@ -74,6 +79,7 @@ type switchArgs struct {
 	Model   string `json:"model"`
 	Channel string `json:"channel"`
 	Effort  string `json:"effort"`
+	Scope   string `json:"scope"`
 }
 
 func (t *ModelSwitchTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.ToolResult, error) {
@@ -117,7 +123,15 @@ func (t *ModelSwitchTool) Execute(ctx context.Context, rawArgs json.RawMessage) 
 		if err := t.immune.VerifyDelegationPerm(ev.Role); err != nil {
 			return &core.ToolResult{Text: err.Error()}, nil
 		}
-		return t.handleSwitch(ctx, model, channel, effort), nil
+		scope := strings.ToLower(strings.TrimSpace(args.Scope))
+		if scope == "" {
+			if ev.IsGroup {
+				scope = llm.MindScopePublic
+			} else {
+				scope = llm.MindScopePartner
+			}
+		}
+		return t.handleSwitch(ctx, model, channel, effort, scope), nil
 	default:
 		return &core.ToolResult{
 			Text: fmt.Sprintf("未知操作 %q，支持的操作为 current, list, switch, usage", action),
@@ -156,6 +170,7 @@ func (t *ModelSwitchTool) handleList(ctx context.Context, channelFilter string) 
 	t.router.RefreshModels(ctx)
 	models := t.router.CachedModels()
 	curr := t.router.CurrentMind()
+	pub := t.router.PublicMind()
 
 	channelsMap := make(map[string][]llm.ModelInfo)
 	channelOrder := t.router.Channels()
@@ -215,14 +230,29 @@ func (t *ModelSwitchTool) handleList(ctx context.Context, channelFilter string) 
 			continue
 		}
 		for _, m := range chModels {
+			isPartnerActive := strings.EqualFold(curr.Channel, ch) && curr.Model == m.ID
+			isPublicActive := strings.EqualFold(pub.Channel, ch) && pub.Model == m.ID
 			activeTag := ""
-			if strings.EqualFold(curr.Channel, ch) && curr.Model == m.ID {
+			switch {
+			case isPartnerActive && isPublicActive:
+				effortDesc := ""
+				if curr.Effort != "" {
+					effortDesc = fmt.Sprintf(", 私聊强度: %s / 公用强度: %s", curr.Effort, pub.Effort)
+				}
+				activeTag = fmt.Sprintf(" *(首选聊天 · 双轨共用%s)*", effortDesc)
+			case isPartnerActive:
 				effortDesc := ""
 				if curr.Effort != "" {
 					effortDesc = fmt.Sprintf(", 思考强度: %s", curr.Effort)
 				}
-				activeTag = fmt.Sprintf(" *(首选聊天%s)*", effortDesc)
-			} else if m.ID == configuredModel {
+				activeTag = fmt.Sprintf(" *(首选聊天 · 搭档私聊%s)*", effortDesc)
+			case isPublicActive:
+				effortDesc := ""
+				if pub.Effort != "" {
+					effortDesc = fmt.Sprintf(", 思考强度: %s", pub.Effort)
+				}
+				activeTag = fmt.Sprintf(" *(群聊/公用首选%s)*", effortDesc)
+			case m.ID == configuredModel:
 				activeTag = " *(" + modelUsage + ")*"
 			}
 			efforts := ""
@@ -242,14 +272,14 @@ func (t *ModelSwitchTool) handleList(ctx context.Context, channelFilter string) 
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString("想切换模型，直接说“切换到 <模型名称>”；想调整推理深度，直接说“把思考强度调到 high”。我会根据上面的可用模型和各模型支持的强度执行。")
+	sb.WriteString("想切换模型，直接说“切换到 <模型名称>”（私聊默认切搭档私聊轨，群聊默认切公用轨）；也可明确说“把公用模型切换到 <模型名称>”或“全局切换到 <模型名称>”。")
 
 	return &core.ToolResult{
 		Text: strings.TrimSpace(sb.String()),
 	}
 }
 
-func (t *ModelSwitchTool) handleSwitch(ctx context.Context, model, channel, effort string) *core.ToolResult {
+func (t *ModelSwitchTool) handleSwitch(ctx context.Context, model, channel, effort, scope string) *core.ToolResult {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -262,6 +292,7 @@ func (t *ModelSwitchTool) handleSwitch(ctx context.Context, model, channel, effo
 		Target:  model,
 		Channel: channel,
 		Effort:  effort,
+		Scope:   scope,
 	})
 	if err != nil {
 		return &core.ToolResult{
