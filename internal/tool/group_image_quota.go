@@ -27,7 +27,7 @@ func (t *GroupImageQuotaTool) Name() string {
 }
 
 func (t *GroupImageQuotaTool) Description() string {
-	return "管理当前群的非伙伴成员每日画图上限（仅伙伴可在群聊中使用，伙伴本人不受次数限制）。支持查看今日状态、设置每日次数上限（默认 10 次）、设为 0 关闭非伙伴画图、设为 -1 取消限制。"
+	return "管理当前群的普通群友（非伙伴与协作者）每日画图上限（仅伙伴可在群聊中使用，伙伴与协作者本人均不受次数限制）。支持查看今日状态、设置每日次数上限（默认 10 次）、设为 0 关闭普通群友画图、设为 -1 取消限制。"
 }
 
 func (t *GroupImageQuotaTool) Parameters() map[string]any {
@@ -37,11 +37,11 @@ func (t *GroupImageQuotaTool) Parameters() map[string]any {
 			"action": map[string]any{
 				"type":        "string",
 				"enum":        []string{"status", "set"},
-				"description": "status=查看当前群今日画图配额与使用情况；set=修改当前群的非伙伴每日画图上限",
+				"description": "status=查看当前群今日画图配额与使用情况；set=修改当前群的普通群友每日画图上限",
 			},
 			"daily_limit": map[string]any{
 				"type":        "integer",
-				"description": "仅 action=set 时需要：正整数表示每日全群非伙伴总上限（默认10），0 表示禁止非伙伴在群内画图，-1 表示不限制次数（伙伴始终豁免）",
+				"description": "仅 action=set 时需要：正整数表示每日全群普通群友总上限（默认10），0 表示禁止普通群友在群内画图，-1 表示不限制次数（伙伴与协作者始终豁免）",
 			},
 		},
 		"required": []string{"action"},
@@ -56,11 +56,11 @@ type groupImageQuotaArgs struct {
 func formatGroupImageQuotaStatus(status groupchat.ImageQuotaStatus) string {
 	switch {
 	case status.Disabled:
-		return fmt.Sprintf("当前群非伙伴画图已关闭（每日上限 0，日期 %s；伙伴不受此限制）。", status.Date)
+		return fmt.Sprintf("当前群普通群友画图已关闭（每日上限 0，日期 %s；伙伴与协作者不受此限制）。", status.Date)
 	case status.Unlimited:
-		return fmt.Sprintf("当前群非伙伴画图不限次数（日期 %s；伙伴亦豁免）。", status.Date)
+		return fmt.Sprintf("当前群普通群友画图不限次数（日期 %s；伙伴与协作者亦豁免）。", status.Date)
 	default:
-		return fmt.Sprintf("当前群非伙伴每日画图上限为 %d 次，今日（%s）已用 %d 次，剩余 %d 次（伙伴不计入也不受限）。",
+		return fmt.Sprintf("当前群普通群友每日画图上限为 %d 次，今日（%s）已用 %d 次，剩余 %d 次（伙伴与协作者不计入也不受限）。",
 			status.Limit, status.Date, status.Used, status.Remaining)
 	}
 }

@@ -103,14 +103,18 @@ func (t *ImageTool) SetImageQuotaStore(store *groupchat.ImageQuotaStore) {
 	}
 }
 
-func (t *ImageTool) isPartner(event *entity.SensoryEvent) bool {
+func (t *ImageTool) isQuotaExempt(event *entity.SensoryEvent) bool {
 	if event == nil {
 		return false
 	}
-	if event.Role == entity.RolePartner {
+	if event.Role == entity.RolePartner || event.Role == entity.RoleCollaborator {
 		return true
 	}
-	return t.immune != nil && t.immune.ResolveRole(event.SenderID) == entity.RolePartner
+	if t.immune == nil {
+		return false
+	}
+	role := t.immune.ResolveRole(event.SenderID)
+	return role == entity.RolePartner || role == entity.RoleCollaborator
 }
 
 func buildImageGenGoal(prompt, absOutFile string) (string, error) {
@@ -218,7 +222,7 @@ func (t *ImageTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 
 	var consumedDate string
 	var consumedLimit int
-	if event.IsGroup && !t.isPartner(event) && t.imageQuota != nil {
+	if event.IsGroup && !t.isQuotaExempt(event) && t.imageQuota != nil {
 		allowed, status, err := t.imageQuota.TryConsume(ctx, event.Platform, event.ChannelID, time.Now())
 		if err != nil {
 			slog.Warn("image_tool: 校验群画图配额失败", "platform", event.Platform, "group", event.ChannelID, "err", err)
@@ -226,10 +230,10 @@ func (t *ImageTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 		}
 		if !allowed {
 			if status.Disabled {
-				return &core.ToolResult{Text: "本群当前已关闭非伙伴成员画图功能（需由伙伴调整配额）。"}, nil
+				return &core.ToolResult{Text: "本群当前已关闭普通群友画图功能（需由伙伴调整配额，伙伴与协作者不受限制）。"}, nil
 			}
 			return &core.ToolResult{
-				Text: fmt.Sprintf("本群今日非伙伴画图配额已用完（%d/%d），明天再试或由伙伴调整上限（伙伴本人不受限制）。", status.Used, status.Limit),
+				Text: fmt.Sprintf("本群今日普通群友画图配额已用完（%d/%d），明天再试或由伙伴调整上限（伙伴与协作者本人不受限制）。", status.Used, status.Limit),
 			}, nil
 		}
 		if status.Limit > 0 {

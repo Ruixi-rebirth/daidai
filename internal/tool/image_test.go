@@ -144,7 +144,7 @@ func TestImageTool_GroupQuotaAndPartnerExemption(t *testing.T) {
 		t.Fatalf("expected quota exhausted message, got: %s", res.Text)
 	}
 
-	// Partner in the same exhausted group is exempt and reaches AGY.
+	// Partner and collaborator in the same exhausted group are exempt and reach AGY.
 	res, err = imgTool.Execute(partnerCtx, rawPrompt)
 	if err != nil {
 		t.Fatalf("partner Execute returned err: %v", err)
@@ -152,8 +152,22 @@ func TestImageTool_GroupQuotaAndPartnerExemption(t *testing.T) {
 	if !strings.Contains(res.Text, "尚未登录") {
 		t.Fatalf("expected partner to bypass exhausted group quota, got: %s", res.Text)
 	}
+	collabCtx := entity.WithSensoryEvent(context.Background(), &entity.SensoryEvent{
+		Platform:  "qq",
+		ChannelID: "group-100",
+		SenderID:  "collab-1",
+		IsGroup:   true,
+		Role:      entity.RoleCollaborator,
+	})
+	res, err = imgTool.Execute(collabCtx, rawPrompt)
+	if err != nil {
+		t.Fatalf("collaborator Execute returned err: %v", err)
+	}
+	if !strings.Contains(res.Text, "尚未登录") {
+		t.Fatalf("expected collaborator to bypass exhausted group quota, got: %s", res.Text)
+	}
 
-	// Disable non-partner drawing (limit=0) -> guest rejected with disabled notice, partner still exempt.
+	// Disable guest drawing (limit=0) -> guest rejected with disabled notice, collaborator & partner still exempt.
 	disableArgs, _ := json.Marshal(map[string]any{"action": "set", "daily_limit": 0})
 	if _, err := quotaTool.Execute(partnerCtx, disableArgs); err != nil {
 		t.Fatalf("disable failed: %v", err)
@@ -162,8 +176,15 @@ func TestImageTool_GroupQuotaAndPartnerExemption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("guest disabled Execute returned err: %v", err)
 	}
-	if !strings.Contains(res.Text, "已关闭非伙伴成员画图") {
+	if !strings.Contains(res.Text, "已关闭普通群友画图") {
 		t.Fatalf("expected disabled message, got: %s", res.Text)
+	}
+	res, err = imgTool.Execute(collabCtx, rawPrompt)
+	if err != nil {
+		t.Fatalf("collaborator disabled-group Execute returned err: %v", err)
+	}
+	if !strings.Contains(res.Text, "尚未登录") {
+		t.Fatalf("expected collaborator to remain exempt when group guest drawing is disabled, got: %s", res.Text)
 	}
 
 	// Guest in private chat (authorized friend) is not limited by group quota.
