@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
 	"daidai/internal/core"
@@ -19,7 +20,7 @@ func (a *SuperAgent) notifyCognitionDeadline(event *SensoryEvent, deadlineErr, d
 	var uncertain *core.UncertainExecutionError
 	switch {
 	case errors.As(detailErr, &uncertain):
-		message = "AGY 任务超时，可能已经执行了部分操作，但最终结果无法确认。我没有自动重试以免重复操作；请先检查当前状态，再告诉我下一步。"
+		message = uncertainExecutionReply(detailErr)
 	case errors.As(detailErr, &checkpoint):
 		message = "这次处理超过时限，已有工具结果已保存。回复“/continue " + checkpoint.DraftID + "”接着写。" + checkpoint.Progress
 	}
@@ -45,7 +46,7 @@ func (a *SuperAgent) handleCognitionFailure(thinkCtx context.Context, event *Sen
 	errorReply := "这次处理没有完成。模型服务或任务运行发生错误；必要时回复“/continue”查看已保存的任务草稿。"
 	var uncertain *core.UncertainExecutionError
 	if errors.As(thinkErr, &uncertain) {
-		errorReply = "AGY 可能已经执行了部分操作，但我没能确认最终结果，所以没有自动重试以免重复操作。请先检查当前状态；确认后再告诉我继续处理。"
+		errorReply = uncertainExecutionReply(thinkErr)
 	}
 	sendCtx, cancel := context.WithTimeout(thinkCtx, 15*time.Second)
 	defer cancel()
@@ -55,4 +56,19 @@ func (a *SuperAgent) handleCognitionFailure(thinkCtx context.Context, event *Sen
 	commitCtx, commitCancel := context.WithTimeout(thinkCtx, 15*time.Second)
 	a.commitCognitionReply(commitCtx, event, errorReply)
 	commitCancel()
+}
+
+func uncertainExecutionReply(err error) string {
+	var uncertain *core.UncertainExecutionError
+	if errors.As(err, &uncertain) && uncertain.Err != nil {
+		err = uncertain.Err
+	}
+	detail := "执行返回异常，但没有提供错误详情"
+	if err != nil {
+		if text := strings.Join(strings.Fields(err.Error()), " "); text != "" {
+			detail = core.RedactSensitiveIPs(text)
+		}
+	}
+	detail = core.TruncateRunes(detail, 700, "…（错误详情已截断）")
+	return "AGY 执行结果未确认，我没有自动重试以免重复操作。当前错误：\n" + detail + "\n请先检查任务状态，再告诉我下一步。"
 }
