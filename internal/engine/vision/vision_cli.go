@@ -80,6 +80,14 @@ func (e *Engine) describeWithCLI(ctx context.Context, imageURLs []string, userTe
 	}
 
 	args := []string{"-p", prompt, "--output-format", "text", "--mode", "plan", "--sandbox", "--dangerously-skip-permissions"}
+	if e.cfg.Router != nil {
+		if model, effort, err := e.cfg.Router.ResolveModelAndEffortForChannel("flash", "", "low", "AGY"); err == nil && model != "" && !strings.EqualFold(model, "flash") {
+			args = append(args, "--model", model)
+			if effort != "" {
+				args = append(args, "--effort", effort)
+			}
+		}
+	}
 
 	var cmd *exec.Cmd
 	var credGuard llm.AGYCredentialGuard

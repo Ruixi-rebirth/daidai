@@ -57,8 +57,6 @@ func (a *SuperAgent) Process(ctx context.Context, event *entity.SensoryEvent) {
 	content := strings.TrimSpace(event.Content)
 	slog.Info("superagent: 感知事件流入大脑", "channel", event.ChannelID, "isGroup", event.IsGroup, "sender", event.SenderName, "role", event.Role, "contentBytes", len(content))
 	if event.GroupMessageObserved && ((!event.GroupInterjection && !event.GroupContinuation) || strings.HasPrefix(content, "/") || content == "继续" || a.Cognition == nil) {
-		unlock := a.lockSession(event)
-		defer unlock()
 		if event.StillValid == nil || event.StillValid() {
 			a.commitObservedGroupMessage(event)
 		}

@@ -32,7 +32,21 @@ func (m *Manager) SaveAgentTicket(ctx context.Context, platform string, t AgentT
 		WHERE excluded.updated_at > agent_tickets.updated_at`, t.ID, t.RequesterID, t.ChannelID, t.Goal,
 		t.Worker, t.Workspace, t.Model, t.Status, t.Output, t.AllowSensitive,
 		t.CreatedAt.UnixMilli(), t.UpdatedAt.UnixMilli())
-	return err
+	if err != nil {
+		return err
+	}
+	if t.Status != "pending" && t.Status != "running" && t.Status != "stopping" && t.RequesterID != "" && t.ChannelID != "" {
+		_, _ = db.ExecContext(ctx, `DELETE FROM agent_tickets
+			WHERE requester_id = ? AND channel_id = ?
+			  AND status NOT IN ('pending', 'running', 'stopping')
+			  AND id NOT IN (
+				SELECT id FROM agent_tickets
+				WHERE requester_id = ? AND channel_id = ?
+				  AND status NOT IN ('pending', 'running', 'stopping')
+				ORDER BY created_at DESC, id DESC LIMIT 200
+			  )`, t.RequesterID, t.ChannelID, t.RequesterID, t.ChannelID)
+	}
+	return nil
 }
 
 func (m *Manager) InterruptActiveAgentTickets(ctx context.Context, platform string) error {

@@ -89,13 +89,16 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 	}
 	if cfg.Delegates != nil {
 		h.Register(NewDelegateToolWithInbox(cfg.Delegates, cfg.Immune, cfg.Workspaces, cfg.AttachmentInbox))
-		h.Register(NewFaceToolWithCommand(cfg.Delegates, cfg.AGYCommand, filepath.Join("data", "assets", "faces"), cfg.Immune))
+		faceTool := NewFaceToolWithCommand(cfg.Delegates, cfg.AGYCommand, filepath.Join("data", "assets", "faces"), cfg.Immune)
+		faceTool.SetRouter(cfg.Router)
+		h.Register(faceTool)
 		outDir := filepath.Join("data", "workspace", "sandbox")
 		if cfg.Workspaces != nil {
 			outDir = cfg.Workspaces.SandboxDir()
 		}
 		imgTool := NewImageToolWithCommand(cfg.Delegates, cfg.AGYCommand, outDir, cfg.Immune)
 		imgTool.SetImageQuotaStore(imageQuotaStore)
+		imgTool.SetRouter(cfg.Router)
 		h.Register(imgTool)
 		h.Register(NewVideoToolWithCommand(cfg.Delegates, cfg.AGYCommand, outDir, cfg.Immune))
 	}

@@ -22,8 +22,16 @@ import (
 type FaceTool struct {
 	delegates *entity.Delegates
 	immune    *entity.ImmuneSystem
+	router    *llm.MindRouter
 	command   string
 	baseDir   string
+}
+
+// SetRouter binds the mind router so stateless selfie/face generation can prefer lightweight coordinator models.
+func (t *FaceTool) SetRouter(router *llm.MindRouter) {
+	if t != nil {
+		t.router = router
+	}
 }
 
 // NewFaceTool 实例化形象与表情工具
@@ -261,7 +269,10 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 	)
 
 	slog.Info("face_tool: 触发无状态后台动态生成新图片", "bot", config.BotName(), "emotion", emotion)
-	agyResult, execErr := runStatelessImageGen(ctx, t.command, goal, workDir)
+	agyResult, execErr := runStatelessImageGen(ctx, t.command, goal, workDir, t.router)
+	if agyResult.ConversationID != "" {
+		defer llm.CleanupEphemeralAGYConversation(agyResult.ConversationID)
+	}
 	if execErr != nil {
 		slog.Warn("face_tool: 动态生成图片失败", "emotion", emotion, "err", execErr)
 		return &core.ToolResult{

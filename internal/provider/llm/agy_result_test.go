@@ -1,6 +1,12 @@
 package llm
 
-import "testing"
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
 
 func TestParseAGYResultIgnoresProgressAfterAnswer(t *testing.T) {
 	const progress = `{"type":"status","status":"RUNNING","conversation_id":"progress"}`
@@ -32,5 +38,75 @@ func TestParseAGYResultStreamJSONExtractsFinalStepAndInitConvID(t *testing.T) {
 	}
 	if got.FinalStepResponse != "### 最终结论\n全部 21 个包测试已通过。" {
 		t.Fatalf("expected clean final step without intermediate monologue, got %q", got.FinalStepResponse)
+	}
+}
+
+func TestParseProviderCooldownAndSafeRejection(t *testing.T) {
+	if got := ParseProviderCooldown(errors.New("Individual quota reached. Resets in 2h34m16s.")); got != 2*time.Hour {
+		t.Fatalf("expected 2h clamped cooldown, got %v", got)
+	}
+	if got := ParseProviderCooldown(errors.New("Resets in 36m56s.")); got != 36*time.Minute+56*time.Second {
+		t.Fatalf("expected 36m56s cooldown, got %v", got)
+	}
+	if got := ParseProviderCooldown(errors.New("UNAVAILABLE (code 503): No capacity available")); got != 60*time.Second {
+		t.Fatalf("expected 60s cooldown for 503 capacity error, got %v", got)
+	}
+	if got := ParseProviderCooldown(errors.New("generic command failure")); got != 0 {
+		t.Fatalf("expected 0 cooldown for generic error, got %v", got)
+	}
+	if !isSafeAGYUpstreamRejection("RESOURCE_EXHAUSTED (code 429)") || !isSafeAGYUpstreamRejection("UNAVAILABLE (code 503)") {
+		t.Fatal("expected 429/503 to be classified as safe upstream rejections")
+	}
+	if isSafeAGYUpstreamRejection("process timed out after tool execution") {
+		t.Fatal("unexpected safe classification for generic timeout error")
+	}
+}
+
+func TestCleanupEphemeralAGYConversation(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	targetID := "12345678-1234-4123-8123-1234567890ab"
+	otherID := "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	base := filepath.Join(tmpHome, ".gemini", "antigravity-cli")
+
+	createFixture := func(id string) []string {
+		paths := []string{
+			filepath.Join(base, "brain", id, "scratch", "a.txt"),
+			filepath.Join(base, "conversations", id+".db"),
+			filepath.Join(base, "conversations", id+".db-wal"),
+			filepath.Join(base, "annotations", id+".pbtxt"),
+			filepath.Join(base, "implicit", id+".pb"),
+		}
+		for _, p := range paths {
+			if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte("x"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return paths
+	}
+
+	targetPaths := createFixture(targetID)
+	otherPaths := createFixture(otherID)
+
+	// Path traversal or invalid ID must be ignored safely.
+	CleanupEphemeralAGYConversation("../brain")
+	CleanupEphemeralAGYConversation(targetID)
+
+	if _, err := os.Stat(filepath.Join(base, "brain", targetID)); !os.IsNotExist(err) {
+		t.Fatalf("expected ephemeral brain directory to be removed, err=%v", err)
+	}
+	for _, p := range targetPaths {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("expected ephemeral state file %s to be removed", p)
+		}
+	}
+	for _, p := range otherPaths {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("unrelated conversation state %s was touched: %v", p, err)
+		}
 	}
 }

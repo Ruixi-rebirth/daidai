@@ -115,6 +115,7 @@ type MindRouter struct {
 	providers             map[string]core.LLMProvider
 	models                []ModelInfo
 	discoveryStatus       map[string]ModelDiscoveryStatus
+	cooldowns             map[string]time.Time
 	providerVersion       uint64
 	refreshVersion        uint64
 	appliedRefreshVersion map[string]uint64
@@ -134,6 +135,7 @@ func NewMindRouter(cfg MindRouterConfig) *MindRouter {
 		providers:       make(map[string]core.LLMProvider),
 		models:          make([]ModelInfo, 0),
 		discoveryStatus: make(map[string]ModelDiscoveryStatus),
+		cooldowns:       make(map[string]time.Time),
 	}
 
 	if r.statePath == "" {
@@ -433,6 +435,56 @@ func resolveDisplayModelName(models []ModelInfo, channel, modelID string) string
 	return modelID
 }
 
+func cooldownKey(channel, model string) string {
+	return strings.ToUpper(strings.TrimSpace(channel)) + "\x00" + strings.ToLower(strings.TrimSpace(model))
+}
+
+func (r *MindRouter) cooldownRemainingLocked(channel, model string, now time.Time) time.Duration {
+	if strings.TrimSpace(channel) == "" || strings.TrimSpace(model) == "" || len(r.cooldowns) == 0 {
+		return 0
+	}
+	until, ok := r.cooldowns[cooldownKey(channel, model)]
+	if !ok {
+		return 0
+	}
+	rem := until.Sub(now)
+	if rem <= 0 {
+		return 0
+	}
+	return rem
+}
+
+func (r *MindRouter) modelCooldownRemaining(channel, model string) time.Duration {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.cooldownRemainingLocked(channel, model, time.Now())
+}
+
+func (r *MindRouter) setModelCooldown(channel, model string, d time.Duration) {
+	if d <= 0 || strings.TrimSpace(channel) == "" || strings.TrimSpace(model) == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cooldowns == nil {
+		r.cooldowns = make(map[string]time.Time)
+	}
+	now := time.Now()
+	for k, exp := range r.cooldowns {
+		if !now.Before(exp) {
+			delete(r.cooldowns, k)
+		}
+	}
+	r.cooldowns[cooldownKey(channel, model)] = now.Add(d)
+}
+
+func (r *MindRouter) clearModelCooldownLocked(channel, model string) {
+	if strings.TrimSpace(channel) == "" || strings.TrimSpace(model) == "" || len(r.cooldowns) == 0 {
+		return
+	}
+	delete(r.cooldowns, cooldownKey(channel, model))
+}
+
 // FormatCurrentStatus 格式化完整双轨心智运行状态摘要（供 /model 与搭档视图使用）
 func (r *MindRouter) FormatCurrentStatus() string {
 	return r.FormatStatusFor(true)
@@ -440,6 +492,7 @@ func (r *MindRouter) FormatCurrentStatus() string {
 
 // FormatStatusFor 按会话范围格式化心智运行状态：搭档私聊展示双轨完整视图，其他会话仅展示公用轨状态。
 func (r *MindRouter) FormatStatusFor(partnerPrivate bool) string {
+	now := time.Now()
 	r.mu.RLock()
 	curr := r.active
 	pub := r.public
@@ -450,6 +503,8 @@ func (r *MindRouter) FormatStatusFor(partnerPrivate bool) string {
 	models := cloneModelInfos(r.models)
 	fallbackChannel := r.fallbackChannel
 	fallbackProvider := r.providers[fallbackChannel]
+	currCooldown := r.cooldownRemainingLocked(curr.Channel, curr.Model, now)
+	pubCooldown := r.cooldownRemainingLocked(pub.Channel, pub.Model, now)
 	r.mu.RUnlock()
 
 	if curr.Model == "" && curr.Channel == "" {
@@ -468,6 +523,9 @@ func (r *MindRouter) FormatStatusFor(partnerPrivate bool) string {
 		if curr.Effort != "" {
 			fmt.Fprintf(&sb, "💭 思考强度：%s\n", curr.Effort)
 		}
+		if currCooldown > 0 {
+			fmt.Fprintf(&sb, "⏳ 冷却状态：剩余 %s（期间自动走备用通道）\n", currCooldown.Round(time.Second))
+		}
 
 		if pub.Model != "" {
 			pubName := resolveDisplayModelName(models, pub.Channel, pub.Model)
@@ -479,6 +537,9 @@ func (r *MindRouter) FormatStatusFor(partnerPrivate bool) string {
 			fmt.Fprintf(&sb, "🔌 通道：%s\n", pub.Channel)
 			if pub.Effort != "" {
 				fmt.Fprintf(&sb, "💭 思考强度：%s（上限 medium）\n", pub.Effort)
+			}
+			if pubCooldown > 0 {
+				fmt.Fprintf(&sb, "⏳ 冷却状态：剩余 %s（期间自动走备用通道）\n", pubCooldown.Round(time.Second))
 			}
 		}
 
@@ -495,6 +556,9 @@ func (r *MindRouter) FormatStatusFor(partnerPrivate bool) string {
 		fmt.Fprintf(&sb, "🔌 通道：%s\n", pub.Channel)
 		if pub.Effort != "" {
 			fmt.Fprintf(&sb, "💭 思考强度：%s\n", pub.Effort)
+		}
+		if pubCooldown > 0 {
+			fmt.Fprintf(&sb, "⏳ 冷却状态：剩余 %s（期间自动走备用通道）\n", pubCooldown.Round(time.Second))
 		}
 	}
 	sb.WriteString("\n以上为路由设置，不代表每一轮实际使用的模型。")

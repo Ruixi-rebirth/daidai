@@ -67,9 +67,10 @@ type Channel struct {
 	ready    atomic.Bool
 	bot      user
 	mu       sync.Mutex
-	recorder func(context.Context, *entity.SensoryEvent) error
-	immune   *entity.ImmuneSystem
-	queue    *kernel.DebounceManager
+	recorder    func(context.Context, *entity.SensoryEvent) error
+	immune      *entity.ImmuneSystem
+	queue       *kernel.DebounceManager
+	quoteWrites atomic.Uint64
 }
 
 func New(cfg Config, database *db.Manager, recorder func(context.Context, *entity.SensoryEvent) error, immune *entity.ImmuneSystem) *Channel {

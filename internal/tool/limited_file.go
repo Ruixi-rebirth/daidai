@@ -165,30 +165,46 @@ func readAGYConversationArtifact(ctx context.Context, conversationID string, max
 		return nil, "", err
 	}
 	root := filepath.Join(home, ".gemini", "antigravity-cli", "brain", conversationID)
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return nil, "", err
+	dirs := []string{root}
+	scratchDir := filepath.Join(root, "scratch")
+	if info, err := os.Lstat(scratchDir); err == nil && info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
+		dirs = append(dirs, scratchDir)
 	}
-	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return nil, "", err
-		}
-		if !entry.Type().IsRegular() || entry.Name() == "" {
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if dir == root {
+				return nil, "", err
+			}
 			continue
 		}
-		path := filepath.Join(root, entry.Name())
-		data, err := readFileLimited(path, maxBytes)
-		if err == nil && (accept == nil || accept(path, data)) {
-			return data, path, nil
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return nil, "", err
+			}
+			if !entry.Type().IsRegular() || entry.Name() == "" {
+				continue
+			}
+			path := filepath.Join(dir, entry.Name())
+			data, err := readFileLimited(path, maxBytes)
+			if err == nil && (accept == nil || accept(path, data)) {
+				return data, path, nil
+			}
 		}
 	}
 	return nil, "", os.ErrNotExist
 }
 
-func buildStatelessAGYArgs(goal string, allowShellTools bool) []string {
+func buildStatelessAGYArgs(goal string, allowShellTools bool, modelEffort ...string) []string {
 	args := []string{
 		"-p", goal,
 		"--output-format", "json",
+	}
+	if len(modelEffort) > 0 && strings.TrimSpace(modelEffort[0]) != "" {
+		args = append(args, "--model", strings.TrimSpace(modelEffort[0]))
+	}
+	if len(modelEffort) > 1 && strings.TrimSpace(modelEffort[1]) != "" {
+		args = append(args, "--effort", strings.TrimSpace(modelEffort[1]))
 	}
 	if allowShellTools {
 		args = append(args, "--mode", "auto", "--sandbox", "--dangerously-skip-permissions")
@@ -198,7 +214,7 @@ func buildStatelessAGYArgs(goal string, allowShellTools bool) []string {
 	return args
 }
 
-func runStatelessAGYMediaGen(ctx context.Context, command, goal, workDir, taskLabel string, allowShellTools bool) (llm.AGYResult, error) {
+func runStatelessAGYMediaGen(ctx context.Context, command, goal, workDir, taskLabel string, allowShellTools bool, router ...*llm.MindRouter) (llm.AGYResult, error) {
 	if ctx == nil {
 		return llm.AGYResult{}, fmt.Errorf("%s requires a caller context", taskLabel)
 	}
@@ -210,7 +226,13 @@ func runStatelessAGYMediaGen(ctx context.Context, command, goal, workDir, taskLa
 		command = "agy"
 	}
 
-	args := buildStatelessAGYArgs(goal, allowShellTools)
+	var modelEffort []string
+	if len(router) > 0 && router[0] != nil {
+		if model, effort, err := router[0].ResolveModelAndEffortForChannel("flash", "", "low", "AGY"); err == nil && model != "" && !strings.EqualFold(model, "flash") {
+			modelEffort = []string{model, effort}
+		}
+	}
+	args := buildStatelessAGYArgs(goal, allowShellTools, modelEffort...)
 
 	cmd := core.CommandProcessGroup(ctx, command, args...)
 	if workDir != "" {
@@ -224,6 +246,11 @@ func runStatelessAGYMediaGen(ctx context.Context, command, goal, workDir, taskLa
 	cmd.Stderr = stderrBuf
 
 	if err := cmd.Run(); err != nil {
+		if len(stdoutBuf.Bytes()) > 0 {
+			if p, pErr := llm.ParseAGYResult(stdoutBuf.Bytes()); pErr == nil && p.ConversationID != "" {
+				llm.CleanupEphemeralAGYConversation(p.ConversationID)
+			}
+		}
 		errDetail := strings.TrimSpace(stderrBuf.String())
 		if errDetail == "" {
 			errDetail = strings.TrimSpace(stdoutBuf.String())

@@ -42,6 +42,22 @@ func (d *Delegates) persistTicketContext(ctx context.Context, snapshot Ticket) b
 			current.persistenceWarning = ""
 		}
 	}
+	if err == nil && len(d.tickets) > 256 {
+		var oldestID string
+		var oldestAt time.Time
+		for id, ticket := range d.tickets {
+			if ticket == nil || ticket.Status == TicketPending || ticket.Status == TicketRunning || ticket.Status == TicketStopping || ticket.persistenceWarning != "" {
+				continue
+			}
+			if oldestID == "" || ticket.UpdatedAt.Before(oldestAt) {
+				oldestID = id
+				oldestAt = ticket.UpdatedAt
+			}
+		}
+		if oldestID != "" {
+			delete(d.tickets, oldestID)
+		}
+	}
 	if err != nil {
 		slog.Error("delegate ticket persistence failed", "ticketID", snapshot.ID, "err", err)
 		return false

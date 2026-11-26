@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -682,4 +683,96 @@ func TestGroupSlashCommandsDecoupleWorkspacesAndTickets(t *testing.T) {
 	if channel.sentUtter == nil || !strings.Contains(channel.sentUtter.Text, tk.ID) || !strings.Contains(channel.sentUtter.Text, "执行通道**：`agy`") {
 		t.Fatalf("expected /task without args to show latest ticket and resolved worker, got: %+v", channel.sentUtter)
 	}
+}
+
+type parallelRecordChannel struct {
+	mu     sync.Mutex
+	order  []string
+	sentCh chan string
+}
+
+func (c *parallelRecordChannel) Name() string { return "qq" }
+func (c *parallelRecordChannel) Start(context.Context, func(*entity.SensoryEvent)) error {
+	return nil
+}
+func (c *parallelRecordChannel) Transmit(_ context.Context, u *entity.Utterance) error {
+	c.mu.Lock()
+	c.order = append(c.order, u.Text)
+	c.mu.Unlock()
+	c.sentCh <- u.Text
+	return nil
+}
+func (c *parallelRecordChannel) Stop(context.Context) error { return nil }
+
+type perSpeakerMockCognition struct {
+	startedA chan struct{}
+	releaseA chan struct{}
+}
+
+func (*perSpeakerMockCognition) MindStatus() string { return "" }
+func (*perSpeakerMockCognition) ModelList() string  { return "" }
+func (*perSpeakerMockCognition) ModelUsage() string { return "" }
+func (m *perSpeakerMockCognition) Think(ctx context.Context, event *entity.SensoryEvent) (*entity.Utterance, error) {
+	if event.SenderID == "speaker-a" {
+		close(m.startedA)
+		select {
+		case <-m.releaseA:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return &entity.Utterance{Platform: event.Platform, IsGroup: event.IsGroup, ChannelID: event.ChannelID, Text: "reply-" + event.SenderID}, nil
+}
+
+func TestGroupSessionLockIsPerSpeaker(t *testing.T) {
+	ch := &parallelRecordChannel{sentCh: make(chan string, 2)}
+	reg := entity.NewChannelRegistry()
+	reg.Register(ch)
+	cog := &perSpeakerMockCognition{
+		startedA: make(chan struct{}),
+		releaseA: make(chan struct{}),
+	}
+	agent := NewSuperAgent(Config{Channels: reg, Cognition: cog})
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		agent.Process(ctx, &entity.SensoryEvent{
+			Platform: "qq", IsGroup: true, ChannelID: "group-1", SenderID: "speaker-a", SenderName: "Alice", Content: "slow query",
+		})
+	}()
+
+	<-cog.startedA
+
+	// While speaker-a is still blocked in cognition, speaker-b in the same group completes immediately.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		agent.Process(ctx, &entity.SensoryEvent{
+			Platform: "qq", IsGroup: true, ChannelID: "group-1", SenderID: "speaker-b", SenderName: "Bob", Content: "fast hi",
+		})
+	}()
+
+	select {
+	case first := <-ch.sentCh:
+		if first != "reply-speaker-b" {
+			t.Fatalf("expected speaker-b to finish before blocked speaker-a, got %q", first)
+		}
+	case <-time.After(2 * time.Second):
+		close(cog.releaseA)
+		t.Fatal("speaker-b was blocked behind speaker-a's group lock")
+	}
+
+	close(cog.releaseA)
+	select {
+	case second := <-ch.sentCh:
+		if second != "reply-speaker-a" {
+			t.Fatalf("expected speaker-a second, got %q", second)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("speaker-a reply did not arrive")
+	}
+	wg.Wait()
 }

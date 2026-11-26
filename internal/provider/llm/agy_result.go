@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 )
 
 type AGYResult struct {
@@ -128,4 +131,114 @@ func ParseAGYResult(raw []byte) (AGYResult, error) {
 		result.FinalStepResponse = lastNonEmptyStep
 	}
 	return result, nil
+}
+
+// IsValidAGYConversationID reports whether value is a canonical 8-4-4-4-12 UUID.
+func IsValidAGYConversationID(value string) bool {
+	parts := strings.Split(value, "-")
+	lengths := [...]int{8, 4, 4, 4, 12}
+	if len(parts) != len(lengths) {
+		return false
+	}
+	for i, part := range parts {
+		if len(part) != lengths[i] {
+			return false
+		}
+		for _, char := range part {
+			valid := (char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')
+			if !valid {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// CleanupEphemeralAGYConversation removes on-disk state left behind by one
+// stateless daidai-spawned AGY subprocess without scanning unrelated sessions.
+func CleanupEphemeralAGYConversation(conversationID string) {
+	id := strings.TrimSpace(conversationID)
+	if !IsValidAGYConversationID(id) {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return
+	}
+	base := filepath.Join(home, ".gemini", "antigravity-cli")
+	brainDir := filepath.Join(base, "brain", id)
+	if info, err := os.Lstat(brainDir); err == nil && info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
+		_ = os.RemoveAll(brainDir)
+	}
+	for _, path := range []string{
+		filepath.Join(base, "conversations", id+".db"),
+		filepath.Join(base, "conversations", id+".db-wal"),
+		filepath.Join(base, "conversations", id+".db-shm"),
+		filepath.Join(base, "annotations", id+".pbtxt"),
+		filepath.Join(base, "implicit", id+".pb"),
+	} {
+		_ = os.Remove(path)
+	}
+}
+
+func isSafeAGYUpstreamRejection(detail string) bool {
+	lower := strings.ToLower(detail)
+	if lower == "" {
+		return false
+	}
+	for _, needle := range []string{
+		"resource_exhausted",
+		"individual quota reached",
+		"code 429",
+		"\"error_code\":429",
+		"no capacity available",
+		"code 503",
+		"\"error_code\":503",
+		"unauthenticated",
+		"permission_denied",
+		"invalid_argument",
+	} {
+		if strings.Contains(lower, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// ParseProviderCooldown extracts a quota/capacity cooldown window from an upstream error.
+func ParseProviderCooldown(err error) time.Duration {
+	if err == nil {
+		return 0
+	}
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+	if idx := strings.Index(lower, "resets in "); idx >= 0 {
+		rest := strings.TrimSpace(msg[idx+len("resets in "):])
+		end := strings.IndexAny(rest, " \t\r\n\",;)\\")
+		token := rest
+		if end >= 0 {
+			token = rest[:end]
+		}
+		token = strings.TrimRight(token, ".")
+		if d, parseErr := time.ParseDuration(token); parseErr == nil && d > 0 {
+			if d < 30*time.Second {
+				return 30 * time.Second
+			}
+			if d > 2*time.Hour {
+				return 2 * time.Hour
+			}
+			return d
+		}
+	}
+	if strings.Contains(lower, "resource_exhausted") ||
+		strings.Contains(lower, "individual quota reached") ||
+		strings.Contains(lower, "code 429") ||
+		strings.Contains(lower, "\"error_code\":429") {
+		return 3 * time.Minute
+	}
+	if strings.Contains(lower, "no capacity available") ||
+		(strings.Contains(lower, "unavailable") && strings.Contains(lower, "503")) {
+		return 60 * time.Second
+	}
+	return 0
 }

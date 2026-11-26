@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -579,5 +580,80 @@ func TestProcessedAttachmentClearedOnlyAfterDelivery(t *testing.T) {
 	reply.OnDelivered(ctx)
 	if pending, _ := inbox.Pending(scope); len(pending) != 0 {
 		t.Fatal("full delivery left the attachment pending")
+	}
+}
+
+type barrierReadOnlyTool struct {
+	name string
+	wg   *sync.WaitGroup
+}
+
+func (t *barrierReadOnlyTool) Name() string               { return t.name }
+func (t *barrierReadOnlyTool) Description() string        { return "barrier test tool" }
+func (t *barrierReadOnlyTool) Parameters() map[string]any { return map[string]any{"type": "object"} }
+func (t *barrierReadOnlyTool) Execute(ctx context.Context, raw json.RawMessage) (*core.ToolResult, error) {
+	t.wg.Done()
+	done := make(chan struct{})
+	go func() {
+		t.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return &core.ToolResult{Text: "ok:" + t.name + ":" + string(raw)}, nil
+}
+
+type parallelBatchTestLLM struct {
+	round    int
+	lastMsgs []core.ChatMessage
+}
+
+func (m *parallelBatchTestLLM) Name() string { return "parallel-batch-test-llm" }
+func (m *parallelBatchTestLLM) Chat(context.Context, []core.ChatMessage, *core.ChatOptions) (string, error) {
+	return "", nil
+}
+func (m *parallelBatchTestLLM) ChatWithTools(_ context.Context, messages []core.ChatMessage, _ []core.ToolDefinition, _ *core.ChatOptions) (*core.ChatResponse, error) {
+	m.round++
+	m.lastMsgs = messages
+	if m.round == 1 {
+		return &core.ChatResponse{
+			ToolCalls: []core.ToolCall{
+				{ID: "c1", Type: "function", Function: core.ToolCallFunction{Name: "search_web", Arguments: `{"query":"one"}`}},
+				{ID: "c2", Type: "function", Function: core.ToolCallFunction{Name: "read_link", Arguments: `{"url":"https://example.invalid"}`}},
+			},
+		}, nil
+	}
+	return &core.ChatResponse{Content: "done"}, nil
+}
+
+func TestCortex_ConcurrentReadOnlyToolsExecuteInParallelAndPreserveOrder(t *testing.T) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+	hands := tool.NewHandsWithConfig(tool.HandsConfig{})
+	hands.Register(&barrierReadOnlyTool{name: "search_web", wg: &wg})
+	hands.Register(&barrierReadOnlyTool{name: "read_link", wg: &wg})
+
+	llmMock := &parallelBatchTestLLM{}
+	cortex := NewCortex(CortexConfig{LLM: llmMock, Hands: hands})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	out, err := cortex.Think(ctx, &entity.SensoryEvent{
+		Platform: "qq", ChannelID: "c1", SenderID: "owner", Role: entity.RolePartner, Content: "查两个东西",
+	})
+	if err != nil || out == nil || out.Text != "done" {
+		t.Fatalf("expected concurrent tool batch to succeed, got out=%+v err=%v", out, err)
+	}
+	var toolOrder []string
+	for _, msg := range llmMock.lastMsgs {
+		if msg.Role == core.RoleTool {
+			toolOrder = append(toolOrder, msg.ToolCallID+":"+msg.Name)
+		}
+	}
+	if strings.Join(toolOrder, ",") != "c1:search_web,c2:read_link" {
+		t.Fatalf("unexpected tool message order: %v", toolOrder)
 	}
 }

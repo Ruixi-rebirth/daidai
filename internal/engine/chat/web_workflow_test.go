@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"daidai/internal/core"
@@ -36,6 +37,7 @@ func (m *sequentialWebModel) ChatWithTools(_ context.Context, messages []core.Ch
 
 type sequentialWebHands struct {
 	entity.Hands
+	mu    sync.Mutex
 	calls []string
 }
 
@@ -46,7 +48,9 @@ func (*sequentialWebHands) Definitions() []core.ToolDefinition {
 	}
 }
 func (h *sequentialWebHands) Execute(_ context.Context, name string, _ json.RawMessage) (*core.ToolResult, error) {
+	h.mu.Lock()
 	h.calls = append(h.calls, name)
+	h.mu.Unlock()
 	if name == "screenshot_web" {
 		return &core.ToolResult{Text: "截图已生成", ImageData: []byte("fixture image")}, nil
 	}

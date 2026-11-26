@@ -3,6 +3,7 @@ package qq
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -24,6 +25,8 @@ type wsPayload struct {
 
 const maxQueuedQQGatewayEvents = 8
 
+var errQQGatewayReconnectRequested = errors.New("server requested reconnect (op 7)")
+
 type queuedQQGatewayEvent struct {
 	sequence *int64
 	payload  map[string]any
@@ -34,20 +37,38 @@ func (q *QQChannel) StartWebSocket(ctx context.Context) {
 	q.wsWG.Add(1)
 	go func() {
 		defer q.wsWG.Done()
+		backoff := time.Second
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
-				if err := q.runWebSocketSession(ctx); err != nil && ctx.Err() == nil {
-					slog.Error("qq websocket session disconnected, reconnecting in 5s...", "err", err)
-				}
+				startedAt := time.Now()
+				err := q.runWebSocketSession(ctx)
 				q.wsReady.Store(false)
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(5 * time.Second):
+				if ctx.Err() != nil {
+					return
+				}
+				wait := backoff
+				if errors.Is(err, errQQGatewayReconnectRequested) {
+					slog.Info("qq ws: 收到服务端切流重连通知 (op 7)，立即重连恢复会话")
+					backoff = time.Second
+					wait = 200 * time.Millisecond
+				} else {
+					if time.Since(startedAt) > 30*time.Second {
+						backoff = time.Second
+						wait = backoff
+					}
+					if err != nil {
+						slog.Warn("qq websocket session disconnected, reconnecting...", "delay", wait, "err", err)
+					}
+					backoff = min(backoff*2, 30*time.Second)
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(wait):
+				}
 			}
 		}
 	}()
@@ -389,7 +410,7 @@ func (q *QQChannel) runWebSocketSession(ctx context.Context) error {
 			}
 
 		case 7: // 服务端要求重连
-			return fmt.Errorf("server requested reconnect (op 7)")
+			return errQQGatewayReconnectRequested
 		case 9: // INVALID_SESSION 的 d 标记会话是否仍可恢复
 			q.wsReady.Store(false)
 			var canResume bool

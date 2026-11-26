@@ -153,6 +153,7 @@ func run() int {
 	mediaSources := &media.Sources{}
 	visEngine := vision.NewEngine(vision.Config{
 		Sources:        mediaSources,
+		Router:         mindRouter,
 		CLICommand:     agyCommand,
 		RequireAGYAuth: true,
 	})

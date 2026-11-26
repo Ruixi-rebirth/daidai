@@ -19,8 +19,8 @@ import (
 )
 
 // runStatelessImageGen 无状态调用一次 agy 执行生图子任务（不占用工程工单槽位，不累积幽灵会话上下文）
-func runStatelessImageGen(ctx context.Context, command, goal, workDir string) (llm.AGYResult, error) {
-	return runStatelessAGYMediaGen(ctx, command, goal, workDir, "生图", false)
+func runStatelessImageGen(ctx context.Context, command, goal, workDir string, router ...*llm.MindRouter) (llm.AGYResult, error) {
+	return runStatelessAGYMediaGen(ctx, command, goal, workDir, "生图", false, router...)
 }
 
 const maxImagePromptRunes = 2000
@@ -30,8 +30,16 @@ type ImageTool struct {
 	delegates  *entity.Delegates
 	immune     *entity.ImmuneSystem
 	imageQuota *groupchat.ImageQuotaStore
+	router     *llm.MindRouter
 	command    string
 	outDir     string
+}
+
+// SetRouter binds the mind router so stateless image generation can prefer lightweight coordinator models.
+func (t *ImageTool) SetRouter(router *llm.MindRouter) {
+	if t != nil {
+		t.router = router
+	}
 }
 
 // SetImageQuotaStore attaches per-group daily quota enforcement for non-partner group requests.
@@ -241,7 +249,10 @@ func (t *ImageTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 	}
 
 	slog.Info("image_tool: 触发无状态后台生成图片", "promptBytes", len(prompt))
-	agyResult, execErr := runStatelessImageGen(ctx, t.command, goal, workDir)
+	agyResult, execErr := runStatelessImageGen(ctx, t.command, goal, workDir, t.router)
+	if agyResult.ConversationID != "" {
+		defer llm.CleanupEphemeralAGYConversation(agyResult.ConversationID)
+	}
 	if execErr != nil {
 		slog.Warn("image_tool: 生成图片失败", "err", execErr)
 		return &core.ToolResult{
@@ -296,21 +307,5 @@ func readAGYImageArtifact(ctx context.Context, conversationID string) ([]byte, s
 }
 
 func isAGYConversationID(value string) bool {
-	parts := strings.Split(value, "-")
-	lengths := [...]int{8, 4, 4, 4, 12}
-	if len(parts) != len(lengths) {
-		return false
-	}
-	for i, part := range parts {
-		if len(part) != lengths[i] {
-			return false
-		}
-		for _, char := range part {
-			valid := (char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')
-			if !valid {
-				return false
-			}
-		}
-	}
-	return true
+	return llm.IsValidAGYConversationID(value)
 }

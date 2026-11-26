@@ -157,6 +157,7 @@ func (r *MindRouter) SwitchMind(req SwitchRequest) (*SwitchResult, error) {
 			r.publicPinned = prevPinned
 			return &SwitchResult{Status: "error", Message: fmt.Sprintf("保存模型设置失败，未应用更改: %v", err)}, nil
 		}
+		r.clearModelCooldownLocked(targetModel.Channel, targetModel.ID)
 		r.syncProviderLocked(targetModel.Channel, targetModel.ID, finalEffort)
 		pubHint := ""
 		if r.public.Model != "" && (!strings.EqualFold(r.public.Channel, targetModel.Channel) || !strings.EqualFold(r.public.Model, targetModel.ID)) {
@@ -188,6 +189,7 @@ func (r *MindRouter) SwitchMind(req SwitchRequest) (*SwitchResult, error) {
 			r.publicPinned = prevPinned
 			return &SwitchResult{Status: "error", Message: fmt.Sprintf("保存公用模型设置失败，未应用更改: %v", err)}, nil
 		}
+		r.clearModelCooldownLocked(targetModel.Channel, targetModel.ID)
 		capNote := ""
 		if capped {
 			capNote = "（公用模型思考强度已按上限自动封顶为 medium）"
@@ -229,6 +231,7 @@ func (r *MindRouter) SwitchMind(req SwitchRequest) (*SwitchResult, error) {
 			r.publicPinned = prevPinned
 			return &SwitchResult{Status: "error", Message: fmt.Sprintf("保存全局模型设置失败，未应用更改: %v", err)}, nil
 		}
+		r.clearModelCooldownLocked(targetModel.Channel, targetModel.ID)
 		r.syncProviderLocked(targetModel.Channel, targetModel.ID, finalEffort)
 		capNote := ""
 		if capped {
@@ -313,6 +316,7 @@ func (r *MindRouter) switchEffortOnlyLocked(scope, channelReq, effortReq string)
 			r.publicPinned = prevPinned
 			return &SwitchResult{Status: "error", Message: fmt.Sprintf("保存公用模型设置失败，未应用更改: %v", err)}, nil
 		}
+		r.clearModelCooldownLocked(slotChannel, slotModel)
 		capNote := ""
 		if capped {
 			capNote = "（公用轨上限为 medium）"
@@ -346,6 +350,10 @@ func (r *MindRouter) switchEffortOnlyLocked(scope, channelReq, effortReq string)
 			r.publicPinned = prevPinned
 			return &SwitchResult{Status: "error", Message: fmt.Sprintf("保存模型设置失败，未应用更改: %v", err)}, nil
 		}
+		r.clearModelCooldownLocked(r.active.Channel, r.active.Model)
+		if r.public.Channel != "" && r.public.Model != "" {
+			r.clearModelCooldownLocked(r.public.Channel, r.public.Model)
+		}
 		r.syncProviderLocked(r.active.Channel, r.active.Model, r.active.Effort)
 		return &SwitchResult{
 			Status:  "success",
@@ -363,6 +371,7 @@ func (r *MindRouter) switchEffortOnlyLocked(scope, channelReq, effortReq string)
 			r.active = prevActive
 			return &SwitchResult{Status: "error", Message: fmt.Sprintf("保存模型设置失败，未应用更改: %v", err)}, nil
 		}
+		r.clearModelCooldownLocked(r.active.Channel, r.active.Model)
 		r.syncProviderLocked(r.active.Channel, r.active.Model, r.active.Effort)
 		return &SwitchResult{
 			Status:  "success",

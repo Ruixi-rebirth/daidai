@@ -68,6 +68,9 @@ func (c *Channel) storeQuote(ctx context.Context, chat string, id int64, r *quot
 		return err
 	}
 	_, err = database.ExecContext(ctx, `INSERT INTO telegram_messages(chat_id,message_id,content_json) VALUES(?,?,?) ON CONFLICT(chat_id,message_id) DO UPDATE SET content_json=excluded.content_json`, chat, strconv.FormatInt(id, 10), string(data))
+	if err == nil && c.quoteWrites.Add(1)%64 == 0 {
+		_, _ = database.ExecContext(ctx, `DELETE FROM telegram_messages WHERE rowid NOT IN (SELECT rowid FROM telegram_messages ORDER BY rowid DESC LIMIT 2000)`)
+	}
 	return err
 }
 

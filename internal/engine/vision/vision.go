@@ -48,6 +48,7 @@ func (e *visionAPIError) authenticationRejected() bool {
 // Config 视觉引擎配置
 type Config struct {
 	Sources        *media.Sources
+	Router         *llm.MindRouter
 	BaseURL        string
 	APIKey         string
 	Model          string

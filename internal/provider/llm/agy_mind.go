@@ -204,6 +204,11 @@ func (p *AGYMindProvider) ChatWithTools(
 		if isCommandStartError(err) {
 			return nil, fmt.Errorf("%s 进程未能启动: %w", channelName, err)
 		}
+		if !readOnly && len(stdoutBuf.Bytes()) > 0 {
+			if p, pErr := ParseAGYResult(stdoutBuf.Bytes()); pErr == nil && p.ConversationID != "" {
+				CleanupEphemeralAGYConversation(p.ConversationID)
+			}
+		}
 		if execCtx.Err() == context.Canceled {
 			return nil, uncertainFailure(fmt.Errorf("%s 任务已被中断", channelName))
 		}
@@ -222,7 +227,11 @@ func (p *AGYMindProvider) ChatWithTools(
 			if stdoutBuf.Truncated() || stderrBuf.Truncated() {
 				errDetail += " (子进程输出已截断)"
 			}
-			return nil, uncertainFailure(fmt.Errorf("%s 执行异常: %s", channelName, errDetail))
+			wrapped := fmt.Errorf("%s 执行异常: %s", channelName, errDetail)
+			if isSafeAGYUpstreamRejection(errDetail) {
+				return nil, wrapped
+			}
+			return nil, uncertainFailure(wrapped)
 		}
 		return nil, uncertainFailure(fmt.Errorf("%s 进程执行失败: %w", channelName, err))
 	}
@@ -237,8 +246,14 @@ func (p *AGYMindProvider) ChatWithTools(
 	if err != nil {
 		return nil, uncertainFailure(fmt.Errorf("%s: %w", channelName, err))
 	}
+	if !readOnly && parsed.ConversationID != "" {
+		CleanupEphemeralAGYConversation(parsed.ConversationID)
+	}
 	response, err := p.chatResponse(parsed, channelName, messages, hostTools)
 	if err != nil {
+		if isSafeAGYUpstreamRejection(parsed.FailureDetail()) {
+			return nil, err
+		}
 		return nil, uncertainFailure(err)
 	}
 	if readOnly && credGuard.ContainsSecret(response.Content) {

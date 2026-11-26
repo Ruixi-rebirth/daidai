@@ -81,6 +81,14 @@ func sessionKey(event *entity.SensoryEvent) string {
 	return fmt.Sprintf("%s:%v:%s", event.Platform, event.IsGroup, event.ChannelID)
 }
 
+func executionLockKey(event *entity.SensoryEvent) string {
+	base := sessionKey(event)
+	if event != nil && event.IsGroup && event.SenderID != "" && !event.GroupInterjection {
+		return base + ":" + event.SenderID
+	}
+	return base
+}
+
 func thinkKey(event *entity.SensoryEvent) thinkSessionKey {
 	return thinkSessionKey{session: sessionKey(event), requester: event.SenderID}
 }
@@ -142,7 +150,7 @@ func (a *SuperAgent) cancelAllThinking() {
 }
 
 func (a *SuperAgent) lockSession(event *entity.SensoryEvent) func() {
-	key := sessionKey(event)
+	key := executionLockKey(event)
 	a.sessionLocksMu.Lock()
 	if a.sessionLocks == nil {
 		a.sessionLocks = make(map[string]*sessionLockEntry)

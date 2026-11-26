@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"daidai/internal/core"
 )
@@ -166,6 +167,22 @@ func (r *MindRouter) ChatWithTools(
 		return resp, nil
 	}
 
+	if rem := r.modelCooldownRemaining(channel, model); rem > 0 && fallbackProvider != nil && !strings.EqualFold(channel, r.fallbackChannel) {
+		slog.Info("心智模型处于限流/容量冷却窗口，直接路由至兜底通道",
+			"channel", channel, "model", model, "remaining", rem.Round(time.Second), "fallbackChannel", r.fallbackChannel)
+		fbResp, fbErr := fallbackProvider.ChatWithTools(ctx, messages, tools, fallbackOpts)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if fbErr == nil && isEmptyChatResponse(fbResp) {
+			fbErr = fmt.Errorf("兜底通道 %q 返回空响应", r.fallbackChannel)
+		}
+		if fbErr == nil {
+			return fbResp, nil
+		}
+		return nil, fmt.Errorf("%s (%s) 处于冷却窗口且兜底通道 %q 执行失败: %w", channel, model, r.fallbackChannel, fbErr)
+	}
+
 	resp, err := activeProvider.ChatWithTools(ctx, messages, tools, primaryOpts)
 	if ctx.Err() != nil {
 		var unsafeErr *core.UncertainExecutionError
@@ -179,6 +196,9 @@ func (r *MindRouter) ChatWithTools(
 	}
 	if err == nil {
 		return resp, nil
+	}
+	if cd := ParseProviderCooldown(err); cd > 0 {
+		r.setModelCooldown(channel, model, cd)
 	}
 	var unsafeErr *core.UncertainExecutionError
 	if errors.As(err, &unsafeErr) {

@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -534,5 +535,79 @@ func TestMindRouter_DualTrackPartnerAndPublicIsolation(t *testing.T) {
 	}
 	if pub := restored.PublicMind(); pub.Model != "gemini-4-argon" || pub.Effort != "medium" {
 		t.Fatalf("restored public mind mismatch: %+v", pub)
+	}
+}
+
+type cooldownTestProvider struct {
+	calls int
+	err   error
+	reply string
+}
+
+func (p *cooldownTestProvider) Name() string { return "cooldown-test" }
+func (p *cooldownTestProvider) Chat(ctx context.Context, msgs []core.ChatMessage, opts *core.ChatOptions) (string, error) {
+	resp, err := p.ChatWithTools(ctx, msgs, nil, opts)
+	if err != nil {
+		return "", err
+	}
+	return resp.Content, nil
+}
+func (p *cooldownTestProvider) ChatWithTools(_ context.Context, _ []core.ChatMessage, _ []core.ToolDefinition, _ *core.ChatOptions) (*core.ChatResponse, error) {
+	p.calls++
+	if p.err != nil {
+		return nil, p.err
+	}
+	return &core.ChatResponse{Content: p.reply}, nil
+}
+func (*cooldownTestProvider) SetModel(string)  {}
+func (*cooldownTestProvider) SetEffort(string) {}
+
+func TestMindRouter_CooldownSkipsFailingPrimaryUntilReset(t *testing.T) {
+	router := NewMindRouter(MindRouterConfig{
+		StatePath:       filepath.Join(t.TempDir(), "active_mind.json"),
+		FallbackChannel: "API",
+	})
+	agy := &cooldownTestProvider{err: errors.New("AGY 执行异常: RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 10m0s.")}
+	api := &cooldownTestProvider{reply: "api-fallback-ok"}
+	router.RegisterChannel(ChannelRegistration{
+		Channel:  "API",
+		Provider: api,
+		Models:   []ModelInfo{{ID: "deepseek-chat", Channel: "API"}},
+	})
+	router.RegisterChannel(ChannelRegistration{
+		Channel:  "AGY",
+		Provider: agy,
+		Models:   []ModelInfo{{ID: "gemini-4-argon", Channel: "AGY"}, {ID: "gemini-3.8-flash", Channel: "AGY"}},
+	})
+	if _, err := router.SwitchMind(SwitchRequest{Target: "gemini-4-argon", Channel: "AGY"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. First Partner (!ReadOnly) call hits AGY 429 -> falls back cleanly AND activates cooldown.
+	resp, err := router.ChatWithTools(context.Background(), []core.ChatMessage{{Role: core.RoleUser, Content: "hi"}}, nil, &core.ChatOptions{})
+	if err != nil || resp.Content != "api-fallback-ok" || agy.calls != 1 || api.calls != 1 {
+		t.Fatalf("unexpected first fallback result: resp=%+v err=%v agy=%d api=%d", resp, err, agy.calls, api.calls)
+	}
+
+	// Status should display remaining cooldown.
+	if status := router.FormatStatusFor(true); !strings.Contains(status, "冷却状态") {
+		t.Fatalf("expected cooldown notice in status, got:\n%s", status)
+	}
+
+	// 2. Second immediate call skips cooling primary AGY without spawning it.
+	resp2, err := router.ChatWithTools(context.Background(), []core.ChatMessage{{Role: core.RoleUser, Content: "hi again"}}, nil, &core.ChatOptions{})
+	if err != nil || resp2.Content != "api-fallback-ok" || agy.calls != 1 || api.calls != 2 {
+		t.Fatalf("expected cooldown short-circuit without calling AGY, got resp=%+v err=%v agy=%d api=%d", resp2, err, agy.calls, api.calls)
+	}
+
+	// 3. Explicit manual switch clears cooldown and probes AGY again.
+	agy.err = nil
+	agy.reply = "agy-back-ok"
+	if res, err := router.SwitchMind(SwitchRequest{Target: "gemini-4-argon", Channel: "AGY"}); err != nil || res.Status != "success" {
+		t.Fatalf("switch failed: %+v, %v", res, err)
+	}
+	resp3, err := router.ChatWithTools(context.Background(), []core.ChatMessage{{Role: core.RoleUser, Content: "after switch"}}, nil, &core.ChatOptions{})
+	if err != nil || resp3.Content != "agy-back-ok" || agy.calls != 2 {
+		t.Fatalf("expected switch to clear cooldown and use AGY, got resp=%+v err=%v agy=%d", resp3, err, agy.calls)
 	}
 }
