@@ -229,3 +229,99 @@ func TestAGYTicketResultDoesNotCompleteWithPartialOrFailedOutput(t *testing.T) {
 		}
 	}
 }
+
+func TestAGYWorker_LongStreamJSONExceeding2MiBSucceeds(t *testing.T) {
+	setupMockAGY := func(t *testing.T, fixtureContent string) (*AGYWorker, string) {
+		t.Helper()
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+		tokenPath := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "antigravity-oauth-token")
+		if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(tokenPath, []byte(`{"id_token_email":"test@example.com","token":{"refresh_token":"dummy"}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		workDir := filepath.Join(tmpHome, "project")
+		if err := os.MkdirAll(workDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		realWorkDir, err := filepath.EvalSymlinks(workDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixturePath := filepath.Join(tmpHome, "stdout.fixture")
+		if err := os.WriteFile(fixturePath, []byte(fixtureContent), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		scriptPath := filepath.Join(tmpHome, "mock-agy.sh")
+		script := "#!/bin/sh\ncat '" + strings.ReplaceAll(fixturePath, "'", "'\\''") + "'\n"
+		if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		worker := NewAGYWorkerWithConfig(AGYWorkerConfig{
+			Command:    scriptPath,
+			DefaultDir: realWorkDir,
+		})
+		return worker, realWorkDir
+	}
+
+	t.Run("CapturesResultPast2MiB", func(t *testing.T) {
+		const convID = "11111111-2222-3333-4444-555555555555"
+		var sb strings.Builder
+		sb.WriteString(`{"event":"init","conversation_id":"` + convID + `"}` + "\n")
+		deltaLine := `{"event":"step_update","step_update":{"conversation_id":"` + convID + `","step_index":0,"state":"RUNNING","step_type":"agent_response","text_delta":"` + strings.Repeat("a", 1024) + `"}}` + "\n"
+		for sb.Len() < agyOutputLimit+(300<<10) {
+			sb.WriteString(deltaLine)
+		}
+		// Omit trailing newline to exercise Flush() on the final result line as well.
+		sb.WriteString(`{"event":"result","result":{"conversation_id":"` + convID + `","status":"SUCCESS","response":"大型长工单最终结果"}}`)
+
+		worker, workDir := setupMockAGY(t, sb.String())
+		var liveUpdates int
+		got, err := worker.ExecuteTicket(context.Background(), &entity.Ticket{
+			Platform:    "telegram",
+			ChannelID:   "chat-1",
+			RequesterID: "partner",
+			Goal:        "run huge stream",
+			OnLiveUpdate: func(model, liveLog, summary string) {
+				liveUpdates++
+			},
+		})
+		if err != nil {
+			t.Fatalf("expected >2MiB stream-json to succeed, got err: %v", err)
+		}
+		if got != "大型长工单最终结果" {
+			t.Fatalf("unexpected response: %q", got)
+		}
+		if liveUpdates == 0 {
+			t.Fatal("expected live progress updates during long stream")
+		}
+		session := worker.getSession("telegram", "partner", "chat-1", workDir)
+		defer worker.releaseSession(session)
+		session.Lock()
+		savedConv := session.ConversationID
+		session.Unlock()
+		if savedConv != convID {
+			t.Fatalf("expected conversation ID %q, got %q", convID, savedConv)
+		}
+	})
+
+	t.Run("TruncatedNonJSONWithoutResultFails", func(t *testing.T) {
+		line := strings.Repeat("plain non-json stdout output line\n", 64)
+		var sb strings.Builder
+		for sb.Len() < agyOutputLimit+(300<<10) {
+			sb.WriteString(line)
+		}
+		worker, _ := setupMockAGY(t, sb.String())
+		_, err := worker.ExecuteTicket(context.Background(), &entity.Ticket{
+			Platform:    "telegram",
+			ChannelID:   "chat-2",
+			RequesterID: "partner",
+			Goal:        "non-json flood",
+		})
+		if err == nil || !strings.Contains(err.Error(), "超过 2 MiB 上限") {
+			t.Fatalf("expected 2 MiB truncation error, got: %v", err)
+		}
+	})
+}

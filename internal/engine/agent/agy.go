@@ -186,23 +186,28 @@ func (w *AGYWorker) ExecuteTicket(ctx context.Context, t *entity.Ticket) (string
 		}
 		return partial, fmt.Errorf("AGY 执行异常 (%v): %s", err, errText)
 	}
-	if stdoutBuf.Truncated() {
-		saveErr := w.retainConversationID(session, t, cwd, stdoutBuf.Bytes())
-		if saveErr == nil {
-			saveErr = sessionSaveErr
+	var parsed llm.AGYResult
+	if process.streamResult != nil {
+		parsed = *process.streamResult
+	} else {
+		if stdoutBuf.Truncated() {
+			saveErr := w.retainConversationID(session, t, cwd, stdoutBuf.Bytes())
+			if saveErr == nil {
+				saveErr = sessionSaveErr
+			}
+			partial := process.liveLog
+			if partial == "" {
+				partial = partialAGYOutput(stdoutBuf.String(), stderrBuf.String(), true, stderrBuf.Truncated())
+			}
+			partial = appendSessionSaveWarning(partial, saveErr)
+			return partial, fmt.Errorf("AGY 输出超过 2 MiB 上限，结果不完整")
 		}
-		partial := process.liveLog
-		if partial == "" {
-			partial = partialAGYOutput(stdoutBuf.String(), stderrBuf.String(), true, stderrBuf.Truncated())
-		}
-		partial = appendSessionSaveWarning(partial, saveErr)
-		return partial, fmt.Errorf("AGY 输出超过 2 MiB 上限，结果不完整")
-	}
 
-	parsed, err := llm.ParseAGYResult(stdoutBuf.Bytes())
-	if err != nil {
-		partial := partialAGYOutput(stdoutBuf.String(), stderrBuf.String(), false, stderrBuf.Truncated())
-		return partial, fmt.Errorf("AGY 输出不是有效的 JSON 结果: %w", err)
+		parsed, err = llm.ParseAGYResult(stdoutBuf.Bytes())
+		if err != nil {
+			partial := partialAGYOutput(stdoutBuf.String(), stderrBuf.String(), false, stderrBuf.Truncated())
+			return partial, fmt.Errorf("AGY 输出不是有效的 JSON 结果: %w", err)
+		}
 	}
 	// A non-success response can still carry a valid conversation ID and useful
 	// stage output. Preserve both so a later, explicit stage can continue safely.

@@ -142,14 +142,17 @@ func (m *DebounceManager) Push(event *core.SensoryEvent) bool {
 			})
 		}
 		if invalidatesPendingSenderTurns(event.Content) && (event.Role == core.RolePartner || event.Role == core.RoleCollaborator) {
-			workerKey := SessionKey{Platform: event.Platform, IsGroup: event.IsGroup, ChannelID: event.ChannelID}
-			if value, ok := m.workers.Load(workerKey); ok {
-				worker := value.(*sessionWorker)
-				if worker.senderGenerations == nil {
-					worker.senderGenerations = make(map[string]uint64)
+			m.workers.Range(func(_, value any) bool {
+				worker, ok := value.(*sessionWorker)
+				if ok && worker.key.Platform == event.Platform && worker.key.IsGroup == event.IsGroup && worker.key.ChannelID == event.ChannelID &&
+					(worker.key.SenderID == "" || worker.key.SenderID == event.SenderID) {
+					if worker.senderGenerations == nil {
+						worker.senderGenerations = make(map[string]uint64)
+					}
+					worker.senderGenerations[event.SenderID]++
 				}
-				worker.senderGenerations[event.SenderID]++
-			}
+				return true
+			})
 		}
 		if requiresControlBarrier(event.Content) && (event.Role == core.RolePartner || event.Role == core.RoleCollaborator) {
 			if m.controlBarriers == nil {
@@ -194,9 +197,11 @@ func (m *DebounceManager) Push(event *core.SensoryEvent) bool {
 		return true
 	}
 
-	// A channel owns one FIFO worker. Keeping group members in separate workers
-	// would serialize through the agent lock in nondeterministic mutex order.
-	key := SessionKey{Platform: event.Platform, IsGroup: event.IsGroup, ChannelID: event.ChannelID}
+	// Isolate group turns per speaker (matching SuperAgent's per-speaker lock) so
+	// one member's long tool turn never blocks other group members or observed
+	// history ingestion. Group interjections and private chats stay channel-scoped.
+	key := workerKeyFor(event)
+	barrierKey := SessionKey{Platform: event.Platform, IsGroup: event.IsGroup, ChannelID: event.ChannelID}
 	val, ok := m.workers.Load(key)
 	var worker *sessionWorker
 	if !ok {
@@ -233,7 +238,7 @@ func (m *DebounceManager) Push(event *core.SensoryEvent) bool {
 	} else {
 		worker = val.(*sessionWorker)
 	}
-	queued := queuedEvent{event: event, generation: worker.generation.Load(), senderGeneration: worker.senderGenerations[event.SenderID], afterControl: m.controlBarriers[key]}
+	queued := queuedEvent{event: event, generation: worker.generation.Load(), senderGeneration: worker.senderGenerations[event.SenderID], afterControl: m.controlBarriers[barrierKey]}
 	worker.pushers.Add(1)
 	m.mu.Unlock()
 
@@ -247,6 +252,16 @@ func (m *DebounceManager) Push(event *core.SensoryEvent) bool {
 	}
 	worker.pushers.Add(-1)
 	return accepted
+}
+
+func workerKeyFor(event *core.SensoryEvent) SessionKey {
+	if event == nil {
+		return SessionKey{}
+	}
+	if event.IsGroup && event.SenderID != "" && !event.GroupInterjection {
+		return SessionKey{Platform: event.Platform, IsGroup: true, ChannelID: event.ChannelID, SenderID: event.SenderID}
+	}
+	return SessionKey{Platform: event.Platform, IsGroup: event.IsGroup, ChannelID: event.ChannelID}
 }
 
 func keyOf(event *core.SensoryEvent) SessionKey {
