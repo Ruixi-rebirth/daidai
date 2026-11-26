@@ -118,6 +118,31 @@ func TestImageToolAdvertisesOnlyReadableSources(t *testing.T) {
 	}
 }
 
+func TestFaceToolSchemaScopedByRole(t *testing.T) {
+	hands := tool.NewHandsWithConfig(tool.HandsConfig{})
+	hands.Register(tool.NewFaceToolWithDir(nil, t.TempDir()))
+
+	var guestEnum []string
+	for _, def := range toolsForEvent(hands, &entity.SensoryEvent{Platform: "qq", IsGroup: true, Role: entity.RoleGuest}, nil) {
+		if def.Function.Name == "express_face" {
+			emotion := def.Function.Parameters["properties"].(map[string]any)["emotion"].(map[string]any)
+			guestEnum, _ = emotion["enum"].([]string)
+		}
+	}
+	if !slices.Contains(guestEnum, "开心") || slices.Contains(guestEnum, "哈气") {
+		t.Fatalf("unexpected guest express_face enum: %v", guestEnum)
+	}
+
+	for _, def := range toolsForEvent(hands, &entity.SensoryEvent{Platform: "qq", IsGroup: true, Role: entity.RolePartner}, nil) {
+		if def.Function.Name == "express_face" {
+			emotion := def.Function.Parameters["properties"].(map[string]any)["emotion"].(map[string]any)
+			if _, hasEnum := emotion["enum"]; hasEnum {
+				t.Fatalf("partner express_face should not be restricted by enum, got: %v", emotion["enum"])
+			}
+		}
+	}
+}
+
 func TestSystemPromptInjectsWorkspaceOnlyInPartnerPrivateChat(t *testing.T) {
 	base := t.TempDir()
 	store := db.NewManager(filepath.Join(base, "db"))

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -80,6 +81,96 @@ func (t *FaceTool) Parameters() map[string]any {
 		},
 		"required": []string{"emotion"},
 	}
+}
+
+func isSupportedFaceExt(ext string) bool {
+	switch strings.ToLower(ext) {
+	case ".png", ".jpg", ".jpeg", ".webp", ".gif":
+		return true
+	default:
+		return false
+	}
+}
+
+func (t *FaceTool) cachedEmotions() []string {
+	seen := make(map[string]struct{})
+	if entries, err := os.ReadDir(t.baseDir); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if strings.HasPrefix(name, ".") {
+				continue
+			}
+			ext := filepath.Ext(name)
+			if !isSupportedFaceExt(ext) {
+				continue
+			}
+			base := strings.TrimSpace(strings.TrimSuffix(name, ext))
+			if base != "" {
+				seen[base] = struct{}{}
+			}
+		}
+	}
+	if entries, err := assets.SmallFaces.ReadDir("daidai_faces_small"); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			ext := filepath.Ext(name)
+			if !isSupportedFaceExt(ext) {
+				continue
+			}
+			base := strings.TrimSpace(strings.TrimSuffix(name, ext))
+			if base != "" {
+				seen[base] = struct{}{}
+			}
+		}
+	}
+	emotions := make([]string, 0, len(seen))
+	for emotion := range seen {
+		emotions = append(emotions, emotion)
+	}
+	sort.Strings(emotions)
+	return emotions
+}
+
+// DefinitionForEvent 为非伙伴/协作者角色将 emotion 约束为当前真实存在的缓存枚举，避免模型盲猜不存在的现拍表情。
+func (t *FaceTool) DefinitionForEvent(event *entity.SensoryEvent) (core.ToolDefinition, bool) {
+	if event != nil && (event.Role == entity.RolePartner || event.Role == entity.RoleCollaborator) {
+		return core.ToolDefinition{
+			Type: "function",
+			Function: core.ToolFunctionDetail{
+				Name:        t.Name(),
+				Description: t.Description(),
+				Parameters:  t.Parameters(),
+			},
+		}, true
+	}
+	emotions := t.cachedEmotions()
+	if len(emotions) == 0 {
+		return core.ToolDefinition{}, false
+	}
+	return core.ToolDefinition{
+		Type: "function",
+		Function: core.ToolFunctionDetail{
+			Name:        t.Name(),
+			Description: fmt.Sprintf("获取%s已有的官方形象照或内置表情缓存（当前角色仅支持读取已有缓存，不可现拍新形象；日常聊天带小表情请直接在回复末尾写 [脸:X]，不必调用本工具）。", config.BotName()),
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"emotion": map[string]any{
+						"type":        "string",
+						"enum":        emotions,
+						"description": fmt.Sprintf("当前可直接读取的%s已有形象或表情缓存名称", config.BotName()),
+					},
+				},
+				"required": []string{"emotion"},
+			},
+		},
+	}, true
 }
 
 type faceArgs struct {
@@ -214,13 +305,8 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 		return &core.ToolResult{Text: "无法校验当前会话权限，不能生成新图片。"}, nil
 	}
 	if event.Role != entity.RolePartner && event.Role != entity.RoleCollaborator {
-		for _, fallback := range []string{"开心", "正脸"} {
-			if data, ok := t.readCachedFace(ctx, fallback); ok {
-				return preparedFaceImage(data), nil
-			}
-		}
 		return &core.ToolResult{
-			Text: fmt.Sprintf("本地暂无【%s】的现成照片缓存", emotion),
+			Text: fmt.Sprintf("本地暂无【%s】的现成照片缓存，当前角色仅支持读取已有形象缓存。", emotion),
 		}, nil
 	}
 	if t.immune == nil {

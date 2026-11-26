@@ -139,6 +139,11 @@ func (h *HandsRegistry) Get(name string) (core.Tool, bool) {
 	return t, ok
 }
 
+// EventToolDefiner 允许工具根据当前会话与角色动态返回真实可用的参数 Schema。
+type EventToolDefiner interface {
+	DefinitionForEvent(event *entity.SensoryEvent) (core.ToolDefinition, bool)
+}
+
 func (h *HandsRegistry) Definitions() []core.ToolDefinition {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -155,6 +160,35 @@ func (h *HandsRegistry) Definitions() []core.ToolDefinition {
 				},
 			})
 		}
+	}
+	return defs
+}
+
+// DefinitionsForEvent 返回针对当前事件裁剪后的工具定义列表。
+func (h *HandsRegistry) DefinitionsForEvent(event *entity.SensoryEvent) []core.ToolDefinition {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	defs := make([]core.ToolDefinition, 0, len(h.order))
+	for _, name := range h.order {
+		t, ok := h.tools[name]
+		if !ok {
+			continue
+		}
+		if definer, ok := t.(EventToolDefiner); ok {
+			if def, include := definer.DefinitionForEvent(event); include {
+				defs = append(defs, def)
+			}
+			continue
+		}
+		defs = append(defs, core.ToolDefinition{
+			Type: "function",
+			Function: core.ToolFunctionDetail{
+				Name:        t.Name(),
+				Description: t.Description(),
+				Parameters:  t.Parameters(),
+			},
+		})
 	}
 	return defs
 }

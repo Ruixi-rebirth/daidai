@@ -9,12 +9,22 @@ import (
 	"daidai/internal/entity"
 )
 
+type eventDefinitionsHands interface {
+	DefinitionsForEvent(event *entity.SensoryEvent) []core.ToolDefinition
+}
+
 func toolsForEvent(hands entity.Hands, event *entity.SensoryEvent, imageSources []string) []core.ToolDefinition {
 	if hands == nil {
 		return nil
 	}
+	var definitions []core.ToolDefinition
+	if scoped, ok := hands.(eventDefinitionsHands); ok {
+		definitions = scoped.DefinitionsForEvent(event)
+	} else {
+		definitions = hands.Definitions()
+	}
 	var available []core.ToolDefinition
-	for _, definition := range hands.Definitions() {
+	for _, definition := range definitions {
 		name := definition.Function.Name
 		if !entity.ToolAllowed(name, event) {
 			continue

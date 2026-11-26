@@ -11,7 +11,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"daidai/internal/config"
 	"daidai/internal/core"
 	"daidai/internal/entity"
 	"daidai/internal/groupchat"
@@ -117,7 +116,7 @@ func (t *ImageTool) Name() string {
 }
 
 func (t *ImageTool) Description() string {
-	return fmt.Sprintf("根据画面描述绘制通用图片或插画（用于绘制%s本人以外的其他事物、动物或场景，如画一只猫、画风景等）。", config.BotName())
+	return "根据画面描述生成通用图片、插画或梗图。"
 }
 
 func (t *ImageTool) Parameters() map[string]any {
