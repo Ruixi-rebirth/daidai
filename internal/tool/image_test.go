@@ -61,6 +61,9 @@ func TestBuildImageGenGoal_IsolatesPromptAsJSON(t *testing.T) {
 	if !strings.Contains(goal, "/tmp/out.png") {
 		t.Fatalf("expected output path in goal, got: %s", goal)
 	}
+	if !strings.Contains(goal, "严禁调用 run_command") {
+		t.Fatalf("expected explicit run_command prohibition in goal, got: %s", goal)
+	}
 	// Raw unescaped newline/quote sequence must not appear outside JSON encoding.
 	if strings.Contains(goal, malicious) {
 		t.Fatalf("expected prompt to be JSON-escaped instead of interpolated raw")

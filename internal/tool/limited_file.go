@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -131,7 +133,7 @@ func readGeneratedArtifact(
 	return nil, "", os.ErrNotExist
 }
 
-func readAGYConversationArtifact(ctx context.Context, conversationID string, maxBytes int64, accept func(path string, data []byte) bool) ([]byte, string, error) {
+func readAGYConversationArtifact(ctx context.Context, conversationID, homeOverride string, maxBytes int64, accept func(path string, data []byte) bool) ([]byte, string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -139,9 +141,13 @@ func readAGYConversationArtifact(ctx context.Context, conversationID string, max
 	if !isAGYConversationID(conversationID) {
 		return nil, "", fmt.Errorf("无效的 AGY conversation_id")
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, "", err
+	home := strings.TrimSpace(homeOverride)
+	if home == "" {
+		var err error
+		home, err = os.UserHomeDir()
+		if err != nil {
+			return nil, "", err
+		}
 	}
 	root := filepath.Join(home, ".gemini", "antigravity-cli", "brain", conversationID)
 	dirs := []string{root}
@@ -188,12 +194,12 @@ func buildStatelessAGYArgs(goal string, modelEffort ...string) []string {
 	return append(args, "--sandbox")
 }
 
-func runStatelessAGYMediaGen(ctx context.Context, command, goal, workDir, taskLabel string, router ...*llm.MindRouter) (llm.AGYResult, error) {
+func runStatelessAGYMediaGen(ctx context.Context, command, goal, workDir, taskLabel string, router ...*llm.MindRouter) (llm.AGYResult, string, func(), error) {
 	if ctx == nil {
-		return llm.AGYResult{}, fmt.Errorf("%s requires a caller context", taskLabel)
+		return llm.AGYResult{}, "", nil, fmt.Errorf("%s requires a caller context", taskLabel)
 	}
 	if err := llm.CheckAGYAuth(); err != nil {
-		return llm.AGYResult{}, err
+		return llm.AGYResult{}, "", nil, err
 	}
 	command = strings.TrimSpace(command)
 	if command == "" {
@@ -208,9 +214,24 @@ func runStatelessAGYMediaGen(ctx context.Context, command, goal, workDir, taskLa
 	}
 	args := buildStatelessAGYArgs(goal, modelEffort...)
 
-	cmd := core.CommandProcessGroup(ctx, command, args...)
-	if workDir != "" {
-		cmd.Dir = workDir
+	var (
+		cmd          *exec.Cmd
+		artifactHome string
+		cleanup      func()
+		credGuard    llm.AGYCredentialGuard
+		isolated     = llm.ShouldIsolateAGYCommand(command)
+	)
+	if isolated {
+		var isoErr error
+		cmd, artifactHome, cleanup, credGuard, isoErr = llm.IsolatedAGYCommandWithHome(ctx, command, args, workDir)
+		if isoErr != nil {
+			return llm.AGYResult{}, "", nil, isoErr
+		}
+	} else {
+		cmd = core.CommandProcessGroup(ctx, command, args...)
+		if workDir != "" {
+			cmd.Dir = workDir
+		}
 	}
 	cmd.WaitDelay = 2 * time.Second
 
@@ -220,10 +241,13 @@ func runStatelessAGYMediaGen(ctx context.Context, command, goal, workDir, taskLa
 	cmd.Stderr = stderrBuf
 
 	if err := cmd.Run(); err != nil {
-		if len(stdoutBuf.Bytes()) > 0 {
+		if !isolated && len(stdoutBuf.Bytes()) > 0 {
 			if p, pErr := llm.ParseAGYResult(stdoutBuf.Bytes()); pErr == nil && p.ConversationID != "" {
 				llm.CleanupEphemeralAGYConversation(p.ConversationID)
 			}
+		}
+		if cleanup != nil {
+			cleanup()
 		}
 		errDetail := strings.TrimSpace(stderrBuf.String())
 		if errDetail == "" {
@@ -235,28 +259,60 @@ func runStatelessAGYMediaGen(ctx context.Context, command, goal, workDir, taskLa
 		if stdoutBuf.Truncated() || stderrBuf.Truncated() {
 			errDetail += " (子进程输出已截断)"
 		}
-		return llm.AGYResult{}, fmt.Errorf("%w (%s)", err, errDetail)
+		if credGuard.ContainsSecret(errDetail) {
+			errDetail = "输出包含敏感凭据，已安全拦截"
+		}
+		return llm.AGYResult{}, "", nil, fmt.Errorf("%w (%s)", err, errDetail)
+	}
+	cleanOnErr := func() {
+		if cleanup != nil {
+			cleanup()
+		}
 	}
 	if stdoutBuf.Truncated() {
-		return llm.AGYResult{}, fmt.Errorf("AGY 标准输出超过 2 MiB，无法确认生成结果")
+		cleanOnErr()
+		return llm.AGYResult{}, "", nil, fmt.Errorf("AGY 标准输出超过 2 MiB，无法确认生成结果")
 	}
 	result, err := llm.ParseAGYResult(stdoutBuf.Bytes())
 	if err != nil {
-		return llm.AGYResult{}, fmt.Errorf("解析 AGY JSON 结果失败: %w", err)
+		cleanOnErr()
+		return llm.AGYResult{}, "", nil, fmt.Errorf("解析 AGY JSON 结果失败: %w", err)
+	}
+	if credGuard.ContainsSecret(result.Response) {
+		result.Response = ""
 	}
 	if detail := result.FailureDetail(); detail != "" {
-		return result, fmt.Errorf("AGY %s失败: %s", taskLabel, core.TruncateRunes(detail, 1000, "…"))
+		if !isolated && result.ConversationID != "" {
+			llm.CleanupEphemeralAGYConversation(result.ConversationID)
+		}
+		cleanOnErr()
+		if credGuard.ContainsSecret(detail) {
+			detail = "上游返回包含敏感凭据，已安全拦截"
+		}
+		return llm.AGYResult{}, "", nil, fmt.Errorf("AGY %s失败: %s", taskLabel, core.TruncateRunes(detail, 1000, "…"))
 	}
 	if !strings.EqualFold(strings.TrimSpace(result.Status), "SUCCESS") {
-		return result, fmt.Errorf("AGY 未确认%s成功", taskLabel)
+		if !isolated && result.ConversationID != "" {
+			llm.CleanupEphemeralAGYConversation(result.ConversationID)
+		}
+		cleanOnErr()
+		return llm.AGYResult{}, "", nil, fmt.Errorf("AGY 未确认%s成功", taskLabel)
 	}
 	if result.ConversationID == "" {
-		return result, fmt.Errorf("AGY 结果缺少 conversation_id")
+		cleanOnErr()
+		return llm.AGYResult{}, "", nil, fmt.Errorf("AGY 结果缺少 conversation_id")
+	}
+	if summary := result.DeniedActionSummary(); summary != "" {
+		slog.Warn("media_gen: AGY 无头生图触发工具权限拒绝", "task", taskLabel, "conversationID", result.ConversationID, "deniedActions", summary)
+	}
+	if !isolated {
+		convID := result.ConversationID
+		cleanup = func() { llm.CleanupEphemeralAGYConversation(convID) }
 	}
 	output := strings.TrimSpace(result.Response)
 	if runes := []rune(output); len(runes) > 8000 {
 		output = string(runes[:8000]) + "... (输出摘要已截断)"
 	}
 	result.Response = output
-	return result, nil
+	return result, artifactHome, cleanup, nil
 }

@@ -34,7 +34,6 @@
               ripgrep
               python3
               typst
-              fontconfig
               ffmpeg
               chromium
               iproute2
@@ -69,7 +68,6 @@
                 --prefix PATH : ${pkgs.lib.makeBinPath [
                   pkgs.typst
                   pkgs.bubblewrap
-                  pkgs.fontconfig
                   pkgs.mermaid-cli
                   pkgs.ffmpeg
                   pkgs.chromium

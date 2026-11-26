@@ -174,12 +174,12 @@ func (w *agyLiveStreamWriter) consumeLine(raw []byte) {
 			w.emit(strings.EqualFold(su.State, "DONE"))
 		}
 	case "result":
-		if env.Result != nil && *env.Result != (llm.AGYResult{}) {
+		if env.Result != nil && !env.Result.IsEmpty() {
 			res := *env.Result
 			w.finalResult = &res
 		}
 	default:
-		if env.Type != "status" && env.Type != "delta" && env.AGYResult != (llm.AGYResult{}) &&
+		if env.Type != "status" && env.Type != "delta" && !env.IsEmpty() &&
 			!strings.EqualFold(strings.TrimSpace(env.Status), "RUNNING") {
 			res := env.AGYResult
 			w.finalResult = &res

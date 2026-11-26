@@ -108,3 +108,40 @@ func TestIsolatedAGYCommandHidesHostFilesAndSecrets(t *testing.T) {
 		t.Fatalf("expected isolated token copy to be mounted for CLI auth, got:\n%s", out)
 	}
 }
+
+func TestIsolatedAGYCommandWithHomeReturnsAndCleansSandboxHome(t *testing.T) {
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip("bwrap not installed in test environment")
+	}
+
+	hostHome := t.TempDir()
+	t.Setenv("HOME", hostHome)
+	tokenPath := DefaultAGYTokenPath()
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte(`{"id_token_email":"owner@example.com","token":{"refresh_token":"1//refresh_secret_value"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	probeBin := filepath.Join(t.TempDir(), "probe-cli")
+	if err := os.WriteFile(probeBin, []byte("#!/bin/sh\necho ok\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd, sandboxHome, cleanup, _, err := IsolatedAGYCommandWithHome(context.Background(), probeBin, nil, "")
+	if err != nil {
+		t.Fatalf("IsolatedAGYCommandWithHome failed: %v", err)
+	}
+	if cmd == nil || sandboxHome == "" {
+		t.Fatalf("expected non-empty cmd and sandboxHome, got cmd=%v sandboxHome=%q", cmd, sandboxHome)
+	}
+	if _, err := os.Stat(sandboxHome); err != nil {
+		cleanup()
+		t.Fatalf("expected sandboxHome %q to exist before cleanup: %v", sandboxHome, err)
+	}
+	cleanup()
+	if _, err := os.Stat(sandboxHome); !os.IsNotExist(err) {
+		t.Fatalf("expected sandboxHome %q to be removed on cleanup, err=%v", sandboxHome, err)
+	}
+}

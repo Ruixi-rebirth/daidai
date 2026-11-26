@@ -264,14 +264,14 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 	}
 	defer cleanupRef()
 	goal := fmt.Sprintf(
-		"请调用 image-generator 子智能体生成一张%s本人的 2D 二次元平面赛璐璐插画（主题/角度/神态：%s；绝对不要真人照片、3D CG 或可读文字水印）。请先读取参考基准图 %s 以保持同一人物的五官、发色（黑茶色微卷中长发）、白色小兔发夹、蓝灰眼眸与温柔文艺的 INFP 气质一致。%s 将最终图片保存到指定路径 %s；必须确认该文件实际存在且非空后才能结束任务，文件内容必须是实际 PNG 格式（不能只修改扩展名）。",
+		"请直接调用 generate_image 工具或 image-generator 子智能体生成一张%s本人的 2D 二次元平面赛璐璐插画（主题/角度/神态：%s；绝对不要真人照片、3D CG 或可读文字水印）。请以参考基准图 %s 作为视觉参考（如需查看仅可使用 view_file），保持同一人物的五官、发色（黑茶色微卷中长发）、白色小兔发夹、蓝灰眼眸与温柔文艺的 INFP 气质一致。%s 目标输出路径为 %s（若工具仅保存到会话产物目录也可）。重要：严禁调用 run_command 或任何终端命令（无头沙箱模式下调用命令会立刻中止任务）；生成完成后无需用命令检查、移动或转换格式，直接结束任务即可。",
 		config.BotName(), emotion, refPath, faceSceneAtmosphere(time.Now()), absTmpPath,
 	)
 
 	slog.Info("face_tool: 触发无状态后台动态生成新图片", "bot", config.BotName(), "emotion", emotion)
-	agyResult, execErr := runStatelessImageGen(ctx, t.command, goal, workDir, t.router)
-	if agyResult.ConversationID != "" {
-		defer llm.CleanupEphemeralAGYConversation(agyResult.ConversationID)
+	agyResult, artifactHome, cleanupAGY, execErr := runStatelessImageGen(ctx, t.command, goal, workDir, t.router)
+	if cleanupAGY != nil {
+		defer cleanupAGY()
 	}
 	if execErr != nil {
 		slog.Warn("face_tool: 动态生成图片失败", "emotion", emotion, "err", execErr)
@@ -282,10 +282,10 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 
 	data, generatedPath, err := readGeneratedImage(ctx, tmpPath, workDir, refPath)
 	if os.IsNotExist(err) {
-		data, generatedPath, err = readAGYImageArtifact(ctx, agyResult.ConversationID)
+		data, generatedPath, err = readAGYImageArtifact(ctx, agyResult.ConversationID, artifactHome)
 	}
 	if err != nil {
-		slog.Warn("face_tool: 生成结果读取失败", "emotion", emotion, "err", err, "conversationID", agyResult.ConversationID, "outputBytes", len(agyResult.Response))
+		slog.Warn("face_tool: 生成结果读取失败", "emotion", emotion, "err", err, "conversationID", agyResult.ConversationID, "outputBytes", len(agyResult.Response), "deniedActions", agyResult.DeniedActionSummary())
 		if os.IsNotExist(err) {
 			return &core.ToolResult{Text: fmt.Sprintf("生成任务已结束，但没有找到【%s】图片文件；未确认失败原因，不要推测为超时或上游服务故障。", emotion)}, nil
 		}

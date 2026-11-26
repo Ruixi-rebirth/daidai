@@ -156,9 +156,16 @@ func isSystemMountedBinary(path string) bool {
 // namespace where /home/ruixi, /run/secrets, and /var/lib/daidai do not exist.
 // If bwrap is unavailable on the host, it fails closed instead of running raw.
 func IsolatedAGYCommand(ctx context.Context, command string, args []string, workDir string) (*exec.Cmd, func(), AGYCredentialGuard, error) {
+	cmd, _, cleanup, guard, err := IsolatedAGYCommandWithHome(ctx, command, args, workDir)
+	return cmd, cleanup, guard, err
+}
+
+// IsolatedAGYCommandWithHome behaves like IsolatedAGYCommand and also returns
+// the host path of the temporary isolated HOME directory before cleanup removes it.
+func IsolatedAGYCommandWithHome(ctx context.Context, command string, args []string, workDir string) (*exec.Cmd, string, func(), AGYCredentialGuard, error) {
 	bwrapPath, err := exec.LookPath("bwrap")
 	if err != nil {
-		return nil, nil, AGYCredentialGuard{}, fmt.Errorf("未找到 bwrap 内核隔离沙箱，拒绝在无隔离环境下执行只读推理: %w", err)
+		return nil, "", nil, AGYCredentialGuard{}, fmt.Errorf("未找到 bwrap 内核隔离沙箱，拒绝在无隔离环境下执行只读推理: %w", err)
 	}
 	rawCmd := strings.TrimSpace(command)
 	if rawCmd == "" {
@@ -166,7 +173,7 @@ func IsolatedAGYCommand(ctx context.Context, command string, args []string, work
 	}
 	resolvedCmd, err := exec.LookPath(rawCmd)
 	if err != nil {
-		return nil, nil, AGYCredentialGuard{}, err
+		return nil, "", nil, AGYCredentialGuard{}, err
 	}
 	if evalCmd, evalErr := filepath.EvalSymlinks(resolvedCmd); evalErr == nil && evalCmd != "" {
 		resolvedCmd = evalCmd
@@ -174,12 +181,12 @@ func IsolatedAGYCommand(ctx context.Context, command string, args []string, work
 
 	tokenBytes, guard, err := LoadAGYCredentialGuard()
 	if err != nil {
-		return nil, nil, AGYCredentialGuard{}, err
+		return nil, "", nil, AGYCredentialGuard{}, err
 	}
 
 	sandboxHome, err := os.MkdirTemp("", "daidai-agy-home-*")
 	if err != nil {
-		return nil, nil, AGYCredentialGuard{}, fmt.Errorf("创建 AGY 沙箱隔离主目录失败: %w", err)
+		return nil, "", nil, AGYCredentialGuard{}, fmt.Errorf("创建 AGY 沙箱隔离主目录失败: %w", err)
 	}
 	var createdWorkDir string
 	targetWorkDir := strings.TrimSpace(workDir)
@@ -187,14 +194,14 @@ func IsolatedAGYCommand(ctx context.Context, command string, args []string, work
 		createdWorkDir, err = os.MkdirTemp("", "daidai-agy-work-*")
 		if err != nil {
 			_ = os.RemoveAll(sandboxHome)
-			return nil, nil, AGYCredentialGuard{}, fmt.Errorf("创建 AGY 沙箱隔离工作目录失败: %w", err)
+			return nil, "", nil, AGYCredentialGuard{}, fmt.Errorf("创建 AGY 沙箱隔离工作目录失败: %w", err)
 		}
 		targetWorkDir = createdWorkDir
 	} else {
 		targetWorkDir, err = filepath.Abs(targetWorkDir)
 		if err != nil {
 			_ = os.RemoveAll(sandboxHome)
-			return nil, nil, AGYCredentialGuard{}, fmt.Errorf("解析沙箱工作目录失败: %w", err)
+			return nil, "", nil, AGYCredentialGuard{}, fmt.Errorf("解析沙箱工作目录失败: %w", err)
 		}
 	}
 
@@ -208,12 +215,12 @@ func IsolatedAGYCommand(ctx context.Context, command string, args []string, work
 	sandboxTokenDir := filepath.Join(sandboxHome, ".gemini", "antigravity-cli")
 	if err := os.MkdirAll(sandboxTokenDir, 0700); err != nil {
 		cleanup()
-		return nil, nil, AGYCredentialGuard{}, fmt.Errorf("初始化沙箱认证目录失败: %w", err)
+		return nil, "", nil, AGYCredentialGuard{}, fmt.Errorf("初始化沙箱认证目录失败: %w", err)
 	}
 	sandboxTokenFile := filepath.Join(sandboxTokenDir, "antigravity-oauth-token")
 	if err := os.WriteFile(sandboxTokenFile, tokenBytes, 0600); err != nil {
 		cleanup()
-		return nil, nil, AGYCredentialGuard{}, fmt.Errorf("写入沙箱临时凭据失败: %w", err)
+		return nil, "", nil, AGYCredentialGuard{}, fmt.Errorf("写入沙箱临时凭据失败: %w", err)
 	}
 
 	bwrapArgs := []string{
@@ -278,5 +285,5 @@ func IsolatedAGYCommand(ctx context.Context, command string, args []string, work
 
 	cmd := core.CommandProcessGroup(ctx, bwrapPath, bwrapArgs...)
 	cmd.Dir = targetWorkDir
-	return cmd, cleanup, guard, nil
+	return cmd, sandboxHome, cleanup, guard, nil
 }

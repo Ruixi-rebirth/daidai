@@ -130,7 +130,7 @@ func (c *Client) sendMediaMessage(ctx context.Context, targetType, targetID, con
 		if metadata.Text == "" && strings.TrimSpace(content) != "" {
 			metadata.Text = content
 		}
-		if metadata.Kind == qqQuoteImage || metadata.Kind == qqQuoteFile {
+		if metadata.Kind == qqQuoteImage {
 			metadata.Text = ""
 			metadata.TextComplete = false
 		}

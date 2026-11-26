@@ -110,3 +110,14 @@ func TestCleanupEphemeralAGYConversation(t *testing.T) {
 		}
 	}
 }
+
+func TestParseAGYResultCapturesDeniedActions(t *testing.T) {
+	raw := []byte(`{"conversation_id":"0b8b5b7c-d846-43b3-8d77-6d69e3865f93","status":"SUCCESS","response":"","denied_actions":[{"action":"command","display_name":"RunCommand"}]}`)
+	got, err := ParseAGYResult(raw)
+	if err != nil {
+		t.Fatalf("ParseAGYResult failed: %v", err)
+	}
+	if summary := got.DeniedActionSummary(); summary != "RunCommand" {
+		t.Fatalf("expected DeniedActionSummary RunCommand, got %q", summary)
+	}
+}

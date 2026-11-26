@@ -10,13 +10,48 @@ import (
 	"time"
 )
 
+type AGYDeniedAction struct {
+	Action      string `json:"action"`
+	DisplayName string `json:"display_name"`
+}
+
 type AGYResult struct {
-	ConversationID    string `json:"conversation_id"`
-	Status            string `json:"status"`
-	Response          string `json:"response"`
-	FinishedReason    string `json:"finished_reason"`
-	Error             string `json:"error"`
-	FinalStepResponse string `json:"-"`
+	ConversationID    string            `json:"conversation_id"`
+	Status            string            `json:"status"`
+	Response          string            `json:"response"`
+	FinishedReason    string            `json:"finished_reason"`
+	Error             string            `json:"error"`
+	DeniedActions     []AGYDeniedAction `json:"denied_actions,omitempty"`
+	FinalStepResponse string            `json:"-"`
+}
+
+// IsEmpty reports whether all structured result fields are empty.
+func (r AGYResult) IsEmpty() bool {
+	return r.ConversationID == "" &&
+		r.Status == "" &&
+		r.Response == "" &&
+		r.FinishedReason == "" &&
+		r.Error == "" &&
+		len(r.DeniedActions) == 0 &&
+		r.FinalStepResponse == ""
+}
+
+// DeniedActionSummary returns a compact comma-separated list of denied actions, if any.
+func (r AGYResult) DeniedActionSummary() string {
+	if len(r.DeniedActions) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(r.DeniedActions))
+	for _, d := range r.DeniedActions {
+		name := strings.TrimSpace(d.DisplayName)
+		if name == "" {
+			name = strings.TrimSpace(d.Action)
+		}
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return strings.Join(names, ",")
 }
 
 // FailureDetail reports explicit CLI failures. Callers still decide what
@@ -93,12 +128,12 @@ func ParseAGYResult(raw []byte) (AGYResult, error) {
 						}
 					}
 				case "result":
-					if entry.Result != nil && *entry.Result != (AGYResult{}) {
+					if entry.Result != nil && !entry.Result.IsEmpty() {
 						result = *entry.Result
 						found = true
 					}
 				default:
-					if entry.Type != "status" && entry.Type != "delta" && entry.AGYResult != (AGYResult{}) &&
+					if entry.Type != "status" && entry.Type != "delta" && !entry.IsEmpty() &&
 						!strings.EqualFold(strings.TrimSpace(entry.Status), "RUNNING") {
 						result, found = entry.AGYResult, true
 					}
