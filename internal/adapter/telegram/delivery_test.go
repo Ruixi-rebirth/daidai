@@ -157,23 +157,3 @@ func TestTelegramTextWithoutReceiptPreservesOnlyConfirmedUnsentTail(t *testing.T
 		t.Fatalf("incorrect receipt accounting: calls=%d, err=%v", calls, err)
 	}
 }
-
-func TestTelegramSendVideoDeliversMP4AndCaption(t *testing.T) {
-	c := testChannel(t)
-	var calledPath string
-	c.http.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
-		calledPath = r.URL.Path
-		return response(`{"ok":true,"result":{"message_id":99}}`), nil
-	})
-	err := c.Transmit(context.Background(), &entity.Utterance{
-		ChannelID: "42",
-		Text:      "动画渲染好了",
-		Videos:    [][]byte{[]byte("fake-mp4-bytes")},
-	})
-	if err != nil {
-		t.Fatalf("Transmit video failed: %v", err)
-	}
-	if !strings.HasSuffix(calledPath, "/sendVideo") {
-		t.Fatalf("expected /sendVideo call, got %q", calledPath)
-	}
-}

@@ -98,29 +98,15 @@ func (c *Client) SendC2CMediaMessageWithContext(ctx context.Context, userOpenID,
 }
 
 func (c *Client) sendMediaMessage(ctx context.Context, targetType, targetID, content string, imageData []byte, msgID string, metadata QuoteMetadata) error {
-	return c.sendMediaMessageWithType(ctx, targetType, targetID, content, 1, imageData, msgID, metadata)
-}
-
-func (c *Client) sendVideoMessage(ctx context.Context, targetType, targetID, content string, videoData []byte, msgID string, metadata QuoteMetadata) error {
-	return c.sendMediaMessageWithType(ctx, targetType, targetID, content, 2, videoData, msgID, metadata)
-}
-
-func (c *Client) sendMediaMessageWithType(ctx context.Context, targetType, targetID, content string, fileType int, mediaData []byte, msgID string, metadata QuoteMetadata) error {
-	defaultKind := qqQuoteImage
-	mediaLabel := "image"
-	if fileType == 2 {
-		defaultKind = qqQuoteFile
-		mediaLabel = "video"
-	}
 	if metadata.Kind == "" || metadata.Kind == qqQuoteText {
-		metadata.Kind = defaultKind
+		metadata.Kind = qqQuoteImage
 		if strings.TrimSpace(content) != "" {
 			metadata.Kind = qqQuoteMixed
 		}
 	}
-	fileInfo, err := c.UploadMedia(ctx, targetType, targetID, fileType, mediaData)
+	fileInfo, err := c.UploadMedia(ctx, targetType, targetID, 1, imageData)
 	if err != nil {
-		return &entity.UnsentError{Err: fmt.Errorf("%s %s upload error: %w", targetType, mediaLabel, err)}
+		return &entity.UnsentError{Err: fmt.Errorf("%s image upload error: %w", targetType, err)}
 	}
 
 	url := fmt.Sprintf("%s/v2/%s/%s/messages", apiBaseURL, targetType, targetID)

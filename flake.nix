@@ -17,11 +17,6 @@
             ];
           };
           mitexPath = "${pkgs.typstPackages.mitex}/lib/typst-packages/mitex/${pkgs.typstPackages.mitex.version}";
-          pythonEnv = pkgs.python3.withPackages (ps: with ps; [
-            pillow
-            numpy
-            matplotlib
-          ]);
         in {
           devShells.default = pkgs.mkShell {
             name = "daidai-dev-shell";
@@ -37,7 +32,7 @@
               jq
               git
               ripgrep
-              pythonEnv
+              python3
               typst
               fontconfig
               ffmpeg
@@ -84,7 +79,7 @@
                   pkgs.imagemagick
                   pkgs.curl
                   pkgs.jq
-                  pythonEnv
+                  pkgs.python3
                   pkgs.git
                   pkgs.ripgrep
                   pkgs.sqlite

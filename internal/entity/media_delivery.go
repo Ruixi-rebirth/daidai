@@ -41,7 +41,7 @@ func ImageDeliveryText(sources []string, delivered int) (complete, pending strin
 	return strings.Join(done, "\n\n"), strings.Join(todo, "\n\n")
 }
 
-// WithoutEmptyImages keeps image positions aligned with their source text and drops empty video entries.
+// WithoutEmptyImages keeps image positions aligned with their source text.
 func (u *Utterance) WithoutEmptyImages() *Utterance {
 	if u == nil {
 		return nil
@@ -53,46 +53,29 @@ func (u *Utterance) WithoutEmptyImages() *Utterance {
 			break
 		}
 	}
-	hasEmptyVideo := false
-	for _, video := range u.Videos {
-		if len(video) == 0 {
-			hasEmptyVideo = true
-			break
-		}
-	}
-	if !hasEmptyImage && !hasEmptyVideo {
+	if !hasEmptyImage {
 		return u
 	}
 	filtered := *u
-	if hasEmptyImage {
-		filtered.Images = nil
-		filtered.ImageSources = nil
-		filtered.InlineNonTextImageCount = 0
-		filtered.ReplyCardPages = 0
-		for index, data := range u.Images {
-			if len(data) == 0 {
-				continue
-			}
-			filtered.Images = append(filtered.Images, data)
-			if index < len(u.ImageSources) {
-				filtered.ImageSources = append(filtered.ImageSources, u.ImageSources[index])
-			}
-			if index < u.InlineNonTextImageCount {
-				filtered.InlineNonTextImageCount++
-			}
-			if index >= len(u.Images)-u.ReplyCardPages {
-				filtered.ReplyCardPages++
-			}
+	filtered.Images = nil
+	filtered.ImageSources = nil
+	filtered.InlineNonTextImageCount = 0
+	filtered.ReplyCardPages = 0
+	for index, data := range u.Images {
+		if len(data) == 0 {
+			continue
 		}
-		filtered.InlineImages = len(filtered.Images) > 0 && u.InlineImages
-	}
-	if hasEmptyVideo {
-		filtered.Videos = nil
-		for _, video := range u.Videos {
-			if len(video) > 0 {
-				filtered.Videos = append(filtered.Videos, video)
-			}
+		filtered.Images = append(filtered.Images, data)
+		if index < len(u.ImageSources) {
+			filtered.ImageSources = append(filtered.ImageSources, u.ImageSources[index])
+		}
+		if index < u.InlineNonTextImageCount {
+			filtered.InlineNonTextImageCount++
+		}
+		if index >= len(u.Images)-u.ReplyCardPages {
+			filtered.ReplyCardPages++
 		}
 	}
+	filtered.InlineImages = len(filtered.Images) > 0 && u.InlineImages
 	return &filtered
 }

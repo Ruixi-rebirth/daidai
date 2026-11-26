@@ -103,9 +103,6 @@ func (a *SuperAgent) transmitUtteranceWithContinuationContext(ctx, continuationC
 		fallbackText := textForFallback(utterance)
 		if fallbackText == "" {
 			fallbackText = "图片暂时没发出去。"
-			if len(utterance.Videos) > 0 && len(utterance.Images) == 0 && len(utterance.CardData) == 0 {
-				fallbackText = "视频暂时没发出去。"
-			}
 		}
 		deliveredText, fallbackErr := a.sendTextFallback(ctx, continuationCtx, utterance, fallbackText, senderID)
 		if fallbackErr != nil {
@@ -181,7 +178,6 @@ func (a *SuperAgent) transmitTextFallbackWithContinuationContext(ctx, continuati
 	fallback.FallbackText = ""
 	fallback.CardData = nil
 	fallback.Images = nil
-	fallback.Videos = nil
 	fallback.InlineAssets = nil
 	fallback.QuoteText = ""
 	fallback.ReplyCardPages = 0

@@ -58,7 +58,7 @@ func TestConversationSpecificToolVisibility(t *testing.T) {
 	}
 
 	// Collaborator/Friend/Guest must NOT access infra, billing, system status, models, workspaces, or engineering tickets.
-	partnerOnlyTools := []string{"oci_bill", "oci_ip", "singbox_links", "get_system_status", "switch_model", "switch_workspace", "delegate_ticket", "generate_video"}
+	partnerOnlyTools := []string{"oci_bill", "oci_ip", "singbox_links", "get_system_status", "switch_model", "switch_workspace", "delegate_ticket"}
 	for _, toolName := range partnerOnlyTools {
 		for _, role := range []entity.UserRole{entity.RoleCollaborator, entity.RoleFriend, entity.RoleGuest} {
 			if entity.ToolAllowed(toolName, &entity.SensoryEvent{Platform: "qq", Role: role}) {

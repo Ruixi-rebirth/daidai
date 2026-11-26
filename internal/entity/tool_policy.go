@@ -42,11 +42,10 @@ var defaultToolPolicies = map[string]toolPolicy{
 	"manage_group_expressions": {scope: scopeGroupOnly, roles: partnerOnlyRoles},
 	"manage_group_image_quota": {scope: scopeGroupOnly, roles: partnerOnlyRoles},
 
-	// Partner-only system, model, media, and briefing controls.
+	// Partner-only system, model, and briefing controls.
 	"manage_geek_briefing": {scope: scopeAny, roles: partnerOnlyRoles},
 	"get_system_status":    {scope: scopeAny, roles: partnerOnlyRoles},
 	"switch_model":         {scope: scopeAny, roles: partnerOnlyRoles},
-	"generate_video":       {scope: scopeAny, roles: partnerOnlyRoles},
 
 	// Shared tools (per-tool role/quota rules remain enforced inside execution).
 	"render_card":        {scope: scopeAny, roles: publicToolRoles},

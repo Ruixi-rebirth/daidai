@@ -16,7 +16,6 @@ const (
 	apiBaseURL          = "https://api.bot.qq.com"
 	maxAPIResponseBytes = 1 << 20
 	maxQQMediaBytes     = core.MaxImageBytes
-	maxQQVideoBytes     = core.MaxVideoBytes
 )
 
 // QuoteMetadata describes the semantic content associated with a sent QQ message.

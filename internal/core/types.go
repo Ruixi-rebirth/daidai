@@ -14,9 +14,6 @@ var appStartTime = time.Now()
 // MaxImageBytes is the shared image payload limit for rendered, generated, and uploaded media.
 const MaxImageBytes = 10 << 20
 
-// MaxVideoBytes is the shared video payload limit for generated and uploaded MP4 media.
-const MaxVideoBytes = 10 << 20
-
 // MaxVisionImagesPerRequest bounds image downloads and model input per turn.
 const MaxVisionImagesPerRequest = 3
 

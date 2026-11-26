@@ -21,12 +21,8 @@ func (c *Client) UploadMedia(ctx context.Context, targetType, targetID string, f
 	if len(data) == 0 {
 		return "", fmt.Errorf("upload media failed: media data is empty")
 	}
-	limit := maxQQMediaBytes
-	if fileType == 2 {
-		limit = maxQQVideoBytes
-	}
-	if len(data) > limit {
-		return "", fmt.Errorf("upload media failed: media exceeds %d byte limit", limit)
+	if len(data) > maxQQMediaBytes {
+		return "", fmt.Errorf("upload media failed: media exceeds %d byte limit", maxQQMediaBytes)
 	}
 	url := fmt.Sprintf("%s/v2/%s/%s/files", apiBaseURL, targetType, targetID)
 	payload := map[string]any{

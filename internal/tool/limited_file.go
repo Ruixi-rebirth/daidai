@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,10 +15,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const (
-	maxGeneratedImageBytes = core.MaxImageBytes
-	maxGeneratedVideoBytes = media.MaxRawVideoInputBytes
-)
+const maxGeneratedImageBytes = core.MaxImageBytes
 
 func normalizeImageData(ctx context.Context, data []byte) ([]byte, string, error) {
 	return media.NormalizeImageData(ctx, data)
@@ -67,25 +63,8 @@ func readGeneratedImage(ctx context.Context, outputPath, workspace string, exclu
 	return readGeneratedArtifact(ctx, outputPath, workspace, maxGeneratedImageBytes, isImageArtifact, excludedPaths...)
 }
 
-func readGeneratedVideo(ctx context.Context, outputPath, workspace string, excludedPaths ...string) ([]byte, string, error) {
-	return readGeneratedArtifact(ctx, outputPath, workspace, maxGeneratedVideoBytes, isVideoArtifact, excludedPaths...)
-}
-
 func isImageArtifact(_ string, data []byte) bool {
 	return strings.HasPrefix(imageContentType(data), "image/")
-}
-
-func isVideoArtifact(path string, data []byte) bool {
-	if len(data) == 0 {
-		return false
-	}
-	ext := strings.ToLower(filepath.Ext(path))
-	switch ext {
-	case ".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi", ".gif":
-		return true
-	}
-	detected := http.DetectContentType(data)
-	return strings.HasPrefix(detected, "video/") || detected == "image/gif"
 }
 
 func readGeneratedArtifact(
@@ -195,7 +174,7 @@ func readAGYConversationArtifact(ctx context.Context, conversationID string, max
 	return nil, "", os.ErrNotExist
 }
 
-func buildStatelessAGYArgs(goal string, allowShellTools bool, modelEffort ...string) []string {
+func buildStatelessAGYArgs(goal string, modelEffort ...string) []string {
 	args := []string{
 		"-p", goal,
 		"--output-format", "json",
@@ -206,15 +185,10 @@ func buildStatelessAGYArgs(goal string, allowShellTools bool, modelEffort ...str
 	if len(modelEffort) > 1 && strings.TrimSpace(modelEffort[1]) != "" {
 		args = append(args, "--effort", strings.TrimSpace(modelEffort[1]))
 	}
-	if allowShellTools {
-		args = append(args, "--mode", "auto", "--sandbox", "--dangerously-skip-permissions")
-	} else {
-		args = append(args, "--sandbox")
-	}
-	return args
+	return append(args, "--sandbox")
 }
 
-func runStatelessAGYMediaGen(ctx context.Context, command, goal, workDir, taskLabel string, allowShellTools bool, router ...*llm.MindRouter) (llm.AGYResult, error) {
+func runStatelessAGYMediaGen(ctx context.Context, command, goal, workDir, taskLabel string, router ...*llm.MindRouter) (llm.AGYResult, error) {
 	if ctx == nil {
 		return llm.AGYResult{}, fmt.Errorf("%s requires a caller context", taskLabel)
 	}
@@ -232,7 +206,7 @@ func runStatelessAGYMediaGen(ctx context.Context, command, goal, workDir, taskLa
 			modelEffort = []string{model, effort}
 		}
 	}
-	args := buildStatelessAGYArgs(goal, allowShellTools, modelEffort...)
+	args := buildStatelessAGYArgs(goal, modelEffort...)
 
 	cmd := core.CommandProcessGroup(ctx, command, args...)
 	if workDir != "" {

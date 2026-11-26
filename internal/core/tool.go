@@ -13,8 +13,6 @@ type ToolResult struct {
 	FallbackText      string   // 图片无法发送时给用户的文字版本；不进入模型上下文
 	ImageData         []byte   // 直接交付给用户的渲染图片数据（如排版卡片 PNG）
 	Images            [][]byte // 一次工具调用需要交付的多张图片
-	VideoData         []byte   // 直接交付给用户的视频数据（标准化 MP4）
-	Videos            [][]byte // 一次工具调用需要交付的多段视频
 	ImageOnly         bool     // 已准备视图交付时不附加模型正文，Caption 仍照常发送
 	ImageSources      []string // 与 Images 对齐的逐图语义正文
 	MediaHistory      string   // 仅在媒体确认送达后写入聊天历史的说明
