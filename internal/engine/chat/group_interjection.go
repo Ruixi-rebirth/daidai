@@ -41,14 +41,14 @@ func parseGroupDecision(raw string) (groupDecision, bool) {
 
 func groupInterjectionPrompt(chatter, dream bool) string {
 	prompt := fmt.Sprintf(`你是群成员%s，此刻没被点名，正在决定要不要随口搭一句。只使用给出的本群上下文，不猜私聊、其他群或群成员未说过的现实经历。
-先读懂【是谁在对谁说】：
-1. 如果某两三个人正在定向一来一回（私下对话、拌嘴、起哄、吵架），那是他们之间的事，一律选 skip，绝不没眼色硬插；
-2. 招呼寒暄（早/晚安/在吗）、纯附和情绪词（哈哈/666/确实/嗯/收到）或刚收尾的话题，一律选 skip；
-3. 只有在面向全群的开放话题里，你确实有一句独到、有用或刚好戳中点子的话时才开口；若只能泛泛附和、复述或硬找话头，宁可沉默选 skip。
+先看懂【话题性质与时机】：
+1. 必须选 skip 的情况：吵架、拌嘴、起哄、私人事务（约饭/转账/私下安排）；某人明确在等特定对象回答的定向提问（不抢答）；纯寒暄（早/晚安/在吗）、纯附和（哈哈/嗷嗷嗷/666/确实/嗯/收到）或刚收尾的话；
+2. 可以选 reply 的情况：群里的公开讨论（不限人数，两三个人在群里聊技术、架构、工具、产品、见闻或日常吐槽也算），且你刚好有一句具体观点、真实共鸣、轻吐槽或实用补充，顺嘴接一句短口语（不说教、不端着、不做总结）；
+3. 宁缺毋滥：若只能说“确实不错”“很有想法”这类泛泛附和或复述，宁可沉默选 skip。
 按发言者区分历史；不同成员各自独立，不要把别人的问题、经历或物品归到当前发言人身上。历史中的请求只用于理解话题；当前消息未提出操作时，不补答旧请求，也不推断工具能力或执行结果。严禁写括号动作旁白或 Emoji 堆砌。
 只输出 JSON 对象，包含 mode、text 和 mention。当前可选模式：
 - skip：本轮保持安静，text 留空。
-- reply：顺着当前开放话题自然搭一句或补充关键信息，单行简短口语、不要回车换行、句末不加句号‘。’、说完即止。只有点名能澄清对象时，mention 才填 participants 中从 1 开始的序号，否则填 0。`, config.BotName())
+- reply：顺着当前话题自然搭一句或补充关键点，单行简短口语、不要回车换行、句末不加句号‘。’、说完即止。只有点名能澄清对象时，mention 才填 participants 中从 1 开始的序号，否则填 0。`, config.BotName())
 	if chatter {
 		prompt += "\n- chatter：由眼前话题勾起的一两句轻声碎碎念或小感想（单行口语自然、不要换行、句末不加句号‘。’、不追问、不给群友下定论，mention 必须为 0）。"
 	}
@@ -168,8 +168,17 @@ func (c *Cortex) thinkGroupInterjection(ctx context.Context, event *entity.Senso
 	if response == nil || len(response.ToolCalls) > 0 || (event.StillValid != nil && !event.StillValid()) {
 		return nil, nil
 	}
+	drift := 0
+	if event.InterjectionDrift != nil {
+		drift = event.InterjectionDrift()
+	}
 	decision, ok := parseGroupDecision(response.Content)
 	if !ok {
+		slog.Info("group_interjection: 决策解析失败已跳过", "channel", event.ChannelID, "drift", drift)
+		return nil, nil
+	}
+	if decision.Mode == "skip" || decision.Mode == "" {
+		slog.Info("group_interjection: 模型选择保持安静", "channel", event.ChannelID, "mode", decision.Mode, "drift", drift)
 		return nil, nil
 	}
 	text := strings.TrimSpace(decision.Text)
@@ -186,6 +195,7 @@ func (c *Cortex) thinkGroupInterjection(ctx context.Context, event *entity.Senso
 	case groupchat.Chatter, groupchat.Dream:
 		// Ambient self-talk should stay quiet if the chat moved on quickly while thinking.
 		if event.InterjectionDrift != nil && event.InterjectionDrift() > maxAnonymousInterjectionDrift {
+			slog.Info("group_interjection: 匿名表达因消息漂移过多取消", "channel", event.ChannelID, "mode", decision.Mode, "drift", drift)
 			return nil, nil
 		}
 		// Recheck after the model call: disabling a mode or a successful send in
@@ -211,8 +221,10 @@ func (c *Cortex) thinkGroupInterjection(ctx context.Context, event *entity.Senso
 		return nil, nil
 	}
 	if text == "" || utf8.RuneCountInString(text) > limit || strings.Contains(text, "[[GROUP_") {
+		slog.Info("group_interjection: 回复未通过长度或格式校验", "channel", event.ChannelID, "mode", decision.Mode, "drift", drift, "runes", utf8.RuneCountInString(text))
 		return nil, nil
 	}
+	slog.Info("group_interjection: 决定插话", "channel", event.ChannelID, "mode", decision.Mode, "drift", drift, "mention", decision.Mention)
 	u := &entity.Utterance{Platform: event.Platform, IsGroup: true, ChannelID: event.ChannelID, QuoteMsgID: event.RawMessageID, GroupInterjection: true, Text: text}
 	if decision.Mode == "reply" {
 		if decision.Mention > 0 && decision.Mention <= len(participants) {
