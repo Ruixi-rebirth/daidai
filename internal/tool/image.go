@@ -446,10 +446,50 @@ func (t *ImageTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 		slog.Warn("image_tool: AGY 会话产物扫描失败", "err", err)
 	}
 
-	slog.Warn("image_tool: 生图任务未找到图片", "conversationID", agyResult.ConversationID, "outputBytes", len(agyResult.Response), "deniedActions", agyResult.DeniedActionSummary())
+	slog.Warn("image_tool: 生图任务未找到图片",
+		"conversationID", agyResult.ConversationID,
+		"outputBytes", len(agyResult.Response),
+		"deniedActions", agyResult.DeniedActionSummary(),
+		"response", formatImageGenResponseForLog(agyResult.Response),
+	)
+	if reason := classifyMissingImageReason(agyResult.Response); reason != "" {
+		return &core.ToolResult{Text: reason}, nil
+	}
 	return &core.ToolResult{
 		Text: "生成任务已结束，但没有找到图片文件；未确认失败原因，不要推测为超时或上游服务故障。",
 	}, nil
+}
+
+const maxLoggedImageGenResponseRunes = 4000
+
+func formatImageGenResponseForLog(resp string) string {
+	return core.TruncateRunes(strings.TrimSpace(resp), maxLoggedImageGenResponseRunes, "…[truncated]")
+}
+
+func classifyMissingImageReason(resp string) string {
+	lower := strings.ToLower(resp)
+	switch {
+	case strings.Contains(lower, "429") ||
+		strings.Contains(lower, "quota_exhausted") ||
+		strings.Contains(lower, "resource_exhausted") ||
+		strings.Contains(lower, "too many requests") ||
+		strings.Contains(lower, "exhausted your capacity") ||
+		strings.Contains(resp, "配额") ||
+		strings.Contains(resp, "额度"):
+		return "上游生图模型当前配额已耗尽，请稍后或等配额重置后再试。"
+	case strings.Contains(lower, "safety") ||
+		strings.Contains(lower, "policy") ||
+		strings.Contains(lower, "blocked") ||
+		strings.Contains(lower, "cannot generate") ||
+		strings.Contains(lower, "can't generate") ||
+		strings.Contains(lower, "unable to generate") ||
+		strings.Contains(resp, "安全策略") ||
+		strings.Contains(resp, "无法生成") ||
+		strings.Contains(resp, "拒绝生成"):
+		return "上游生图模型因内容或安全策略限制未能生成该图片，请换个描述或参考图再试。"
+	default:
+		return ""
+	}
 }
 
 func readAGYImageArtifact(ctx context.Context, conversationID, homeOverride string) ([]byte, string, error) {

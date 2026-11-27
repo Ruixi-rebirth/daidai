@@ -371,8 +371,18 @@ func (t *FaceTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core.
 		data, generatedPath, err = readAGYImageArtifact(ctx, agyResult.ConversationID, artifactHome)
 	}
 	if err != nil {
-		slog.Warn("face_tool: 生成结果读取失败", "emotion", emotion, "err", err, "conversationID", agyResult.ConversationID, "outputBytes", len(agyResult.Response), "deniedActions", agyResult.DeniedActionSummary())
+		slog.Warn("face_tool: 生成结果读取失败",
+			"emotion", emotion,
+			"err", err,
+			"conversationID", agyResult.ConversationID,
+			"outputBytes", len(agyResult.Response),
+			"deniedActions", agyResult.DeniedActionSummary(),
+			"response", formatImageGenResponseForLog(agyResult.Response),
+		)
 		if os.IsNotExist(err) {
+			if reason := classifyMissingImageReason(agyResult.Response); reason != "" {
+				return &core.ToolResult{Text: reason}, nil
+			}
 			return &core.ToolResult{Text: fmt.Sprintf("生成任务已结束，但没有找到【%s】图片文件；未确认失败原因，不要推测为超时或上游服务故障。", emotion)}, nil
 		}
 		return &core.ToolResult{Text: fmt.Sprintf("已生成【%s】图片，但读取失败；请检查服务日志。", emotion)}, nil
