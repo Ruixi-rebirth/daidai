@@ -7,6 +7,7 @@ const MaxQuotedMessageDepth = 4
 const (
 	CurrentImageSource = "current_message"
 	QuotedImageSource  = "quoted_message"
+	UserAvatarSource   = "user_avatar"
 )
 
 // CurrentImagesFromEvent selects the available images for this turn.

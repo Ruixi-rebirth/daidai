@@ -36,6 +36,7 @@ type HandsConfig struct {
 	Immune           *entity.ImmuneSystem
 	Workspaces       *entity.WorkspaceManager
 	AttachmentInbox  *media.Inbox
+	MediaSources     *media.Sources
 	Database         *db.Manager
 	OCIConfig        *config.OCIConfig
 	OCIClient        *oci.OCIClient
@@ -76,8 +77,12 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 	h.Register(NewWebSearchToolWithCommand(cfg.Router, cfg.AGYCommand))
 	h.Register(NewReadLinkToolWithCommand(cfg.Router, cfg.AGYCommand))
 	h.Register(NewScreenshotTool())
+	var avatarResolver *AvatarResolver
+	if cfg.MediaSources != nil {
+		avatarResolver = NewAvatarResolver(cfg.Database, cfg.MediaSources)
+	}
 	if cfg.Vision != nil {
-		h.Register(NewImageAnalysisTool(cfg.Vision))
+		h.Register(NewImageAnalysisToolWithAvatars(cfg.Vision, avatarResolver))
 	}
 	h.Register(oci.NewSingboxLinksTool(cfg.Immune))
 	if cfg.Workspaces != nil {
@@ -98,6 +103,7 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 		}
 		imgTool := NewImageToolWithCommand(cfg.Delegates, cfg.AGYCommand, outDir, cfg.Immune)
 		imgTool.SetImageQuotaStore(imageQuotaStore)
+		imgTool.SetMediaSources(cfg.MediaSources, avatarResolver)
 		imgTool.SetRouter(cfg.Router)
 		h.Register(imgTool)
 	}

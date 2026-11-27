@@ -11,6 +11,7 @@ import (
 	"daidai/internal/db"
 	"daidai/internal/engine/vision"
 	"daidai/internal/entity"
+	"daidai/internal/media"
 	"daidai/internal/tool"
 )
 
@@ -139,6 +140,30 @@ func TestFaceToolSchemaScopedByRole(t *testing.T) {
 			if _, hasEnum := emotion["enum"]; hasEnum {
 				t.Fatalf("partner express_face should not be restricted by enum, got: %v", emotion["enum"])
 			}
+		}
+	}
+}
+
+func TestAnalyzeImagesAdvertisesUserAvatarOnQQ(t *testing.T) {
+	sources := &media.Sources{}
+	sources.Register("qq-avatar", func(context.Context, string, int64) ([]byte, error) { return nil, nil })
+	engine := vision.NewEngine(vision.Config{APIKey: "fixture", Sources: sources})
+	hands := tool.NewHandsWithConfig(tool.HandsConfig{Vision: engine, MediaSources: sources})
+
+	var qqSources []string
+	for _, def := range toolsForEvent(hands, &entity.SensoryEvent{Platform: "qq", IsGroup: true, Role: entity.RoleGuest}, nil) {
+		if def.Function.Name == "analyze_images" {
+			fields := def.Function.Parameters["properties"].(map[string]any)
+			qqSources = fields["source"].(map[string]any)["enum"].([]string)
+		}
+	}
+	if !slices.Equal(qqSources, []string{entity.UserAvatarSource}) {
+		t.Fatalf("expected user_avatar on QQ without attachments, got %v", qqSources)
+	}
+
+	for _, def := range toolsForEvent(hands, &entity.SensoryEvent{Platform: "telegram", IsGroup: true, Role: entity.RoleGuest}, nil) {
+		if def.Function.Name == "analyze_images" {
+			t.Fatalf("analyze_images should stay hidden on telegram when no attachments and no telegram-avatar loader")
 		}
 	}
 }

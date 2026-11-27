@@ -23,6 +23,15 @@ func (s *Sources) Register(scheme string, load func(context.Context, string, int
 	s.loaders[scheme] = load
 }
 
+func (s *Sources) HasScheme(scheme string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.loaders[scheme] != nil
+}
+
 func (s *Sources) Fetch(ctx context.Context, ref string, limit int64) ([]byte, bool, error) {
 	if s == nil {
 		return nil, false, nil

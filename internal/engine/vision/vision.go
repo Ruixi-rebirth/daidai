@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os/exec"
@@ -170,53 +169,7 @@ func visionUserContext(userText string, maxCaptionRunes int) string {
 }
 
 func (e *Engine) fetchImage(ctx context.Context, imgURL string) ([]byte, error) {
-	if data, handled, err := e.cfg.Sources.Fetch(ctx, imgURL, core.MaxImageBytes); handled {
-		return data, err
-	}
-	if err := core.ValidateTrustedMediaURL(imgURL); err != nil {
-		return nil, err
-	}
-	if err := core.ValidateSafeExternalURL(ctx, imgURL); err != nil {
-		return nil, fmt.Errorf("unsafe image URL: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, imgURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-
-	client := core.NewProtectedHTTPClient(e.cfg.Timeout)
-	defer client.CloseIdleConnections()
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 5 {
-			return fmt.Errorf("stopped after 5 image redirects")
-		}
-		if err := core.ValidateTrustedMediaURL(req.URL.String()); err != nil {
-			return fmt.Errorf("untrusted image redirect: %w", err)
-		}
-		if err := core.ValidateSafeExternalURL(req.Context(), req.URL.String()); err != nil {
-			return fmt.Errorf("unsafe image redirect: %w", err)
-		}
-		return nil
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch image status: %d", resp.StatusCode)
-	}
-
-	image, err := io.ReadAll(io.LimitReader(resp.Body, core.MaxImageBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(image)) > core.MaxImageBytes {
-		return nil, fmt.Errorf("image exceeded %d byte limit", core.MaxImageBytes)
-	}
-	return image, nil
+	return media.FetchImage(ctx, e.cfg.Sources, imgURL, e.cfg.Timeout)
 }
 
 func summarizeResponse(body []byte) string {

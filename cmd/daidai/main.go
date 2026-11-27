@@ -281,6 +281,7 @@ func run() int {
 		BriefingOwners:   briefingOwners,
 		GroupExpressions: groupExpressions,
 		Vision:           visEngine,
+		MediaSources:     mediaSources,
 		Embedder:         memEngine.Embedder(),
 	})
 
@@ -320,6 +321,7 @@ func run() int {
 		}, database, immune)
 		qqChannel.SetAttachmentInbox(attachmentInbox)
 		qqChannel.SetHistoryRecorder(cortex.RecordInbound)
+		mediaSources.Register("qq-avatar", qqChannel.FetchAvatar)
 		channelRegistry.Register(qqChannel)
 	}
 

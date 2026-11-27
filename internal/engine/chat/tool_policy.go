@@ -30,14 +30,33 @@ func toolsForEvent(hands entity.Hands, event *entity.SensoryEvent, imageSources 
 			continue
 		}
 		if name == "analyze_images" {
-			if len(imageSources) == 0 {
+			sources := append([]string(nil), imageSources...)
+			if toolSupportsUserAvatar(definition.Function.Parameters) {
+				sources = append(sources, entity.UserAvatarSource)
+			}
+			if len(sources) == 0 {
 				continue
 			}
-			definition.Function.Parameters = imageSourceParameters(definition.Function.Parameters, imageSources)
+			definition.Function.Parameters = imageSourceParameters(definition.Function.Parameters, sources)
 		}
 		available = append(available, definition)
 	}
 	return available
+}
+
+func toolSupportsUserAvatar(schema map[string]any) bool {
+	properties, _ := schema["properties"].(map[string]any)
+	source, _ := properties["source"].(map[string]any)
+	if source == nil {
+		return false
+	}
+	values, _ := source["enum"].([]string)
+	for _, value := range values {
+		if value == entity.UserAvatarSource {
+			return true
+		}
+	}
+	return false
 }
 
 // Image parameters belong to the current request. Leave the registered schema intact.
