@@ -84,7 +84,7 @@ func qqQuotedElementAuthor(element map[string]any) (name, id string) {
 			break
 		}
 	}
-	return strings.TrimSpace(name), id
+	return core.NormalizeDisplayName(name, id), id
 }
 
 func qqQuotedElementID(element map[string]any) string {

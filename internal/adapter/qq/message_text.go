@@ -38,8 +38,14 @@ func resolveQQMentions(s string, eventData map[string]any) string {
 				}
 				isYou, _ := m["is_you"].(bool)
 				name, _ := m["username"].(string)
-				name = strings.TrimSpace(name)
-				info := mentionInfo{isYou: isYou, username: name}
+				memberID := ""
+				for _, field := range []string{"member_openid", "user_openid", "id"} {
+					if v, ok := m[field].(string); ok && strings.TrimSpace(v) != "" {
+						memberID = strings.TrimSpace(v)
+						break
+					}
+				}
+				info := mentionInfo{isYou: isYou, username: core.NormalizeDisplayName(name, memberID)}
 				if id, ok := m["id"].(string); ok && id != "" {
 					mentionMap[strings.TrimSpace(id)] = info
 				}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"daidai/internal/core"
 	"daidai/internal/db"
 	"daidai/internal/entity"
 	"daidai/internal/media"
@@ -152,9 +153,10 @@ func (r *AvatarResolver) resolveMember(ctx context.Context, event *entity.Sensor
 					if _, exists := seen[uid]; exists {
 						continue
 					}
-					if match(uid, m.Name) {
+					displayName := core.NormalizeDisplayName(m.Name, uid)
+					if match(uid, displayName) {
 						seen[uid] = struct{}{}
-						matches = append(matches, matchedMember{id: uid, name: strings.TrimSpace(m.Name)})
+						matches = append(matches, matchedMember{id: uid, name: displayName})
 					}
 				}
 				return matches

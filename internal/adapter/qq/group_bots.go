@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"daidai/internal/core"
 	"daidai/internal/entity"
 	"daidai/internal/runtime"
 )
@@ -153,7 +154,7 @@ func qqMentionedGroupMembers(eventData map[string]any) []groupBotMention {
 		}
 		seen[memberID] = struct{}{}
 		name, _ := mention["username"].(string)
-		members = append(members, groupBotMention{ID: memberID, Name: strings.TrimSpace(name)})
+		members = append(members, groupBotMention{ID: memberID, Name: core.NormalizeDisplayName(name, memberID)})
 	}
 	return members
 }

@@ -1,6 +1,10 @@
 package qq
 
-import "strings"
+import (
+	"strings"
+
+	"daidai/internal/core"
+)
 
 type qqInboundMessage struct {
 	Data           map[string]any
@@ -88,6 +92,7 @@ func parseQQInboundMessage(payload map[string]any) (qqInboundMessage, bool) {
 	default:
 		return qqInboundMessage{}, false
 	}
+	senderName = core.NormalizeDisplayName(senderName, userID)
 	return qqInboundMessage{
 		Data:           d,
 		EventType:      eventType,

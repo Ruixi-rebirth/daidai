@@ -381,6 +381,33 @@ func TestResolveQQMentions_StripsBotPreservesMember(t *testing.T) {
 	}
 }
 
+func TestResolveQQMentions_InvisibleNicknameFallsBackToReadableMemberLabel(t *testing.T) {
+	eventData := map[string]any{
+		"mentions": []any{
+			map[string]any{
+				"id":     "BOT_APP_ID",
+				"is_you": true,
+			},
+			map[string]any{
+				"id":            "5AD8851C41E4FD2EDE5F33A7F97C69F8",
+				"member_openid": "5AD8851C41E4FD2EDE5F33A7F97C69F8",
+				"username":      "\u2062",
+				"is_you":        false,
+			},
+		},
+	}
+	raw := "<@!BOT_APP_ID> 根据你对<@!5AD8851C41E4FD2EDE5F33A7F97C69F8> 的印象画个图"
+	got := resolveQQMentions(raw, eventData)
+	expected := "根据你对@群成员#5AD885 的印象画个图"
+	if got != expected {
+		t.Fatalf("expected %q, got %q", expected, got)
+	}
+	members := qqMentionedGroupMembers(eventData)
+	if len(members) != 1 || members[0].Name != "群成员#5AD885" || members[0].ID != "5AD8851C41E4FD2EDE5F33A7F97C69F8" {
+		t.Fatalf("unexpected mentioned members: %+v", members)
+	}
+}
+
 func TestQQChannel_GroupAtMessageToOtherMemberDoesNotWakeBot(t *testing.T) {
 	channel := &QQChannel{
 		dedup: newDedupCache(100),

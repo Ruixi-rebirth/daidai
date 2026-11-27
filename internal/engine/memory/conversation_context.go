@@ -117,7 +117,7 @@ func collidingGroupSpeakerNames(messages []db.StoredMessage, event *entity.Senso
 	firstUserByName := make(map[string]string)
 	colliding := make(map[string]bool)
 	record := func(name, userID string) {
-		name = strings.TrimSpace(name)
+		name = core.NormalizeDisplayName(name, userID)
 		userID = strings.TrimSpace(userID)
 		if name == "" || userID == "" {
 			return
@@ -141,11 +141,8 @@ func collidingGroupSpeakerNames(messages []db.StoredMessage, event *entity.Senso
 }
 
 func formatGroupSpeakerLabel(name, userID string, colliding map[string]bool) string {
-	trimmed := strings.TrimSpace(name)
+	trimmed := core.NormalizeDisplayName(name, userID)
 	if trimmed == "" {
-		if sid := shortID(strings.TrimSpace(userID)); sid != "" {
-			return "群成员#" + sid
-		}
 		return "群成员"
 	}
 	if colliding[trimmed] {
@@ -287,7 +284,7 @@ func (m *MemoryEngine) recallRelevantPastMessages(ctx context.Context, dbMgr *db
 		if text == "" {
 			continue
 		}
-		speaker := strings.TrimSpace(msg.Name)
+		speaker := core.NormalizeDisplayName(msg.Name, msg.UserID)
 		if msg.IsBot {
 			speaker = config.BotName()
 		} else if speaker == "" {
