@@ -117,6 +117,10 @@ func (r *MindRouter) ChatWithTools(
 		return nil, err
 	}
 	usePublic := opts != nil && opts.ReadOnly
+	type fallbackCandidate struct {
+		channel  string
+		provider core.LLMProvider
+	}
 	r.mu.RLock()
 	slot := MindSlotState{
 		Channel: r.active.Channel,
@@ -129,15 +133,69 @@ func (r *MindRouter) ChatWithTools(
 	channel := slot.Channel
 	model := slot.Model
 	activeProvider := r.providers[channel]
-	fallbackProvider := r.providers[r.fallbackChannel]
+	fallbacks := make([]fallbackCandidate, 0, len(r.fallbackChannels))
+	for _, ch := range r.fallbackChannels {
+		if strings.EqualFold(channel, ch) {
+			continue
+		}
+		if prov := r.providers[ch]; prov != nil {
+			fallbacks = append(fallbacks, fallbackCandidate{channel: ch, provider: prov})
+		}
+	}
 	r.mu.RUnlock()
 
 	fallbackOpts := stripRouteModelOpts(opts)
 	primaryOpts := withRouteModelOpts(opts, slot.Model, slot.Effort)
 
-	// 高频机械分类/门控请求优先直连低延迟兜底通道，避免为布尔判定拉起 CLI 子进程。
-	if opts != nil && opts.FastRoute && !strings.EqualFold(channel, r.fallbackChannel) && fallbackProvider != nil {
-		resp, err := fallbackProvider.ChatWithTools(ctx, messages, tools, fallbackOpts)
+	runFallbacks := func(reason string) (*core.ChatResponse, string, error) {
+		var lastErr error
+		var lastCh string
+		var cooled []fallbackCandidate
+		for _, cand := range fallbacks {
+			candModel := providerModelID(cand.provider)
+			if rem := r.modelCooldownRemaining(cand.channel, candModel); rem > 0 {
+				cooled = append(cooled, cand)
+				continue
+			}
+			resp, err := cand.provider.ChatWithTools(ctx, messages, tools, fallbackOpts)
+			if ctx.Err() != nil {
+				return nil, cand.channel, ctx.Err()
+			}
+			if err == nil && isEmptyChatResponse(resp) {
+				err = fmt.Errorf("兜底通道 %q 返回空响应", cand.channel)
+			}
+			if err == nil {
+				return resp, cand.channel, nil
+			}
+			if cd := ParseProviderCooldown(err); cd > 0 {
+				r.setModelCooldown(cand.channel, candModel, cd)
+			}
+			slog.Warn("兜底心智通道执行失败", "reason", reason, "channel", cand.channel, "model", candModel, "err", err)
+			lastErr = err
+			lastCh = cand.channel
+		}
+		// If every fallback was in cooldown and none succeeded, try the final cooled candidate as last resort.
+		if lastErr == nil && len(cooled) > 0 {
+			cand := cooled[len(cooled)-1]
+			resp, err := cand.provider.ChatWithTools(ctx, messages, tools, fallbackOpts)
+			if ctx.Err() != nil {
+				return nil, cand.channel, ctx.Err()
+			}
+			if err == nil && isEmptyChatResponse(resp) {
+				err = fmt.Errorf("兜底通道 %q 返回空响应", cand.channel)
+			}
+			if err == nil {
+				return resp, cand.channel, nil
+			}
+			lastErr = err
+			lastCh = cand.channel
+		}
+		return nil, lastCh, lastErr
+	}
+
+	// 高频机械分类/门控请求优先直连低延迟兜底链（例如免费 GLM → DeepSeek），避免为布尔判定拉起 CLI 子进程。
+	if opts != nil && opts.FastRoute && len(fallbacks) > 0 {
+		resp, _, err := runFallbacks("fast_route")
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -146,41 +204,34 @@ func (r *MindRouter) ChatWithTools(
 		}
 	}
 	if activeProvider == nil {
-		if fallbackProvider == nil || strings.EqualFold(channel, r.fallbackChannel) {
+		if len(fallbacks) == 0 {
 			return nil, fmt.Errorf("当前激活的心智通道 %q 未挂载任何可用驱动", channel)
 		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		slog.Warn("当前激活的心智通道未挂载，降级至兜底通道",
-			"channel", channel, "fallbackChannel", r.fallbackChannel)
-		resp, err := fallbackProvider.ChatWithTools(ctx, messages, tools, fallbackOpts)
+		slog.Warn("当前激活的心智通道未挂载，降级至兜底链", "channel", channel)
+		resp, _, err := runFallbacks("unmounted_primary")
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if err == nil && isEmptyChatResponse(resp) {
-			err = fmt.Errorf("兜底通道 %q 返回空响应", r.fallbackChannel)
-		}
 		if err != nil {
-			return nil, fmt.Errorf("当前激活通道 %q 未挂载，且兜底通道执行失败: %w", channel, err)
+			return nil, fmt.Errorf("当前激活通道 %q 未挂载，且兜底链执行失败: %w", channel, err)
 		}
 		return resp, nil
 	}
 
-	if rem := r.modelCooldownRemaining(channel, model); rem > 0 && fallbackProvider != nil && !strings.EqualFold(channel, r.fallbackChannel) {
-		slog.Info("心智模型处于限流/容量冷却窗口，直接路由至兜底通道",
-			"channel", channel, "model", model, "remaining", rem.Round(time.Second), "fallbackChannel", r.fallbackChannel)
-		fbResp, fbErr := fallbackProvider.ChatWithTools(ctx, messages, tools, fallbackOpts)
+	if rem := r.modelCooldownRemaining(channel, model); rem > 0 && len(fallbacks) > 0 {
+		slog.Info("心智模型处于限流/容量冷却窗口，直接路由至兜底链",
+			"channel", channel, "model", model, "remaining", rem.Round(time.Second))
+		fbResp, fbCh, fbErr := runFallbacks("primary_cooldown")
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
-		}
-		if fbErr == nil && isEmptyChatResponse(fbResp) {
-			fbErr = fmt.Errorf("兜底通道 %q 返回空响应", r.fallbackChannel)
 		}
 		if fbErr == nil {
 			return fbResp, nil
 		}
-		return nil, fmt.Errorf("%s (%s) 处于冷却窗口且兜底通道 %q 执行失败: %w", channel, model, r.fallbackChannel, fbErr)
+		return nil, fmt.Errorf("%s (%s) 处于冷却窗口且兜底通道 %q 执行失败: %w", channel, model, fbCh, fbErr)
 	}
 
 	resp, err := activeProvider.ChatWithTools(ctx, messages, tools, primaryOpts)
@@ -205,21 +256,16 @@ func (r *MindRouter) ChatWithTools(
 		return nil, fmt.Errorf("%s 通道执行结果不确定；为避免重复操作，已停止自动兜底: %w", channel, err)
 	}
 
-	if fallbackProvider != nil && !strings.EqualFold(channel, r.fallbackChannel) {
-		slog.Warn("当前心智通道执行遇到异常，启动弹性降级机制至兜底通道",
-			"channel", channel, "model", model, "fallbackChannel", r.fallbackChannel, "err", err)
-
-		fbResp, fbErr := fallbackProvider.ChatWithTools(ctx, messages, tools, fallbackOpts)
+	if len(fallbacks) > 0 {
+		slog.Warn("当前心智通道执行遇到异常，启动弹性降级机制至兜底链",
+			"channel", channel, "model", model, "err", err)
+		fbResp, _, fbErr := runFallbacks("primary_error")
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
-		}
-		if fbErr == nil && isEmptyChatResponse(fbResp) {
-			fbErr = fmt.Errorf("兜底通道 %q 返回空响应", r.fallbackChannel)
 		}
 		if fbErr == nil {
 			return fbResp, nil
 		}
-		slog.Warn("兜底心智通道执行失败", "channel", r.fallbackChannel, "err", fbErr)
 	}
 
 	return nil, fmt.Errorf("%s 通道心智驱动执行失败: %w", channel, err)

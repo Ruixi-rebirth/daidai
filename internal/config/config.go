@@ -41,6 +41,12 @@ type Config struct {
 		BaseURL   string `yaml:"base_url"`
 		APIKey    string `yaml:"api_key"`
 		Model     string `yaml:"model"`
+		Zhipu     struct {
+			BaseURL    string `yaml:"base_url"`
+			APIKey     string `yaml:"api_key"`
+			ChatModel  string `yaml:"chat_model"`
+			ImageModel string `yaml:"image_model"`
+		} `yaml:"zhipu"`
 		Embedding struct {
 			BaseURL string `yaml:"base_url"`
 			APIKey  string `yaml:"api_key"`
@@ -192,6 +198,22 @@ func LoadConfig(path string) (*Config, error) {
 	if cfg.Server.Port < 0 || cfg.Server.Port > 65535 {
 		return nil, fmt.Errorf("server.port must be 0 (default) or between 1 and 65535")
 	}
+	cfg.LLM.Zhipu.BaseURL = strings.TrimSpace(cfg.LLM.Zhipu.BaseURL)
+	cfg.LLM.Zhipu.APIKey = strings.TrimSpace(cfg.LLM.Zhipu.APIKey)
+	cfg.LLM.Zhipu.ChatModel = strings.TrimSpace(cfg.LLM.Zhipu.ChatModel)
+	cfg.LLM.Zhipu.ImageModel = strings.TrimSpace(cfg.LLM.Zhipu.ImageModel)
+	if cfg.LLM.Zhipu.APIKey != "" {
+		if cfg.LLM.Zhipu.BaseURL == "" {
+			cfg.LLM.Zhipu.BaseURL = "https://open.bigmodel.cn/api/paas/v4"
+		}
+		if cfg.LLM.Zhipu.ChatModel == "" {
+			cfg.LLM.Zhipu.ChatModel = "glm-4.7-flash"
+		}
+		if cfg.LLM.Zhipu.ImageModel == "" {
+			cfg.LLM.Zhipu.ImageModel = "cogview-3-flash"
+		}
+	}
+
 	if cfg.Server.Port == 0 {
 		cfg.Server.Port = defaults.Server.Port
 	}

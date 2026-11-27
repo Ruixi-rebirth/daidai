@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -27,14 +28,39 @@ const maxImagePromptRunes = 2000
 
 // ImageTool 通用真实图片与插画生成工具 (实现 core.Tool)
 type ImageTool struct {
-	delegates  *entity.Delegates
-	immune     *entity.ImmuneSystem
-	imageQuota *groupchat.ImageQuotaStore
-	router     *llm.MindRouter
-	sources    *media.Sources
-	avatars    *AvatarResolver
-	command    string
-	outDir     string
+	delegates     *entity.Delegates
+	immune        *entity.ImmuneSystem
+	imageQuota    *groupchat.ImageQuotaStore
+	router        *llm.MindRouter
+	sources       *media.Sources
+	avatars       *AvatarResolver
+	fallbackAPI   *TextToImageAPI
+	agyCooldownMu sync.Mutex
+	agyCooldownAt time.Time
+	command       string
+	outDir        string
+}
+
+const agyImageQuotaCooldown = 15 * time.Minute
+
+// SetFallbackImageAPI attaches an optional text-to-image API fallback (e.g. Zhipu cogview-3-flash)
+// used when AGY image generation fails or is in quota cooldown for pure text-to-image requests.
+func (t *ImageTool) SetFallbackImageAPI(api *TextToImageAPI) {
+	if t != nil {
+		t.fallbackAPI = api
+	}
+}
+
+func (t *ImageTool) isAGYInCooldown() bool {
+	t.agyCooldownMu.Lock()
+	defer t.agyCooldownMu.Unlock()
+	return time.Now().Before(t.agyCooldownAt)
+}
+
+func (t *ImageTool) markAGYQuotaCooldown() {
+	t.agyCooldownMu.Lock()
+	defer t.agyCooldownMu.Unlock()
+	t.agyCooldownAt = time.Now().Add(agyImageQuotaCooldown)
 }
 
 // SetRouter binds the mind router so stateless image generation can prefer lightweight coordinator models.
@@ -389,6 +415,30 @@ func (t *ImageTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 		return &core.ToolResult{Text: fmt.Sprintf("准备参考图失败：%v", err)}, nil
 	}
 
+	tryFallbackAPI := func(reason string) (*core.ToolResult, bool) {
+		if len(refs) > 0 || t.fallbackAPI == nil {
+			return nil, false
+		}
+		slog.Info("image_tool: 纯文生图降级至备用 API 生图", "model", t.fallbackAPI.Model, "reason", reason)
+		imgData, fbErr := t.fallbackAPI.Generate(ctx, prompt)
+		if fbErr != nil {
+			slog.Warn("image_tool: 备用 API 生图失败", "model", t.fallbackAPI.Model, "err", fbErr)
+			return nil, false
+		}
+		succeeded = true
+		return &core.ToolResult{
+			ImageData:         imgData,
+			ImageOnly:         true,
+			FixedPresentation: true,
+		}, true
+	}
+
+	if len(refs) == 0 && t.fallbackAPI != nil && t.isAGYInCooldown() {
+		if res, ok := tryFallbackAPI("agy_cooldown"); ok {
+			return res, nil
+		}
+	}
+
 	goal, err := buildImageGenGoal(prompt, absOutFile, refs)
 	if err != nil {
 		return nil, err
@@ -405,6 +455,12 @@ func (t *ImageTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 	}
 	if execErr != nil {
 		slog.Warn("image_tool: 生成图片失败", "err", execErr)
+		if isImageQuotaErrorText(execErr.Error()) {
+			t.markAGYQuotaCooldown()
+		}
+		if res, ok := tryFallbackAPI("agy_exec_error"); ok {
+			return res, nil
+		}
 		return &core.ToolResult{
 			Text: fmt.Sprintf("生成图片失败：%v", execErr),
 		}, nil
@@ -452,6 +508,12 @@ func (t *ImageTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 		"deniedActions", agyResult.DeniedActionSummary(),
 		"response", formatImageGenResponseForLog(agyResult.Response),
 	)
+	if isImageQuotaErrorText(agyResult.Response) {
+		t.markAGYQuotaCooldown()
+	}
+	if res, ok := tryFallbackAPI("agy_no_image"); ok {
+		return res, nil
+	}
 	if reason := classifyMissingImageReason(agyResult.Response); reason != "" {
 		return &core.ToolResult{Text: reason}, nil
 	}
@@ -466,16 +528,21 @@ func formatImageGenResponseForLog(resp string) string {
 	return core.TruncateRunes(strings.TrimSpace(resp), maxLoggedImageGenResponseRunes, "…[truncated]")
 }
 
-func classifyMissingImageReason(resp string) string {
+func isImageQuotaErrorText(resp string) bool {
 	lower := strings.ToLower(resp)
-	switch {
-	case strings.Contains(lower, "429") ||
+	return strings.Contains(lower, "429") ||
 		strings.Contains(lower, "quota_exhausted") ||
 		strings.Contains(lower, "resource_exhausted") ||
 		strings.Contains(lower, "too many requests") ||
 		strings.Contains(lower, "exhausted your capacity") ||
 		strings.Contains(resp, "配额") ||
-		strings.Contains(resp, "额度"):
+		strings.Contains(resp, "额度")
+}
+
+func classifyMissingImageReason(resp string) string {
+	lower := strings.ToLower(resp)
+	switch {
+	case isImageQuotaErrorText(resp):
 		return "上游生图模型当前配额已耗尽，请稍后或等配额重置后再试。"
 	case strings.Contains(lower, "safety") ||
 		strings.Contains(lower, "policy") ||

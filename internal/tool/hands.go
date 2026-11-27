@@ -45,6 +45,7 @@ type HandsConfig struct {
 	BriefingOwners   map[string]string
 	GroupExpressions *groupchat.Store
 	Vision           *vision.Engine
+	FallbackImageAPI *TextToImageAPI
 	Embedder         core.EmbeddingProvider
 }
 
@@ -105,6 +106,7 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 		imgTool := NewImageToolWithCommand(cfg.Delegates, cfg.AGYCommand, outDir, cfg.Immune)
 		imgTool.SetImageQuotaStore(imageQuotaStore)
 		imgTool.SetMediaSources(cfg.MediaSources, avatarResolver)
+		imgTool.SetFallbackImageAPI(cfg.FallbackImageAPI)
 		imgTool.SetRouter(cfg.Router)
 		h.Register(imgTool)
 	}

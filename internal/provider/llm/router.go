@@ -109,6 +109,7 @@ type MindRouter struct {
 	mu                    sync.RWMutex
 	statePath             string
 	fallbackChannel       string
+	fallbackChannels      []string
 	active                ActiveMindState
 	public                MindSlotState
 	publicPinned          bool
@@ -123,26 +124,46 @@ type MindRouter struct {
 
 // MindRouterConfig 路由器初始化参数
 type MindRouterConfig struct {
-	StatePath       string
-	FallbackChannel string
+	StatePath        string
+	FallbackChannel  string
+	FallbackChannels []string
 }
 
 // NewMindRouter 实例化异构多心智开放路由器
 func NewMindRouter(cfg MindRouterConfig) *MindRouter {
+	seen := make(map[string]struct{})
+	var chain []string
+	addChannel := func(ch string) {
+		norm := strings.ToUpper(strings.TrimSpace(ch))
+		if norm == "" {
+			return
+		}
+		if _, exists := seen[norm]; exists {
+			return
+		}
+		seen[norm] = struct{}{}
+		chain = append(chain, norm)
+	}
+	for _, ch := range cfg.FallbackChannels {
+		addChannel(ch)
+	}
+	addChannel(cfg.FallbackChannel)
+	if len(chain) == 0 {
+		chain = []string{"API"}
+	}
+
 	r := &MindRouter{
-		statePath:       cfg.StatePath,
-		fallbackChannel: strings.ToUpper(strings.TrimSpace(cfg.FallbackChannel)),
-		providers:       make(map[string]core.LLMProvider),
-		models:          make([]ModelInfo, 0),
-		discoveryStatus: make(map[string]ModelDiscoveryStatus),
-		cooldowns:       make(map[string]time.Time),
+		statePath:        cfg.StatePath,
+		fallbackChannel:  chain[0],
+		fallbackChannels: chain,
+		providers:        make(map[string]core.LLMProvider),
+		models:           make([]ModelInfo, 0),
+		discoveryStatus:  make(map[string]ModelDiscoveryStatus),
+		cooldowns:        make(map[string]time.Time),
 	}
 
 	if r.statePath == "" {
 		r.statePath = "data/state/active_mind.json"
-	}
-	if r.fallbackChannel == "" {
-		r.fallbackChannel = "API"
 	}
 
 	if err := r.loadState(); err != nil {
@@ -501,8 +522,15 @@ func (r *MindRouter) FormatStatusFor(partnerPrivate bool) string {
 		pub = MindSlotState{Channel: curr.Channel, Model: curr.Model, Effort: eff}
 	}
 	models := cloneModelInfos(r.models)
-	fallbackChannel := r.fallbackChannel
-	fallbackProvider := r.providers[fallbackChannel]
+	var fallbackSummary []string
+	for _, ch := range r.fallbackChannels {
+		if strings.EqualFold(curr.Channel, ch) {
+			continue
+		}
+		if prov := r.providers[ch]; prov != nil {
+			fallbackSummary = append(fallbackSummary, fmt.Sprintf("%s (`%s`)", ch, providerModelID(prov)))
+		}
+	}
 	currCooldown := r.cooldownRemainingLocked(curr.Channel, curr.Model, now)
 	pubCooldown := r.cooldownRemainingLocked(pub.Channel, pub.Model, now)
 	r.mu.RUnlock()
@@ -543,8 +571,8 @@ func (r *MindRouter) FormatStatusFor(partnerPrivate bool) string {
 			}
 		}
 
-		if fallbackProvider != nil && !strings.EqualFold(curr.Channel, fallbackChannel) {
-			fmt.Fprintf(&sb, "\n### 备用与轻量分类模型\n模型：`%s`\n通道：%s\n首选通道调用失败/配额耗尽兜底及高频分类门控时使用；非搭档私聊的 AGY 调用运行于 bwrap 内核隔离沙箱。\n", providerModelID(fallbackProvider), fallbackChannel)
+		if len(fallbackSummary) > 0 {
+			fmt.Fprintf(&sb, "\n### 备用与轻量分类模型\n兜底链：%s\n首选通道调用失败/配额耗尽兜底及高频分类门控时按序使用；非搭档私聊的 AGY 调用运行于 bwrap 内核隔离沙箱。\n", strings.Join(fallbackSummary, " → "))
 		}
 	} else {
 		pubName := resolveDisplayModelName(models, pub.Channel, pub.Model)

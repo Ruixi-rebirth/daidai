@@ -121,10 +121,15 @@ func run() int {
 		WorkingDir: defaultWorkDir,
 	})
 
+	fallbackChannels := []string{"API"}
+	if cfg.LLM.Zhipu.APIKey != "" {
+		fallbackChannels = []string{"GLM", "API"}
+	}
+
 	// 组装统一异构多心智开放路由器 (支持运行时动态探测各通道可用模型列表)
 	mindRouter := llm.NewMindRouter(llm.MindRouterConfig{
-		StatePath:       "data/state/active_mind.json",
-		FallbackChannel: "API",
+		StatePath:        "data/state/active_mind.json",
+		FallbackChannels: fallbackChannels,
 	})
 
 	agyWorker := agent.NewAGYWorkerWithConfig(agent.AGYWorkerConfig{
@@ -135,6 +140,26 @@ func run() int {
 		Router:      mindRouter,
 		SessionDB:   database,
 	})
+
+	// 挂载智谱免费 GLM 通道（作为 AGY → GLM → DeepSeek 之间的第一兜底）
+	if cfg.LLM.Zhipu.APIKey != "" {
+		glmProvider := llm.NewOpenAIProvider(llm.OpenAIConfig{
+			BaseURL: cfg.LLM.Zhipu.BaseURL,
+			APIKey:  cfg.LLM.Zhipu.APIKey,
+			Model:   cfg.LLM.Zhipu.ChatModel,
+		})
+		mindRouter.RegisterChannel(llm.ChannelRegistration{
+			Channel:  "GLM",
+			Provider: glmProvider,
+			Models: []llm.ModelInfo{
+				{
+					ID:      cfg.LLM.Zhipu.ChatModel,
+					Channel: "GLM",
+					Name:    cfg.LLM.Zhipu.ChatModel,
+				},
+			},
+		})
+	}
 
 	// 挂载 API 通道 (自动调用 OpenAI 兼容 GET /models 探测可用模型池)
 	mindRouter.RegisterChannel(llm.ChannelRegistration{
@@ -266,6 +291,11 @@ func run() int {
 		}
 	}
 	groupExpressions := &groupchat.Store{Database: database}
+	var fallbackImageAPI *tool.TextToImageAPI
+	if cfg.LLM.Zhipu.APIKey != "" && cfg.LLM.Zhipu.ImageModel != "" {
+		fallbackImageAPI = tool.NewTextToImageAPI(cfg.LLM.Zhipu.BaseURL, cfg.LLM.Zhipu.APIKey, cfg.LLM.Zhipu.ImageModel)
+	}
+
 	hands := tool.NewHandsWithConfig(tool.HandsConfig{
 		AGYCommand:       agyCommand,
 		Router:           mindRouter,
@@ -281,6 +311,7 @@ func run() int {
 		BriefingOwners:   briefingOwners,
 		GroupExpressions: groupExpressions,
 		Vision:           visEngine,
+		FallbackImageAPI: fallbackImageAPI,
 		MediaSources:     mediaSources,
 		Embedder:         memEngine.Embedder(),
 	})
