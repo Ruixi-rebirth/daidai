@@ -3,6 +3,7 @@ package kernel
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -28,41 +29,113 @@ func (w *sessionWorker) isCurrent(event queuedEvent) bool {
 	return event.senderGeneration == current
 }
 
+func canCoalesceQueued(base, next queuedEvent, mergedRunes, maxRunes int) bool {
+	if base.event == nil || next.event == nil {
+		return false
+	}
+	if base.event.GroupMessageObserved || next.event.GroupMessageObserved {
+		return false
+	}
+	if base.event.GroupInterjection || next.event.GroupInterjection {
+		return false
+	}
+	if base.generation != next.generation || base.senderGeneration != next.senderGeneration {
+		return false
+	}
+	if base.event.SenderID != next.event.SenderID {
+		return false
+	}
+	if !sameReplyContext(base.event, next.event) {
+		return false
+	}
+	if strings.HasPrefix(strings.TrimSpace(base.event.Content), "/") || strings.HasPrefix(strings.TrimSpace(next.event.Content), "/") {
+		return false
+	}
+	nextRunes := utf8.RuneCountInString(next.event.Content)
+	if mergedRunes+nextRunes+1 > maxRunes {
+		return false
+	}
+	return true
+}
+
 func (w *sessionWorker) processLoop() {
 	defer w.manager.wg.Done()
+	var deferred *queuedEvent
 	for {
 		// Shutdown must not start another queued turn after closeCh is closed.
 		select {
 		case <-w.closeCh:
+			if deferred != nil {
+				w.queued.Add(-1)
+			}
 			return
 		default:
 		}
 
-		select {
-		case <-w.closeCh:
-			return
-		case event := <-w.processCh:
+		var event queuedEvent
+		if deferred != nil {
+			event = *deferred
+			deferred = nil
+		} else {
 			select {
 			case <-w.closeCh:
-				w.queued.Add(-1)
 				return
+			case event = <-w.processCh:
+			}
+		}
+
+		select {
+		case <-w.closeCh:
+			w.queued.Add(-1)
+			return
+		default:
+		}
+		if !w.isCurrent(event) {
+			w.queued.Add(-1)
+			continue
+		}
+
+		// Coalesce any additional same-speaker turns that queued up while the previous turn was busy.
+		batch := []queuedEvent{event}
+		mergedRunes := utf8.RuneCountInString(event.event.Content)
+		for len(batch) < maxMergedEventsPerTurn {
+			select {
+			case <-w.closeCh:
+				w.queued.Add(-int32(len(batch)))
+				return
+			case next := <-w.processCh:
+				if !w.isCurrent(next) {
+					w.queued.Add(-1)
+					continue
+				}
+				if canCoalesceQueued(batch[0], next, mergedRunes, w.config.MaxMergedRunes) {
+					if mergedRunes > 0 {
+						mergedRunes++
+					}
+					mergedRunes += utf8.RuneCountInString(next.event.Content)
+					batch = append(batch, next)
+					continue
+				}
+				nextCopy := next
+				deferred = &nextCopy
 			default:
 			}
-			if !w.isCurrent(event) {
-				w.queued.Add(-1)
-				continue
-			}
-			queuedEvent := event
-			upstreamValid := queuedEvent.event.StillValid
-			queuedEvent.event.StillValid = func() bool { return w.isCurrent(queuedEvent) && (upstreamValid == nil || upstreamValid()) }
-			w.handle(queuedEvent.event)
+			break
 		}
+
+		merged := batch[0]
+		if len(batch) > 1 {
+			merged = mergeQueuedEvents(batch)
+		}
+		upstreamValid := merged.event.StillValid
+		merged.event.StillValid = func() bool { return w.isCurrent(merged) && (upstreamValid == nil || upstreamValid()) }
+		w.handle(merged.event, int32(len(batch)))
 	}
 }
 
-func (w *sessionWorker) handle(event *core.SensoryEvent) {
+func (w *sessionWorker) handle(event *core.SensoryEvent, count int32) {
 	defer func() {
-		w.queued.Add(-1)
+		w.queued.Add(-count)
 		if recovered := recover(); recovered != nil {
 			slog.Error("debounce: session event handler panicked", "session", w.key.String(), "panic", recovered)
 		}

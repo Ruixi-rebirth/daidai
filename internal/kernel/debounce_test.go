@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -240,4 +241,74 @@ func TestDebounceManager_GroupStopOnlyCancelsSenderAndResetBarrierAppliesToAll(t
 			t.Fatal("bob's group turn did not resume after /reset barrier released")
 		}
 	})
+}
+
+func TestDebounceManager_CoalescesQueuedTurnsWhileBusy(t *testing.T) {
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var mu sync.Mutex
+	var received []*core.SensoryEvent
+	done := make(chan struct{}, 4)
+
+	mgr := NewDebounceManager(DebounceConfig{
+		MergeWindow: 20 * time.Millisecond,
+		IdleTimeout: 1 * time.Second,
+	}, func(ev *core.SensoryEvent) {
+		mu.Lock()
+		received = append(received, ev)
+		count := len(received)
+		mu.Unlock()
+		if count == 1 {
+			close(firstStarted)
+			<-releaseFirst
+		}
+		done <- struct{}{}
+	})
+	defer mgr.Stop()
+
+	// Turn 1 starts and blocks handler.
+	mgr.Push(&core.SensoryEvent{Platform: "qq", ChannelID: "u1", SenderID: "u1", RawMessageID: "m1", Content: "第一条"})
+	select {
+	case <-firstStarted:
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("first turn did not start")
+	}
+
+	// Turn 2 and Turn 3 arrive outside each other's merge window while Turn 1 is busy.
+	mgr.Push(&core.SensoryEvent{Platform: "qq", ChannelID: "u1", SenderID: "u1", RawMessageID: "m2", Content: "对了顺便查A"})
+	time.Sleep(50 * time.Millisecond)
+	mgr.Push(&core.SensoryEvent{Platform: "qq", ChannelID: "u1", SenderID: "u1", RawMessageID: "m3", Content: "哦不对，查B就行"})
+	time.Sleep(50 * time.Millisecond)
+	// Turn 4 quotes a specific message -> must NOT merge with Turn 2+3.
+	mgr.Push(&core.SensoryEvent{
+		Platform:     "qq",
+		ChannelID:    "u1",
+		SenderID:     "u1",
+		RawMessageID: "m4",
+		Content:      "另外看看这条",
+		ReplyContext: &core.SensoryEvent{RawMessageID: "old-1", Content: "旧消息"},
+	})
+	time.Sleep(50 * time.Millisecond)
+
+	close(releaseFirst)
+
+	for i := 0; i < 3; i++ {
+		select {
+		case <-done:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("expected 3 total handler invocations, timed out after %d", i)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(received) != 3 {
+		t.Fatalf("expected 3 handler calls (m1, coalesced m2+m3, quoted m4), got %d", len(received))
+	}
+	if received[1].Content != "对了顺便查A\n哦不对，查B就行" || received[1].RawMessageID != "m3" {
+		t.Fatalf("unexpected coalesced turn: content=%q msgID=%q", received[1].Content, received[1].RawMessageID)
+	}
+	if received[2].Content != "另外看看这条" || received[2].RawMessageID != "m4" {
+		t.Fatalf("unexpected deferred quoted turn: content=%q msgID=%q", received[2].Content, received[2].RawMessageID)
+	}
 }
