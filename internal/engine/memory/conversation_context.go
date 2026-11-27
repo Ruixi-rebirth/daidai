@@ -242,8 +242,12 @@ func (m *MemoryEngine) RecallEpisodic(ctx context.Context, event *entity.Sensory
 			chatType = "group"
 		}
 		boundary := event.HistoryBoundaryID()
+		activeIDs := make(map[int64]struct{})
 		if recents, msgErr := dbMgr.RecentMessagesBefore(ctx, event.Platform, chatType, event.ChannelID, 40, boundary); msgErr == nil && len(recents) > 0 {
 			activeStart := activeConversationStart(recents, anchorTime)
+			for _, msg := range recents[activeStart:] {
+				activeIDs[msg.ID] = struct{}{}
+			}
 			if peerThread := recallGroupPeerThread(recents[activeStart:], event); peerThread != "" {
 				sections = append(sections, peerThread)
 			}
@@ -251,9 +255,54 @@ func (m *MemoryEngine) RecallEpisodic(ctx context.Context, event *entity.Sensory
 				sections = append(sections, digest)
 			}
 		}
+		if related := m.recallRelevantPastMessages(ctx, dbMgr, event, chatType, boundary, activeIDs); related != "" {
+			sections = append(sections, related)
+		}
 	}
 
 	return strings.Join(sections, "\n\n")
+}
+
+func (m *MemoryEngine) recallRelevantPastMessages(ctx context.Context, dbMgr *db.Manager, event *entity.SensoryEvent, chatType string, boundary int64, activeIDs map[int64]struct{}) string {
+	query := strings.TrimSpace(event.Content)
+	if len([]rune(query)) < 4 {
+		return ""
+	}
+	recallCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+	defer cancel()
+
+	hits, err := SearchMessagesInChatWithEmbedder(recallCtx, dbMgr, m.Embedder(), event.Platform, chatType, event.ChannelID, query, 6)
+	if err != nil || len(hits) == 0 {
+		return ""
+	}
+	var lines []string
+	for _, msg := range hits {
+		if boundary > 0 && msg.ID >= boundary {
+			continue
+		}
+		if _, inActive := activeIDs[msg.ID]; inActive {
+			continue
+		}
+		text := strings.TrimSpace(msg.Text)
+		if text == "" {
+			continue
+		}
+		speaker := strings.TrimSpace(msg.Name)
+		if msg.IsBot {
+			speaker = config.BotName()
+		} else if speaker == "" {
+			speaker = "群友"
+		}
+		ts := msg.CreatedAt.In(time.Local).Format("01-02 15:04")
+		lines = append(lines, fmt.Sprintf("- [%s %s] %s", ts, speaker, core.TruncateRunes(strings.ReplaceAll(text, "\n", " "), 160, "…")))
+		if len(lines) >= 3 {
+			break
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "【本会话更早期的相关历史记忆（自动召回，仅在确实相关时自然参考）】：\n" + strings.Join(lines, "\n")
 }
 
 const emotionContinuityTTL = 6 * time.Hour

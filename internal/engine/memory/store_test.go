@@ -344,3 +344,33 @@ func TestGroupRecipientTrackingQuoteAnchorsAndInterjectionScope(t *testing.T) {
 		}
 	}
 }
+
+func TestRecallEpisodic_RecallsRelevantOlderGroupMessages(t *testing.T) {
+	ctx := context.Background()
+	mgr := db.NewManager(t.TempDir())
+	defer func() { _ = mgr.Close() }()
+	engine := NewMemoryEngine(nil)
+	engine.SetDBManager(mgr)
+
+	if _, err := mgr.LogMessage(ctx, "qq", "group", "g-denial", "u1", "群友", "原来 denial 是个用 Rust 和 Smithay 写的 Wayland 合成器，外壳用 Flutter 做", true, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 45; i++ {
+		if _, err := mgr.LogMessage(ctx, "qq", "group", "g-denial", "u2", "路人", "今天中午吃什么好呢", false, "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	episodic := engine.RecallEpisodic(ctx, &entity.SensoryEvent{
+		Platform:   "qq",
+		IsGroup:    true,
+		ChannelID:  "g-denial",
+		SenderID:   "u1",
+		SenderName: "群友",
+		Content:    "arm linux最好用的桌面是不是 denial mobile",
+		OccurredAt: time.Now(),
+	})
+	if !strings.Contains(episodic, "Wayland 合成器") || !strings.Contains(episodic, "denial") {
+		t.Fatalf("expected RecallEpisodic to surface older denial context beyond 40-message window, got:\n%s", episodic)
+	}
+}
