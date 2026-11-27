@@ -50,17 +50,27 @@ func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utteranc
 		}
 	}
 	imageIDs := make([]string, 0, len(images))
-	cleanup := func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
+	idToURL := make(map[string]string, len(images))
+	deliveredIDs := make(map[string]struct{}, len(images))
+	cleanupUnsent := func() {
+		var unsent []string
 		for _, imageID := range imageIDs {
-			if err := q.client.DeleteMarkdownImage(cleanupCtx, imageID); err != nil {
-				slog.Warn("qq_channel: failed to release temporary Markdown image material", "imageID", imageID, "err", err)
+			if _, delivered := deliveredIDs[imageID]; !delivered {
+				unsent = append(unsent, imageID)
 			}
 		}
-		imageIDs = nil
+		if len(unsent) == 0 {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		for _, imageID := range unsent {
+			if err := q.client.DeleteMarkdownImage(cleanupCtx, imageID); err != nil {
+				slog.Warn("qq_channel: failed to release unsent Markdown image material", "imageID", imageID, "err", err)
+			}
+		}
 	}
-	defer cleanup()
+	defer cleanupUnsent()
 	firstImage := 0
 	flushImages := func(end int) {
 		source, _ := entity.ImageDeliveryText(imageSources[firstImage:end], end-firstImage)
@@ -95,6 +105,7 @@ func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utteranc
 			return "", err
 		}
 		imageIDs = append(imageIDs, imageID)
+		idToURL[imageID] = imageURL
 		return fmt.Sprintf("![%s #%dpx #%dpx](%s)", alt, dimensions.Width, dimensions.Height, imageURL), nil
 	}
 	for i, data := range images {
@@ -242,6 +253,11 @@ func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utteranc
 			}
 			return partial(err, index)
 		}
+		for _, imageID := range imageIDs {
+			if imageURL := idToURL[imageID]; imageURL != "" && strings.Contains(part.content, imageURL) {
+				deliveredIDs[imageID] = struct{}{}
+			}
+		}
 	}
 	if limitedByBudget {
 		return partial(fmt.Errorf("QQ 被动回复额度仅剩 %d 条，已发送前 %d 条；剩余内容等待续发", partsToSend, partsToSend), partsToSend)
@@ -250,7 +266,7 @@ func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utteranc
 		source, _ := entity.ImageDeliveryText(imageSources, len(images))
 		u.QuoteText = strings.TrimSpace(source + "\n\n" + core.InlineAssetText(content, quoteAssets, true))
 	}
-	slog.Info("qq_channel: 多图 Markdown 消息已接受，已释放临时素材", "channelID", u.ChannelID, "pages", len(images), "messages", len(parts))
+	slog.Info("qq_channel: 多图 Markdown 消息已接受", "channelID", u.ChannelID, "pages", len(images), "messages", len(parts))
 	return nil
 }
 

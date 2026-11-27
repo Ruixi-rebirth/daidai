@@ -13,8 +13,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strconv"
+	"sort"
 	"strings"
+	"time"
 )
 
 func (c *Client) UploadMedia(ctx context.Context, targetType, targetID string, fileType int, data []byte) (string, error) {
@@ -63,7 +64,7 @@ func (c *Client) UploadMarkdownImage(ctx context.Context, data []byte) (string, 
 	md5Sum := md5.Sum(data)
 	sha1Sum := sha1.Sum(data)
 	sha256Sum := sha256.Sum256(data)
-	fileName := "reply-" + hex.EncodeToString(sha256Sum[:8]) + ".png"
+	fileName := fmt.Sprintf("reply-%08x-%s.png", uint32(time.Now().Unix()), hex.EncodeToString(sha256Sum[:4]))
 	prepared, err := c.doPostJSON(ctx, apiBaseURL+"/v2/media-images/prepare", map[string]any{
 		"file_name": fileName, "file_size": len(data), "content_type": "image/png",
 		"md5": hex.EncodeToString(md5Sum[:]), "sha1": hex.EncodeToString(sha1Sum[:]),
@@ -130,13 +131,18 @@ func (c *Client) DeleteMarkdownImage(ctx context.Context, imageID string) error 
 	return err
 }
 
-// DeleteReplyMarkdownImages reclaims only reply images created by this adapter.
-// QQ keeps Markdown image materials in a bot-wide 100-image library; sent
-// messages retain their copied image after the temporary material is deleted.
+// DeleteReplyMarkdownImages reclaims the oldest reply images created by this adapter
+// when QQ's 100-image material library is full, keeping the most recent ones intact
+// so clients can reliably load recently sent Markdown images.
 func (c *Client) DeleteReplyMarkdownImages(ctx context.Context, preserveIDs []string) error {
+	const keepRecentReplyImages = 50
+	type replyMaterial struct {
+		id       string
+		fileName string
+	}
 	cursor := ""
 	var failures []error
-	var candidates []string
+	var candidates []replyMaterial
 	preserve := make(map[string]struct{}, len(preserveIDs))
 	for _, id := range preserveIDs {
 		preserve[id] = struct{}{}
@@ -175,15 +181,27 @@ func (c *Client) DeleteReplyMarkdownImages(ctx context.Context, preserveIDs []st
 			if _, keep := preserve[image.ID]; keep {
 				continue
 			}
-			candidates = append(candidates, image.ID)
+			candidates = append(candidates, replyMaterial{id: image.ID, fileName: image.FileName})
 		}
 		if nextCursor == "" || nextCursor == cursor {
 			break
 		}
 		cursor = nextCursor
 	}
-	for _, id := range candidates {
-		if err := c.DeleteMarkdownImage(ctx, id); err != nil {
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].fileName != candidates[j].fileName {
+			return candidates[i].fileName < candidates[j].fileName
+		}
+		return candidates[i].id < candidates[j].id
+	})
+	deleteCount := 0
+	if len(candidates) > keepRecentReplyImages {
+		deleteCount = len(candidates) - keepRecentReplyImages
+	} else if len(candidates) > 0 {
+		deleteCount = max(1, len(candidates)/2)
+	}
+	for _, item := range candidates[:deleteCount] {
+		if err := c.DeleteMarkdownImage(ctx, item.id); err != nil {
 			failures = append(failures, fmt.Errorf("delete Daidai reply image: %w", err))
 		}
 	}
@@ -191,11 +209,7 @@ func (c *Client) DeleteReplyMarkdownImages(ctx context.Context, preserveIDs []st
 }
 
 func isReplyMarkdownImageName(name string) bool {
-	if len(name) != len("reply-")+16+len(".png") || !strings.HasPrefix(name, "reply-") || !strings.HasSuffix(name, ".png") {
-		return false
-	}
-	_, err := strconv.ParseUint(name[len("reply-"):len(name)-len(".png")], 16, 64)
-	return err == nil
+	return strings.HasPrefix(name, "reply-") && strings.HasSuffix(name, ".png")
 }
 
 // SendGroupMessage 发送 QQ 群聊 Markdown 消息。
