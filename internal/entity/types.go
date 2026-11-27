@@ -110,6 +110,7 @@ type Utterance struct {
 	TargetUserID            string             // 目标用户 ID (群聊回复或插话的交互对象)
 	Proactive               bool               // 主动发送；平台可能限制适用场景或频率
 	GroupInterjection       bool               // 未 @ 群消息的有限插话；必须关联原群消息作为被动回复
+	AnonymousInterjection   bool               // 仅 chatter/dream 等无明确回应对象的自言自语插话；不附带引用气泡
 	MentionUserIDs          []string           // QQ 群聊消息要点名的成员 OpenID；主动插话由模型决定是否填写
 	Text                    string             // 纯净人话
 	QuoteText               string             // 内嵌媒体的可引用语义正文，不含临时平台素材 URL

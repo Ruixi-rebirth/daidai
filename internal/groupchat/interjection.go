@@ -16,7 +16,7 @@ const (
 	defaultInterjectionCheckCooldown    = 30 * time.Second
 	defaultInterjectionSpeakCooldownMin = 3 * time.Minute
 	defaultInterjectionSpeakCooldownMax = 5*time.Minute + 30*time.Second
-	defaultInterjectionMaxInFlightDrift = 2
+	defaultInterjectionMaxInFlightDrift = 5
 	defaultInterjectionMaxGroups        = 1024
 	maxTrackedGroupParticipants         = 20
 )
@@ -215,7 +215,8 @@ func (s *InterjectionScheduler) Observe(groupID string, event *entity.SensoryEve
 	recordParticipantLocked(g, event.SenderID, event.SenderName)
 
 	if !eligible || onDispatch == nil {
-		clearPendingLocked(g)
+		// Ineligible messages (e.g. memes/images or @other) still advance msgSeq
+		// for drift tracking, but should not wipe an already-pending text burst.
 		return
 	}
 	if !g.speakBlockedUntil.IsZero() && now.Before(g.speakBlockedUntil) {
@@ -324,6 +325,15 @@ func (s *InterjectionScheduler) prepareDispatchLocked(groupID string, g *interje
 			return false
 		}
 		return cur.msgSeq-snapMsgSeq <= uint64(s.cfg.MaxInFlightDrift)
+	}
+	ev.InterjectionDrift = func() int {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		cur := s.groups[groupID]
+		if cur != g || cur.msgSeq < snapMsgSeq {
+			return 0
+		}
+		return int(cur.msgSeq - snapMsgSeq)
 	}
 	return dispatchFn, &ev
 }

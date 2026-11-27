@@ -159,7 +159,7 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 			q.commitPassiveReplyAttempt(budget)
 			reservedCount--
 		}
-		quoteRef := sentParts == 0 && !u.Proactive && u.QuoteMsgID != "" && !(u.GroupInterjection && len(u.MentionUserIDs) == 0) && q.hasNewerInboundMessage(u.IsGroup, u.ChannelID, u.QuoteMsgID)
+		quoteRef := sentParts == 0 && !u.Proactive && u.QuoteMsgID != "" && !u.AnonymousInterjection && q.hasNewerInboundMessage(u.IsGroup, u.ChannelID, u.QuoteMsgID)
 		if len(part.image) == 0 {
 			return q.client.sendMessageWithReference(ctx, targetType, u.ChannelID, wireText, u.QuoteMsgID, quoteRef, QuoteMetadata{Text: part.text, Kind: qqQuoteText, TextComplete: true})
 		}

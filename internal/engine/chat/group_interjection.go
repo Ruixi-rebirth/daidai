@@ -16,9 +16,28 @@ import (
 )
 
 const (
-	maxGroupReplyRunes = 100
-	maxGroupDreamRunes = 200
+	maxGroupReplyRunes            = 100
+	maxGroupDreamRunes            = 200
+	maxAnonymousInterjectionDrift = 2
 )
+
+func parseGroupDecision(raw string) (groupDecision, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return groupDecision{}, false
+	}
+	var decision groupDecision
+	if json.Unmarshal([]byte(trimmed), &decision) == nil {
+		return decision, true
+	}
+	// Some models wrap JSON in ```json ... ``` fences despite instructions.
+	if start, end := strings.IndexByte(trimmed, '{'), strings.LastIndexByte(trimmed, '}'); start >= 0 && end > start {
+		if json.Unmarshal([]byte(trimmed[start:end+1]), &decision) == nil {
+			return decision, true
+		}
+	}
+	return groupDecision{}, false
+}
 
 func groupInterjectionPrompt(chatter, dream bool) string {
 	prompt := fmt.Sprintf(`你是群成员%s，此刻没被点名，正在决定要不要随口搭一句。只使用给出的本群上下文，不猜私聊、其他群或群成员未说过的现实经历。
@@ -149,8 +168,8 @@ func (c *Cortex) thinkGroupInterjection(ctx context.Context, event *entity.Senso
 	if response == nil || len(response.ToolCalls) > 0 || (event.StillValid != nil && !event.StillValid()) {
 		return nil, nil
 	}
-	var decision groupDecision
-	if json.Unmarshal([]byte(response.Content), &decision) != nil {
+	decision, ok := parseGroupDecision(response.Content)
+	if !ok {
 		return nil, nil
 	}
 	text := strings.TrimSpace(decision.Text)
@@ -165,6 +184,10 @@ func (c *Cortex) thinkGroupInterjection(ctx context.Context, event *entity.Senso
 	switch decision.Mode {
 	case "reply":
 	case groupchat.Chatter, groupchat.Dream:
+		// Ambient self-talk should stay quiet if the chat moved on quickly while thinking.
+		if event.InterjectionDrift != nil && event.InterjectionDrift() > maxAnonymousInterjectionDrift {
+			return nil, nil
+		}
 		// Recheck after the model call: disabling a mode or a successful send in
 		// another in-flight turn must make this old decision ineligible.
 		if c.groupExpressions == nil {
@@ -200,6 +223,7 @@ func (c *Cortex) thinkGroupInterjection(ctx context.Context, event *entity.Senso
 		return u, nil
 	}
 	event.GroupExpression = decision.Mode
+	u.AnonymousInterjection = true
 	if decision.Mode == groupchat.Dream {
 		u.Text = "梦到个离谱画面：\n" + text
 	}

@@ -242,3 +242,39 @@ func TestInterjectionScheduler_InFlightDriftAndAddressedInvalidation(t *testing.
 		t.Fatalf("NotifyAddressed must immediately invalidate in-flight interjection")
 	}
 }
+
+func TestInterjectionScheduler_IneligibleMessagePreservesPendingBurstAndReportsDrift(t *testing.T) {
+	clock := newFakeClock(time.Date(2026, 11, 27, 20, 0, 0, 0, time.UTC))
+	sched := NewInterjectionScheduler(InterjectionConfig{
+		Debounce:      2500 * time.Millisecond,
+		MaxWait:       10 * time.Second,
+		CheckCooldown: 30 * time.Second,
+		Now:           clock.Now,
+		AfterFunc:     clock.AfterFunc,
+	})
+
+	var dispatched *entity.SensoryEvent
+	sched.Observe("g1", &entity.SensoryEvent{ChannelID: "g1", SenderID: "u1", RawMessageID: "m1", Content: "聊技术"}, true, func(ev *entity.SensoryEvent) {
+		dispatched = ev
+	})
+	clock.Advance(1 * time.Second)
+	// A sticker/image arrives (eligible=false) — must not cancel the pending text burst!
+	sched.Observe("g1", &entity.SensoryEvent{ChannelID: "g1", SenderID: "u2", RawMessageID: "m2", Content: ""}, false, nil)
+	clock.Advance(2 * time.Second)
+	if dispatched == nil || dispatched.RawMessageID != "m1" {
+		t.Fatalf("expected pending text candidate m1 to survive ineligible sticker, got %+v", dispatched)
+	}
+	if dispatched.InterjectionDrift == nil || dispatched.InterjectionDrift() != 0 {
+		t.Fatalf("expected initial drift 0, got %v", dispatched.InterjectionDrift())
+	}
+	// 3 messages arrive during LLM thinking: default MaxInFlightDrift=5 keeps reply valid, while drift reports 3.
+	for i := 0; i < 3; i++ {
+		sched.Observe("g1", &entity.SensoryEvent{ChannelID: "g1", SenderID: "u3", RawMessageID: "d", Content: "刷屏"}, true, nil)
+	}
+	if !dispatched.StillValid() {
+		t.Fatalf("3-message drift should remain valid under default MaxInFlightDrift=5")
+	}
+	if got := dispatched.InterjectionDrift(); got != 3 {
+		t.Fatalf("expected InterjectionDrift=3, got %d", got)
+	}
+}

@@ -29,7 +29,7 @@ func (c *Channel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr er
 		return fmt.Errorf("telegram destination is empty")
 	}
 	reply, _ := strconv.ParseInt(u.QuoteMsgID, 10, 64)
-	if u.GroupInterjection && len(u.MentionUserIDs) == 0 {
+	if u.AnonymousInterjection {
 		reply = 0
 	}
 	u = u.WithoutEmptyImages()

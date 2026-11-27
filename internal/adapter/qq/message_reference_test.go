@@ -185,12 +185,13 @@ func TestQQTransmit_AnonymousGroupInterjectionOmitsMessageReference(t *testing.T
 	ch.recordLastInboundMsgID(true, "group-1", "inbound-msg-7")
 	ch.recordLastInboundMsgID(true, "group-1", "inbound-msg-8")
 	err := ch.Transmit(context.Background(), &entity.Utterance{
-		Platform:          "qq",
-		IsGroup:           true,
-		ChannelID:         "group-1",
-		QuoteMsgID:        "inbound-msg-7",
-		GroupInterjection: true,
-		Text:              "确实挺冷的",
+		Platform:              "qq",
+		IsGroup:               true,
+		ChannelID:             "group-1",
+		QuoteMsgID:            "inbound-msg-7",
+		GroupInterjection:     true,
+		AnonymousInterjection: true,
+		Text:                  "确实挺冷的",
 	})
 	if err != nil {
 		t.Fatalf("Transmit failed: %v", err)
@@ -200,5 +201,44 @@ func TestQQTransmit_AnonymousGroupInterjectionOmitsMessageReference(t *testing.T
 	}
 	if _, hasRef := payloads[0]["message_reference"]; hasRef {
 		t.Fatalf("anonymous group interjection should not attach message_reference, got %#v", payloads[0]["message_reference"])
+	}
+}
+
+func TestQQTransmit_ReplyGroupInterjectionQuotesOnDrift(t *testing.T) {
+	var payloads []map[string]any
+	client := NewClient("app", "secret")
+	client.accessToken = "token"
+	client.httpClient.Transport = qqTestTransport(func(req *http.Request) (*http.Response, error) {
+		raw, _ := io.ReadAll(req.Body)
+		var body map[string]any
+		_ = json.Unmarshal(raw, &body)
+		payloads = append(payloads, body)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"id":"sent-interject-reply"}`)),
+		}, nil
+	})
+
+	ch := &QQChannel{client: client}
+	ch.recordLastInboundMsgID(true, "group-1", "inbound-msg-7")
+	ch.recordLastInboundMsgID(true, "group-1", "inbound-msg-8")
+	err := ch.Transmit(context.Background(), &entity.Utterance{
+		Platform:          "qq",
+		IsGroup:           true,
+		ChannelID:         "group-1",
+		QuoteMsgID:        "inbound-msg-7",
+		GroupInterjection: true,
+		Text:              "Phosh 和 Plasma Mobile 确实最顺手",
+	})
+	if err != nil {
+		t.Fatalf("Transmit failed: %v", err)
+	}
+	if len(payloads) != 1 {
+		t.Fatalf("expected 1 payload, got %d", len(payloads))
+	}
+	ref, _ := payloads[0]["message_reference"].(map[string]any)
+	if ref == nil || ref["message_id"] != "inbound-msg-7" {
+		t.Fatalf("reply group interjection should attach message_reference when newer messages arrived, got %#v", payloads[0]["message_reference"])
 	}
 }

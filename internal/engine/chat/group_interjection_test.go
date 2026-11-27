@@ -173,3 +173,22 @@ func TestNewMessageAndColdConversationSuppressExpressions(t *testing.T) {
 		t.Fatal("cold group received a dream")
 	}
 }
+
+func TestGroupInterjection_ParsesFencedJSONAndLimitsAnonymousDrift(t *testing.T) {
+	cortex, model, _, event := expressionFixture(t)
+	model.response = "```json\n{\"mode\":\"reply\",\"text\":\"这波确实稳\",\"mention\":0}\n```"
+	event.InterjectionDrift = func() int { return 4 }
+	u, err := cortex.Think(context.Background(), event)
+	if err != nil || u == nil {
+		t.Fatalf("expected fenced JSON reply to succeed with drift=4, got u=%+v err=%v", u, err)
+	}
+	if u.AnonymousInterjection {
+		t.Fatalf("reply mode must not be marked AnonymousInterjection")
+	}
+
+	model.response = "{\"mode\":\"chatter\",\"text\":\"窗外起风了\",\"mention\":0}"
+	u, err = cortex.Think(context.Background(), event)
+	if err != nil || u != nil {
+		t.Fatalf("expected chatter to be suppressed when drift=4 > 2, got u=%+v err=%v", u, err)
+	}
+}
