@@ -121,10 +121,24 @@ func run() int {
 		WorkingDir: defaultWorkDir,
 	})
 
-	fallbackChannels := []string{"API"}
-	if cfg.LLM.Zhipu.APIKey != "" {
-		fallbackChannels = []string{"GLM", "API"}
+	var fallbackChannels []string
+	type fallbackEntry struct {
+		channel string
+		cfg     config.LLMFallbackConfig
 	}
+	var configuredFallbacks []fallbackEntry
+	for idx, fb := range cfg.LLM.Fallbacks {
+		if fb.BaseURL == "" || fb.APIKey == "" || fb.Model == "" {
+			continue
+		}
+		ch := strings.ToUpper(strings.TrimSpace(fb.Name))
+		if ch == "" {
+			ch = fmt.Sprintf("FALLBACK_%d", idx+1)
+		}
+		configuredFallbacks = append(configuredFallbacks, fallbackEntry{channel: ch, cfg: fb})
+		fallbackChannels = append(fallbackChannels, ch)
+	}
+	fallbackChannels = append(fallbackChannels, "API")
 
 	// 组装统一异构多心智开放路由器 (支持运行时动态探测各通道可用模型列表)
 	mindRouter := llm.NewMindRouter(llm.MindRouterConfig{
@@ -141,21 +155,21 @@ func run() int {
 		SessionDB:   database,
 	})
 
-	// 挂载智谱免费 GLM 通道（作为 AGY → GLM → DeepSeek 之间的第一兜底）
-	if cfg.LLM.Zhipu.APIKey != "" {
-		glmProvider := llm.NewOpenAIProvider(llm.OpenAIConfig{
-			BaseURL: cfg.LLM.Zhipu.BaseURL,
-			APIKey:  cfg.LLM.Zhipu.APIKey,
-			Model:   cfg.LLM.Zhipu.ChatModel,
+	// 按配置顺序挂载 OpenAI 兼容兜底通道（位于 AGY 之后、基础 API 之前）
+	for _, entry := range configuredFallbacks {
+		fbProvider := llm.NewOpenAIProvider(llm.OpenAIConfig{
+			BaseURL: entry.cfg.BaseURL,
+			APIKey:  entry.cfg.APIKey,
+			Model:   entry.cfg.Model,
 		})
 		mindRouter.RegisterChannel(llm.ChannelRegistration{
-			Channel:  "GLM",
-			Provider: glmProvider,
+			Channel:  entry.channel,
+			Provider: fbProvider,
 			Models: []llm.ModelInfo{
 				{
-					ID:      cfg.LLM.Zhipu.ChatModel,
-					Channel: "GLM",
-					Name:    cfg.LLM.Zhipu.ChatModel,
+					ID:      entry.cfg.Model,
+					Channel: entry.channel,
+					Name:    entry.cfg.Model,
 				},
 			},
 		})
@@ -292,8 +306,11 @@ func run() int {
 	}
 	groupExpressions := &groupchat.Store{Database: database}
 	var fallbackImageAPI *tool.TextToImageAPI
-	if cfg.LLM.Zhipu.APIKey != "" && cfg.LLM.Zhipu.ImageModel != "" {
-		fallbackImageAPI = tool.NewTextToImageAPI(cfg.LLM.Zhipu.BaseURL, cfg.LLM.Zhipu.APIKey, cfg.LLM.Zhipu.ImageModel)
+	if cfg.LLM.ImageFallback.BaseURL != "" && cfg.LLM.ImageFallback.APIKey != "" && cfg.LLM.ImageFallback.Model != "" {
+		fallbackImageAPI = tool.NewTextToImageAPI(cfg.LLM.ImageFallback.BaseURL, cfg.LLM.ImageFallback.APIKey, cfg.LLM.ImageFallback.Model)
+		if cfg.LLM.ImageFallback.Size != "" {
+			fallbackImageAPI.Size = cfg.LLM.ImageFallback.Size
+		}
 	}
 
 	hands := tool.NewHandsWithConfig(tool.HandsConfig{

@@ -19,11 +19,17 @@ llm:
   base_url: "https://api.deepseek.com/v1"
   api_key: "YOUR_DEEPSEEK_API_KEY"
   model: "deepseek-chat"
-  zhipu:
-    base_url: "https://open.bigmodel.cn/api/paas/v4" # 可选，默认智谱开放平台地址
-    api_key: "" # 可选；填入后自动启用：对话优先兜底 glm-4.7-flash（免费）→ DeepSeek，纯文生图 AGY 429 时兜底 cogview-3-flash（免费）
-    chat_model: "glm-4.7-flash"
-    image_model: "cogview-3-flash"
+  # 可选：按顺序尝试的 OpenAI 兼容对话兜底链（位于 AGY 之后、上方基础 API 之前；适合接免费 GLM 等）
+  fallbacks: []
+  #   - name: "GLM"
+  #     base_url: "https://open.bigmodel.cn/api/paas/v4"
+  #     api_key: "YOUR_ZHIPU_API_KEY"
+  #     model: "glm-4.7-flash"
+  # 可选：纯文生图备用 API（兼容 /images/generations，如智谱 cogview-3-flash、硅基流动 Kolors 等）
+  image_fallback:
+    base_url: ""
+    api_key: ""
+    model: ""
   embedding:
     base_url: "https://api.siliconflow.cn/v1"
     api_key: "YOUR_EMBEDDING_API_KEY"

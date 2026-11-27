@@ -61,7 +61,10 @@ func (a *TextToImageAPI) Generate(ctx context.Context, prompt string) ([]byte, e
 		return nil, fmt.Errorf("encode image API request: %w", err)
 	}
 
-	endpoint := a.BaseURL + "/images/generations"
+	endpoint := a.BaseURL
+	if !strings.HasSuffix(endpoint, "/generations") {
+		endpoint += "/images/generations"
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(rawReq))
 	if err != nil {
 		return nil, fmt.Errorf("build image API request: %w", err)
@@ -87,26 +90,32 @@ func (a *TextToImageAPI) Generate(ctx context.Context, prompt string) ([]byte, e
 		return nil, fmt.Errorf("image API status %d: %s", resp.StatusCode, core.TruncateRunes(strings.TrimSpace(string(respBytes)), 300, "…"))
 	}
 
+	type imageItem struct {
+		URL     string `json:"url"`
+		B64JSON string `json:"b64_json"`
+	}
 	var parsed struct {
-		Data []struct {
-			URL     string `json:"url"`
-			B64JSON string `json:"b64_json"`
-		} `json:"data"`
+		Data   []imageItem `json:"data"`
+		Images []imageItem `json:"images"`
 	}
 	if err := json.Unmarshal(respBytes, &parsed); err != nil {
 		return nil, fmt.Errorf("decode image API response: %w", err)
 	}
-	if len(parsed.Data) == 0 {
+	items := parsed.Data
+	if len(items) == 0 {
+		items = parsed.Images
+	}
+	if len(items) == 0 {
 		return nil, fmt.Errorf("image API returned empty data")
 	}
 
 	var rawImage []byte
-	if b64 := strings.TrimSpace(parsed.Data[0].B64JSON); b64 != "" {
+	if b64 := strings.TrimSpace(items[0].B64JSON); b64 != "" {
 		rawImage, err = base64.StdEncoding.DecodeString(b64)
 		if err != nil {
 			return nil, fmt.Errorf("decode image API base64: %w", err)
 		}
-	} else if imgURL := strings.TrimSpace(parsed.Data[0].URL); imgURL != "" {
+	} else if imgURL := strings.TrimSpace(items[0].URL); imgURL != "" {
 		rawImage, err = a.downloadImage(ctx, imgURL)
 		if err != nil {
 			return nil, err
