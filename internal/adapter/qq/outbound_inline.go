@@ -225,7 +225,7 @@ func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utteranc
 			}
 		}
 		attempted = true
-		quoteRef := index == 0 && u.IsGroup && !u.Proactive && u.QuoteMsgID != "" && !(u.GroupInterjection && len(u.MentionUserIDs) == 0)
+		quoteRef := index == 0 && !u.Proactive && u.QuoteMsgID != "" && !(u.GroupInterjection && len(u.MentionUserIDs) == 0) && q.hasNewerInboundMessage(u.IsGroup, u.ChannelID, u.QuoteMsgID)
 		if len(part.image) > 0 {
 			err = q.client.sendMediaMessageWithReference(ctx, targetType, u.ChannelID, part.content, part.image, u.QuoteMsgID, quoteRef, metadata)
 		} else {

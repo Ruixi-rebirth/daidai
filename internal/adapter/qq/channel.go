@@ -91,6 +91,40 @@ type QQChannel struct {
 	voiceMode         string
 	continuationsOnce sync.Once
 	continuations     *groupchat.ContinuationTracker
+	lastInboundMu     sync.Mutex
+	lastInboundMsgID  map[string]string
+}
+
+func inboundConvKey(isGroup bool, convID string) string {
+	if isGroup {
+		return "group:" + convID
+	}
+	return "private:" + convID
+}
+
+func (q *QQChannel) recordLastInboundMsgID(isGroup bool, convID, msgID string) {
+	if q == nil || convID == "" || msgID == "" {
+		return
+	}
+	q.lastInboundMu.Lock()
+	defer q.lastInboundMu.Unlock()
+	if q.lastInboundMsgID == nil {
+		q.lastInboundMsgID = make(map[string]string)
+	}
+	if len(q.lastInboundMsgID) > 2048 {
+		clear(q.lastInboundMsgID)
+	}
+	q.lastInboundMsgID[inboundConvKey(isGroup, convID)] = msgID
+}
+
+func (q *QQChannel) hasNewerInboundMessage(isGroup bool, convID, msgID string) bool {
+	if q == nil || convID == "" || msgID == "" {
+		return false
+	}
+	q.lastInboundMu.Lock()
+	defer q.lastInboundMu.Unlock()
+	last := q.lastInboundMsgID[inboundConvKey(isGroup, convID)]
+	return last != "" && last != msgID
 }
 
 // SetHistoryRecorder installs the callback used to persist each raw inbound
@@ -359,6 +393,9 @@ func (q *QQChannel) Stop(ctx context.Context) error {
 	if q.continuations != nil {
 		q.continuations.Clear()
 	}
+	q.lastInboundMu.Lock()
+	q.lastInboundMsgID = nil
+	q.lastInboundMu.Unlock()
 	if q.debounce != nil {
 		if err := q.debounce.Shutdown(ctx); err != nil && firstErr == nil {
 			firstErr = err

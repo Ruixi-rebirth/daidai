@@ -58,6 +58,7 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 		slog.Warn("qq: 忽略缺少原消息 ID 的事件，无法使用被动回复凭证", "eventType", eventType, "channelID", convID)
 		return true
 	}
+	q.recordLastInboundMsgID(isGroup, convID, msgID)
 
 	inboundMedia := q.extractInboundMedia(ctx, d, msgID, content)
 	content = inboundMedia.Content

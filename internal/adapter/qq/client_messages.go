@@ -59,7 +59,7 @@ func (c *Client) sendMessageWithReference(ctx context.Context, targetType, targe
 	if msgID != "" {
 		mdPayload["msg_id"] = msgID
 	}
-	usedReference := quoteRef && targetType == "groups" && msgID != ""
+	usedReference := quoteRef && (targetType == "groups" || targetType == "users") && msgID != ""
 	if usedReference {
 		mdPayload["message_reference"] = map[string]any{
 			"message_id":               msgID,
@@ -151,7 +151,7 @@ func (c *Client) sendMediaMessageWithReference(ctx context.Context, targetType, 
 	if msgID != "" {
 		payload["msg_id"] = msgID
 	}
-	usedReference := quoteRef && targetType == "groups" && msgID != ""
+	usedReference := quoteRef && (targetType == "groups" || targetType == "users") && msgID != ""
 	if usedReference {
 		payload["message_reference"] = map[string]any{
 			"message_id":               msgID,

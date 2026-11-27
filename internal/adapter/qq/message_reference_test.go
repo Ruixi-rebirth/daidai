@@ -11,7 +11,7 @@ import (
 	"daidai/internal/entity"
 )
 
-func TestQQTransmit_GroupReplyIncludesMessageReferenceOnFirstPartOnly(t *testing.T) {
+func TestQQTransmit_OnDemandMessageReferenceGroupAndPrivate(t *testing.T) {
 	var payloads []map[string]any
 	client := NewClient("app", "secret")
 	client.accessToken = "token"
@@ -33,31 +33,79 @@ func TestQQTransmit_GroupReplyIncludesMessageReferenceOnFirstPartOnly(t *testing
 	})
 
 	ch := &QQChannel{client: client}
+
+	// 1. Adjacent group reply (no newer message) -> omit message_reference.
+	ch.recordLastInboundMsgID(true, "group-1", "inbound-msg-41")
+	if err := ch.Transmit(context.Background(), &entity.Utterance{
+		Platform:       "qq",
+		IsGroup:        true,
+		ChannelID:      "group-1",
+		QuoteMsgID:     "inbound-msg-41",
+		MentionUserIDs: []string{"user-1"},
+		Text:           "在呢，咋啦",
+	}); err != nil {
+		t.Fatalf("adjacent group Transmit failed: %v", err)
+	}
+	if _, hasRef := payloads[0]["message_reference"]; hasRef {
+		t.Fatalf("adjacent group reply should omit message_reference, got %#v", payloads[0]["message_reference"])
+	}
+
+	// 2. Interleaved group reply (newer message arrived) -> attach message_reference on first part only.
+	payloads = nil
+	ch.recordLastInboundMsgID(true, "group-1", "inbound-msg-42")
+	ch.recordLastInboundMsgID(true, "group-1", "inbound-msg-43")
 	longText := strings.Repeat("这是一段较长的回复内容。", 150) // > 1200 runes -> 2 chunks
-	err := ch.Transmit(context.Background(), &entity.Utterance{
+	if err := ch.Transmit(context.Background(), &entity.Utterance{
 		Platform:       "qq",
 		IsGroup:        true,
 		ChannelID:      "group-1",
 		QuoteMsgID:     "inbound-msg-42",
 		MentionUserIDs: []string{"user-1"},
 		Text:           longText,
-	})
-	if err != nil {
-		t.Fatalf("Transmit failed: %v", err)
+	}); err != nil {
+		t.Fatalf("interleaved group Transmit failed: %v", err)
 	}
 	if len(payloads) < 2 {
 		t.Fatalf("expected multi-part message, got %d payloads", len(payloads))
 	}
-
 	ref, ok := payloads[0]["message_reference"].(map[string]any)
-	if !ok {
+	if !ok || ref["message_id"] != "inbound-msg-42" || ref["ignore_get_message_error"] != true {
 		t.Fatalf("expected message_reference on first part, got %#v", payloads[0]["message_reference"])
-	}
-	if ref["message_id"] != "inbound-msg-42" || ref["ignore_get_message_error"] != true {
-		t.Fatalf("unexpected message_reference: %#v", ref)
 	}
 	if _, hasRef := payloads[1]["message_reference"]; hasRef {
 		t.Fatalf("expected no message_reference on subsequent parts, got %#v", payloads[1]["message_reference"])
+	}
+
+	// 3. Private chat: adjacent omits reference, interleaved attaches reference.
+	payloads = nil
+	ch.recordLastInboundMsgID(false, "user-1", "pm-1")
+	if err := ch.Transmit(context.Background(), &entity.Utterance{
+		Platform:   "qq",
+		IsGroup:    false,
+		ChannelID:  "user-1",
+		QuoteMsgID: "pm-1",
+		Text:       "收到",
+	}); err != nil {
+		t.Fatalf("adjacent private Transmit failed: %v", err)
+	}
+	if _, hasRef := payloads[0]["message_reference"]; hasRef {
+		t.Fatalf("adjacent private reply should omit message_reference, got %#v", payloads[0]["message_reference"])
+	}
+
+	payloads = nil
+	ch.recordLastInboundMsgID(false, "user-1", "pm-2")
+	if err := ch.Transmit(context.Background(), &entity.Utterance{
+		Platform:   "qq",
+		IsGroup:    false,
+		ChannelID:  "user-1",
+		QuoteMsgID: "pm-1",
+		Text:       "这是回你上一条的",
+	}); err != nil {
+		t.Fatalf("interleaved private Transmit failed: %v", err)
+	}
+	ref, ok = payloads[0]["message_reference"].(map[string]any)
+	if !ok || ref["message_id"] != "pm-1" || ref["ignore_get_message_error"] != true {
+		t.Fatalf("interleaved private reply should attach message_reference, got %#v", payloads[0]["message_reference"])
 	}
 }
 
@@ -90,6 +138,8 @@ func TestQQTransmit_GroupReplyRetriesWithoutMessageReferenceOn4xxRejection(t *te
 	})
 
 	ch := &QQChannel{client: client}
+	ch.recordLastInboundMsgID(true, "group-1", "inbound-msg-99")
+	ch.recordLastInboundMsgID(true, "group-1", "inbound-msg-100")
 	err := ch.Transmit(context.Background(), &entity.Utterance{
 		Platform:       "qq",
 		IsGroup:        true,
@@ -132,6 +182,8 @@ func TestQQTransmit_AnonymousGroupInterjectionOmitsMessageReference(t *testing.T
 	})
 
 	ch := &QQChannel{client: client}
+	ch.recordLastInboundMsgID(true, "group-1", "inbound-msg-7")
+	ch.recordLastInboundMsgID(true, "group-1", "inbound-msg-8")
 	err := ch.Transmit(context.Background(), &entity.Utterance{
 		Platform:          "qq",
 		IsGroup:           true,
