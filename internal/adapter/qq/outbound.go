@@ -38,6 +38,7 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 				target = u.MentionUserIDs[0]
 			}
 			q.recordGroupActiveSession(u.ChannelID, target)
+			q.interjectionScheduler().NotifySpoke(u.ChannelID)
 		}
 	}()
 	if u.Proactive {

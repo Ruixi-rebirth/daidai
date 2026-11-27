@@ -128,13 +128,11 @@ func (c *Channel) Stop(ctx context.Context) error {
 	c.mu.Lock()
 	cancel, done := c.cancel, c.done
 	c.stopping = true
-	for _, group := range c.groups {
-		if group.timer != nil {
-			group.timer.Stop()
-		}
-	}
-	c.groups = nil
+	interjections := c.interjections
 	c.mu.Unlock()
+	if interjections != nil {
+		interjections.Stop()
+	}
 	if cancel == nil {
 		return nil
 	}

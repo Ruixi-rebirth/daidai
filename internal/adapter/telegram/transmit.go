@@ -16,10 +16,15 @@ import (
 	"daidai/internal/entity"
 )
 
-func (c *Channel) Transmit(ctx context.Context, u *entity.Utterance) error {
+func (c *Channel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr error) {
 	if u == nil {
 		return nil
 	}
+	defer func() {
+		if sendErr == nil && u.IsGroup && u.ChannelID != "" {
+			c.interjectionScheduler().NotifySpoke(u.ChannelID)
+		}
+	}()
 	if strings.TrimSpace(u.ChannelID) == "" {
 		return fmt.Errorf("telegram destination is empty")
 	}

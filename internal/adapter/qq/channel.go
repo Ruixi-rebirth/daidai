@@ -39,20 +39,12 @@ type qqOutgoingPart struct {
 	source string
 }
 
-type pendingGroupInterjection struct {
-	event     *entity.SensoryEvent
-	timer     *time.Timer
-	scheduled time.Time
-}
-
 type groupBotMention struct {
 	ID   string
 	Name string
 }
 
 const maxQQOutgoingParts = 5
-const groupInterjectionCooldown = 5 * time.Minute
-const groupInterjectionQuietPeriod = 4 * time.Second
 
 type QQChannel struct {
 	lifecycleMu         sync.Mutex
@@ -76,23 +68,20 @@ type QQChannel struct {
 	wsLastSeq   int64
 	wsReady     atomic.Bool
 
-	replyBudgetsMu           sync.Mutex
-	replyBudgets             map[string]*passiveReplyBudget
-	replyBudgetSweepAt       time.Time
-	groupInterjectionsMu     sync.Mutex
-	groupInterjections       map[string]time.Time
-	groupInterjectionSweepAt time.Time
-	pendingInterjectionsMu   sync.Mutex
-	pendingInterjections     map[string]*pendingGroupInterjection
-	knownGroupBotsMu         sync.RWMutex
-	knownGroupBots           map[string]map[string]string
-	historyRecorder          func(context.Context, *entity.SensoryEvent) error
-	voiceModeMu       sync.RWMutex
-	voiceMode         string
-	continuationsOnce sync.Once
-	continuations     *groupchat.ContinuationTracker
-	lastInboundMu     sync.Mutex
-	lastInboundMsgID  map[string]string
+	replyBudgetsMu     sync.Mutex
+	replyBudgets       map[string]*passiveReplyBudget
+	replyBudgetSweepAt time.Time
+	knownGroupBotsMu   sync.RWMutex
+	knownGroupBots     map[string]map[string]string
+	historyRecorder    func(context.Context, *entity.SensoryEvent) error
+	voiceModeMu        sync.RWMutex
+	voiceMode          string
+	continuationsOnce  sync.Once
+	continuations      *groupchat.ContinuationTracker
+	interjectionsOnce  sync.Once
+	interjections      *groupchat.InterjectionScheduler
+	lastInboundMu      sync.Mutex
+	lastInboundMsgID   map[string]string
 }
 
 func inboundConvKey(isGroup bool, convID string) string {
@@ -285,9 +274,8 @@ func (q *QQChannel) Start(ctx context.Context, onSensory func(event *entity.Sens
 	if q.msgCache != nil {
 		q.msgCache.Reopen()
 	}
-	q.groupInterjectionsMu.Lock()
 	q.lifecycleGeneration.Add(1)
-	q.groupInterjectionsMu.Unlock()
+	q.interjectionScheduler().Reset()
 	q.stopCancel = cancel
 
 	q.debounce = kernel.NewDebounceManager(kernel.DebounceConfig{
@@ -366,10 +354,11 @@ func (q *QQChannel) Stop(ctx context.Context) error {
 	q.lifecycleMu.Lock()
 	defer q.lifecycleMu.Unlock()
 
-	q.groupInterjectionsMu.Lock()
 	q.lifecycleGeneration.Add(1)
-	q.groupInterjectionsMu.Unlock()
 	q.wsReady.Store(false)
+	if q.interjections != nil {
+		q.interjections.Stop()
+	}
 	if q.stopCancel != nil {
 		q.stopCancel()
 	}
@@ -384,12 +373,6 @@ func (q *QQChannel) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		firstErr = ctx.Err()
 	}
-	q.pendingInterjectionsMu.Lock()
-	for groupID, pending := range q.pendingInterjections {
-		pending.timer.Stop()
-		delete(q.pendingInterjections, groupID)
-	}
-	q.pendingInterjectionsMu.Unlock()
 	if q.continuations != nil {
 		q.continuations.Clear()
 	}

@@ -168,13 +168,13 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 			return q.ingestUnaddressedGroupMessage(observedEvent, canInterject)
 		}
 		if isGroup && botAddressed {
-			q.cancelPendingGroupInterjection(convID)
+			q.notifyGroupAddressed(convID, userID, senderName)
 			if botMentioned || quotedBot || (config.BotName() != "" && strings.Contains(content, config.BotName())) {
 				q.recordGroupActiveSession(convID, userID)
 			}
 		}
 		if groupContinuation {
-			q.cancelPendingGroupInterjection(convID)
+			q.notifyGroupAddressed(convID, userID, senderName)
 		}
 		if replyCtx != nil {
 			quotedFiles, omittedQuotedFiles := qqQuotedFiles(replyCtx)

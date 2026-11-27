@@ -2,83 +2,41 @@ package telegram
 
 import (
 	"strings"
-	"time"
 
-	"daidai/internal/core"
 	"daidai/internal/entity"
+	"daidai/internal/groupchat"
 )
 
-type groupState struct {
-	lastSeen       time.Time
-	lastConsidered time.Time
-	timer          *time.Timer
-	generation     uint64
-	participants   []core.GroupParticipant
+func (c *Channel) interjectionScheduler() *groupchat.InterjectionScheduler {
+	c.interjectionsOnce.Do(func() {
+		if c.interjections == nil {
+			c.interjections = groupchat.NewInterjectionScheduler(groupchat.InterjectionConfig{})
+		}
+	})
+	return c.interjections
 }
 
 func (c *Channel) observeGroup(event *entity.SensoryEvent, replyingToBot bool) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.stopping || c.queue == nil {
+	stopping := c.stopping
+	queue := c.queue
+	c.mu.Unlock()
+	if stopping || queue == nil || event == nil {
 		return
 	}
-	if c.groups == nil {
-		c.groups = make(map[string]*groupState)
-	}
-	g := c.groups[event.ChannelID]
-	if g == nil {
-		if len(c.groups) >= 1024 {
-			var oldest string
-			for id, state := range c.groups {
-				if oldest == "" || state.lastSeen.Before(c.groups[oldest].lastSeen) {
-					oldest = id
-				}
-			}
-			if c.groups[oldest].timer != nil {
-				c.groups[oldest].timer.Stop()
-			}
-			delete(c.groups, oldest)
-		}
-		g = &groupState{}
-		c.groups[event.ChannelID] = g
-	}
-	g.lastSeen = time.Now()
-	g.generation++
-	if g.timer != nil {
-		g.timer.Stop()
-		g.timer = nil
-	}
-	participants := []core.GroupParticipant{{ID: event.SenderID, Name: event.SenderName}}
-	for _, p := range g.participants {
-		if p.ID != event.SenderID && len(participants) < 20 {
-			participants = append(participants, p)
-		}
-	}
-	g.participants = participants
 	if !event.GroupMessageObserved {
-		g.lastConsidered = time.Now()
+		c.interjectionScheduler().NotifyAddressed(event.ChannelID, event.SenderID, event.SenderName)
 		return
 	}
-	if replyingToBot || strings.TrimSpace(event.Content) == "" || strings.HasPrefix(event.Content, "/") || time.Since(g.lastConsidered) < 5*time.Minute {
-		return
-	}
+	eligible := !replyingToBot && strings.TrimSpace(event.Content) != "" && !strings.HasPrefix(event.Content, "/")
 	candidate := *event
-	candidate.GroupInterjection = true
-	candidate.GroupParticipants = append([]core.GroupParticipant(nil), participants...)
-	generation := g.generation
-	g.timer = time.AfterFunc(4*time.Second, func() {
+	c.interjectionScheduler().Observe(event.ChannelID, &candidate, eligible, func(ev *entity.SensoryEvent) {
 		c.mu.Lock()
-		defer c.mu.Unlock()
-		if c.stopping || c.groups[event.ChannelID] != g || g.generation != generation || time.Since(g.lastConsidered) < 5*time.Minute {
+		isStopping := c.stopping
+		c.mu.Unlock()
+		if isStopping {
 			return
 		}
-		g.lastConsidered = time.Now()
-		g.timer = nil
-		candidate.StillValid = func() bool {
-			c.mu.Lock()
-			defer c.mu.Unlock()
-			return !c.stopping && c.groups[event.ChannelID] == g && g.generation == generation
-		}
-		c.queue.Push(&candidate)
+		queue.Push(ev)
 	})
 }

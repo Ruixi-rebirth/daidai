@@ -9,6 +9,7 @@ import (
 
 	"daidai/internal/db"
 	"daidai/internal/entity"
+	"daidai/internal/groupchat"
 	"daidai/internal/kernel"
 	"daidai/internal/media"
 )
@@ -56,8 +57,9 @@ type update struct {
 	Message *message `json:"message"`
 }
 type Channel struct {
-	groups   map[string]*groupState
-	stopping bool
+	interjectionsOnce sync.Once
+	interjections     *groupchat.InterjectionScheduler
+	stopping          bool
 	Inbox    *media.Inbox
 	cfg      Config
 	database *db.Manager

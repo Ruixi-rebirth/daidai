@@ -3,125 +3,34 @@ package qq
 import (
 	"context"
 	"log/slog"
-	"strings"
 	"time"
 
 	"daidai/internal/core"
 	"daidai/internal/entity"
-	"daidai/internal/kernel"
+	"daidai/internal/groupchat"
 )
 
-func (q *QQChannel) shouldConsiderGroupInterjection(groupID string, generation uint64) bool {
-	if q == nil || strings.TrimSpace(groupID) == "" {
-		return false
-	}
-	now := time.Now()
-	q.groupInterjectionsMu.Lock()
-	defer q.groupInterjectionsMu.Unlock()
-	if q.lifecycleGeneration.Load() != generation || !q.wsReady.Load() {
-		return false
-	}
-	if q.groupInterjections == nil {
-		q.groupInterjections = make(map[string]time.Time)
-	}
-	if last, exists := q.groupInterjections[groupID]; exists && now.Sub(last) < groupInterjectionCooldown {
-		return false
-	}
-	q.groupInterjections[groupID] = now
-	if now.Sub(q.groupInterjectionSweepAt) >= 10*time.Minute || len(q.groupInterjections) > 4096 {
-		for id, last := range q.groupInterjections {
-			if now.Sub(last) >= groupInterjectionCooldown {
-				delete(q.groupInterjections, id)
-			}
+func (q *QQChannel) interjectionScheduler() *groupchat.InterjectionScheduler {
+	q.interjectionsOnce.Do(func() {
+		if q.interjections == nil {
+			q.interjections = groupchat.NewInterjectionScheduler(groupchat.InterjectionConfig{})
 		}
-		q.groupInterjectionSweepAt = now
-	}
-	if len(q.groupInterjections) > 4096 {
-		oldestID := ""
-		var oldestAt time.Time
-		for id, at := range q.groupInterjections {
-			if oldestID == "" || at.Before(oldestAt) {
-				oldestID, oldestAt = id, at
-			}
-		}
-		delete(q.groupInterjections, oldestID)
-	}
-	return true
-}
-
-func (q *QQChannel) scheduleGroupInterjection(groupID string, event *entity.SensoryEvent) {
-	if q == nil || event == nil || strings.TrimSpace(groupID) == "" {
-		return
-	}
-	manager := q.debounce
-	if manager == nil {
-		return
-	}
-	generation := q.lifecycleGeneration.Load()
-	q.pendingInterjectionsMu.Lock()
-	defer q.pendingInterjectionsMu.Unlock()
-	if q.pendingInterjections == nil {
-		q.pendingInterjections = make(map[string]*pendingGroupInterjection)
-	}
-	if pending := q.pendingInterjections[groupID]; pending != nil {
-		pending.timer.Stop()
-		pending = &pendingGroupInterjection{event: event, scheduled: time.Now()}
-		q.pendingInterjections[groupID] = pending
-		pending.timer = time.AfterFunc(groupInterjectionQuietPeriod, func() {
-			q.dispatchPendingGroupInterjection(groupID, pending, manager, generation)
-		})
-		return
-	}
-	pending := &pendingGroupInterjection{event: event, scheduled: time.Now()}
-	pending.timer = time.AfterFunc(groupInterjectionQuietPeriod, func() {
-		q.dispatchPendingGroupInterjection(groupID, pending, manager, generation)
 	})
-	q.pendingInterjections[groupID] = pending
-	if len(q.pendingInterjections) > 4096 {
-		oldestID := ""
-		var oldestAt time.Time
-		for id, entry := range q.pendingInterjections {
-			if oldestID == "" || entry.scheduled.Before(oldestAt) {
-				oldestID, oldestAt = id, entry.scheduled
-			}
-		}
-		if oldest := q.pendingInterjections[oldestID]; oldest != nil {
-			oldest.timer.Stop()
-			delete(q.pendingInterjections, oldestID)
-		}
-	}
-}
-
-func (q *QQChannel) dispatchPendingGroupInterjection(groupID string, pending *pendingGroupInterjection, manager *kernel.DebounceManager, generation uint64) {
-	q.pendingInterjectionsMu.Lock()
-	if q.pendingInterjections[groupID] != pending {
-		q.pendingInterjectionsMu.Unlock()
-		return
-	}
-	delete(q.pendingInterjections, groupID)
-	q.pendingInterjectionsMu.Unlock()
-
-	if manager == nil || !q.shouldConsiderGroupInterjection(groupID, generation) {
-		return
-	}
-	if q.lifecycleGeneration.Load() != generation || !q.wsReady.Load() {
-		return
-	}
-	event := pending.event
-	event.GroupInterjection = true
-	event.GroupParticipants = q.recentGroupParticipants(groupID)
-	if !manager.Push(event) {
-		slog.Warn("qq_channel: 群聊插话候选未能进入处理队列", "channelID", groupID, "msgID", event.RawMessageID)
-	}
+	return q.interjections
 }
 
 func (q *QQChannel) cancelPendingGroupInterjection(groupID string) {
-	q.pendingInterjectionsMu.Lock()
-	if pending := q.pendingInterjections[groupID]; pending != nil {
-		pending.timer.Stop()
-		delete(q.pendingInterjections, groupID)
+	if q == nil || q.interjections == nil {
+		return
 	}
-	q.pendingInterjectionsMu.Unlock()
+	q.interjections.Cancel(groupID)
+}
+
+func (q *QQChannel) notifyGroupAddressed(groupID, senderID, senderName string) {
+	if q == nil {
+		return
+	}
+	q.interjectionScheduler().NotifyAddressed(groupID, senderID, senderName)
 }
 
 func (q *QQChannel) ingestUnaddressedGroupMessage(event *entity.SensoryEvent, canInterject bool) bool {
@@ -134,30 +43,41 @@ func (q *QQChannel) ingestUnaddressedGroupMessage(event *entity.SensoryEvent, ca
 		}
 		return true
 	}
+	candidate := &entity.SensoryEvent{
+		Platform:             event.Platform,
+		ChannelID:            event.ChannelID,
+		IsGroup:              event.IsGroup,
+		SenderID:             event.SenderID,
+		SenderName:           event.SenderName,
+		Role:                 event.Role,
+		Content:              event.Content,
+		ReplyContext:         event.ReplyContext,
+		RawMessageID:         event.RawMessageID,
+		HistoryRecordIDs:     append([]int64(nil), event.HistoryRecordIDs...),
+		OccurredAt:           event.OccurredAt,
+		GroupMessageObserved: true,
+	}
 	accepted := q.IngestRaw(event)
 	if accepted && q.dedup != nil {
-		q.dedup.Remember(event.RawMessageID)
+		q.dedup.Remember(candidate.RawMessageID)
 	}
-	if accepted && canInterject {
-		candidate := &entity.SensoryEvent{
-			Platform:             event.Platform,
-			ChannelID:            event.ChannelID,
-			IsGroup:              event.IsGroup,
-			SenderID:             event.SenderID,
-			SenderName:           event.SenderName,
-			Role:                 event.Role,
-			Content:              event.Content,
-			ReplyContext:         event.ReplyContext,
-			RawMessageID:         event.RawMessageID,
-			HistoryRecordIDs:     append([]int64(nil), event.HistoryRecordIDs...),
-			OccurredAt:           event.OccurredAt,
-			GroupMessageObserved: true,
+	if !accepted {
+		return false
+	}
+	manager := q.debounce
+	generation := q.lifecycleGeneration.Load()
+	q.interjectionScheduler().Observe(candidate.ChannelID, candidate, canInterject && manager != nil, func(ev *entity.SensoryEvent) {
+		if q.lifecycleGeneration.Load() != generation || !q.wsReady.Load() {
+			return
 		}
-		q.scheduleGroupInterjection(event.ChannelID, candidate)
-	} else {
-		q.cancelPendingGroupInterjection(event.ChannelID)
-	}
-	return accepted
+		if dbParticipants := q.recentGroupParticipants(ev.ChannelID); len(dbParticipants) > 0 {
+			ev.GroupParticipants = dbParticipants
+		}
+		if !manager.Push(ev) {
+			slog.Warn("qq_channel: 群聊插话候选未能进入处理队列", "channelID", ev.ChannelID, "msgID", ev.RawMessageID)
+		}
+	})
+	return true
 }
 
 func (q *QQChannel) recentGroupParticipants(groupID string) []core.GroupParticipant {
@@ -174,14 +94,18 @@ func (q *QQChannel) recentGroupParticipants(groupID string) []core.GroupParticip
 	seen := make(map[string]struct{}, len(recent))
 	participants := make([]core.GroupParticipant, 0, len(recent))
 	for _, message := range recent {
-		if message.IsBot || message.UserID == "" || strings.TrimSpace(message.Name) == "" {
+		if message.IsBot || message.UserID == "" {
+			continue
+		}
+		name := core.NormalizeDisplayName(message.Name, message.UserID)
+		if name == "" {
 			continue
 		}
 		if _, exists := seen[message.UserID]; exists {
 			continue
 		}
 		seen[message.UserID] = struct{}{}
-		participants = append(participants, core.GroupParticipant{ID: message.UserID, Name: message.Name})
+		participants = append(participants, core.GroupParticipant{ID: message.UserID, Name: name})
 	}
 	return participants
 }
