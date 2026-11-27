@@ -12,6 +12,7 @@ import (
 
 	"daidai/internal/db"
 	"daidai/internal/entity"
+	"daidai/internal/groupchat"
 	"daidai/internal/kernel"
 	"daidai/internal/media"
 )
@@ -86,10 +87,10 @@ type QQChannel struct {
 	knownGroupBotsMu         sync.RWMutex
 	knownGroupBots           map[string]map[string]string
 	historyRecorder          func(context.Context, *entity.SensoryEvent) error
-	voiceModeMu              sync.RWMutex
-	voiceMode                string
-	groupActiveSessionsMu    sync.Mutex
-	groupActiveSessions      map[string]*groupActiveSession
+	voiceModeMu       sync.RWMutex
+	voiceMode         string
+	continuationsOnce sync.Once
+	continuations     *groupchat.ContinuationTracker
 }
 
 // SetHistoryRecorder installs the callback used to persist each raw inbound
@@ -130,13 +131,13 @@ func NewQQChannel(cfg Config, database *db.Manager, immune *entity.ImmuneSystem)
 	cache := newMsgCache(1000, database)
 	cli := NewClient(cfg.AppID, cfg.Secret)
 	channel := &QQChannel{
-		cfg:                 cfg,
-		client:              cli,
-		immune:              immune,
-		msgCache:            cache,
-		dedup:               newDedupCache(2000),
-		database:            database,
-		groupActiveSessions: make(map[string]*groupActiveSession),
+		cfg:           cfg,
+		client:        cli,
+		immune:        immune,
+		msgCache:      cache,
+		dedup:         newDedupCache(2000),
+		database:      database,
+		continuations: groupchat.NewContinuationTracker(),
 	}
 	cli.SetOnMessageSent(func(msgID, refIndex, targetType, targetID string, metadata QuoteMetadata) {
 		// If QQ reflects an outbound group message through GROUP_MESSAGE_CREATE,
@@ -355,9 +356,9 @@ func (q *QQChannel) Stop(ctx context.Context) error {
 		delete(q.pendingInterjections, groupID)
 	}
 	q.pendingInterjectionsMu.Unlock()
-	q.groupActiveSessionsMu.Lock()
-	q.groupActiveSessions = nil
-	q.groupActiveSessionsMu.Unlock()
+	if q.continuations != nil {
+		q.continuations.Clear()
+	}
 	if q.debounce != nil {
 		if err := q.debounce.Shutdown(ctx); err != nil && firstErr == nil {
 			firstErr = err

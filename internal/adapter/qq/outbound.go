@@ -158,8 +158,9 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 			q.commitPassiveReplyAttempt(budget)
 			reservedCount--
 		}
+		quoteRef := sentParts == 0 && u.IsGroup && !u.Proactive && u.QuoteMsgID != "" && !(u.GroupInterjection && len(u.MentionUserIDs) == 0)
 		if len(part.image) == 0 {
-			return q.client.sendMessageWithContext(ctx, targetType, u.ChannelID, wireText, u.QuoteMsgID, QuoteMetadata{Text: part.text, Kind: qqQuoteText, TextComplete: true})
+			return q.client.sendMessageWithReference(ctx, targetType, u.ChannelID, wireText, u.QuoteMsgID, quoteRef, QuoteMetadata{Text: part.text, Kind: qqQuoteText, TextComplete: true})
 		}
 		metadata := mediaQuoteMetadata(part.text)
 		if source := strings.TrimSpace(part.source); source != "" {
@@ -169,7 +170,7 @@ func (q *QQChannel) Transmit(ctx context.Context, u *entity.Utterance) (sendErr 
 				metadata.Text = strings.TrimSpace(source + "\n\n" + part.text)
 			}
 		}
-		return q.client.sendMediaMessage(ctx, targetType, u.ChannelID, wireText, part.image, u.QuoteMsgID, metadata)
+		return q.client.sendMediaMessageWithReference(ctx, targetType, u.ChannelID, wireText, part.image, u.QuoteMsgID, quoteRef, metadata)
 	}
 
 	deliveredText := func() string {

@@ -2,7 +2,9 @@ package qq
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"daidai/internal/entity"
@@ -35,7 +37,16 @@ func (c *Client) sendMessage(ctx context.Context, targetType, targetID, content,
 	return c.sendMessageWithContext(ctx, targetType, targetID, content, msgID, QuoteMetadata{Text: content, Kind: qqQuoteText, TextComplete: true})
 }
 
+func shouldRetryWithoutMessageReference(err error) bool {
+	var rejection *entity.DeliveryRejection
+	return errors.As(err, &rejection) && rejection.After == 0
+}
+
 func (c *Client) sendMessageWithContext(ctx context.Context, targetType, targetID, content, msgID string, metadata QuoteMetadata) error {
+	return c.sendMessageWithReference(ctx, targetType, targetID, content, msgID, false, metadata)
+}
+
+func (c *Client) sendMessageWithReference(ctx context.Context, targetType, targetID, content, msgID string, quoteRef bool, metadata QuoteMetadata) error {
 	url := fmt.Sprintf("%s/v2/%s/%s/messages", apiBaseURL, targetType, targetID)
 
 	mdPayload := map[string]any{
@@ -48,8 +59,21 @@ func (c *Client) sendMessageWithContext(ctx context.Context, targetType, targetI
 	if msgID != "" {
 		mdPayload["msg_id"] = msgID
 	}
+	usedReference := quoteRef && targetType == "groups" && msgID != ""
+	if usedReference {
+		mdPayload["message_reference"] = map[string]any{
+			"message_id":               msgID,
+			"ignore_get_message_error": true,
+		}
+	}
 
 	resp, err := c.doPostJSON(ctx, url, mdPayload)
+	if err != nil && usedReference && ctx.Err() == nil && shouldRetryWithoutMessageReference(err) {
+		slog.Warn("qq: 群聊引用回复被服务端拒绝，降级为普通被动回复重试", "targetID", targetID, "msgID", msgID, "err", err)
+		delete(mdPayload, "message_reference")
+		mdPayload["msg_seq"] = c.nextSeq()
+		resp, err = c.doPostJSON(ctx, url, mdPayload)
+	}
 	if err == nil {
 		metadata.Text = strings.TrimSpace(metadata.Text)
 		if metadata.Kind == "" {
@@ -98,6 +122,10 @@ func (c *Client) SendC2CMediaMessageWithContext(ctx context.Context, userOpenID,
 }
 
 func (c *Client) sendMediaMessage(ctx context.Context, targetType, targetID, content string, imageData []byte, msgID string, metadata QuoteMetadata) error {
+	return c.sendMediaMessageWithReference(ctx, targetType, targetID, content, imageData, msgID, false, metadata)
+}
+
+func (c *Client) sendMediaMessageWithReference(ctx context.Context, targetType, targetID, content string, imageData []byte, msgID string, quoteRef bool, metadata QuoteMetadata) error {
 	if metadata.Kind == "" || metadata.Kind == qqQuoteText {
 		metadata.Kind = qqQuoteImage
 		if strings.TrimSpace(content) != "" {
@@ -123,8 +151,21 @@ func (c *Client) sendMediaMessage(ctx context.Context, targetType, targetID, con
 	if msgID != "" {
 		payload["msg_id"] = msgID
 	}
+	usedReference := quoteRef && targetType == "groups" && msgID != ""
+	if usedReference {
+		payload["message_reference"] = map[string]any{
+			"message_id":               msgID,
+			"ignore_get_message_error": true,
+		}
+	}
 
 	resp, err := c.doPostJSON(ctx, url, payload)
+	if err != nil && usedReference && ctx.Err() == nil && shouldRetryWithoutMessageReference(err) {
+		slog.Warn("qq: 群聊富媒体引用回复被服务端拒绝，降级为普通被动回复重试", "targetID", targetID, "msgID", msgID, "err", err)
+		delete(payload, "message_reference")
+		payload["msg_seq"] = c.nextSeq()
+		resp, err = c.doPostJSON(ctx, url, payload)
+	}
 	if err == nil {
 		metadata.Text = strings.TrimSpace(metadata.Text)
 		if metadata.Text == "" && strings.TrimSpace(content) != "" {

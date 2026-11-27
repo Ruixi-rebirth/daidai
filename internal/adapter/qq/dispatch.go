@@ -9,6 +9,7 @@ import (
 	"daidai/internal/config"
 	"daidai/internal/core"
 	"daidai/internal/entity"
+	"daidai/internal/groupchat"
 	"daidai/internal/media"
 	"daidai/internal/runtime"
 )
@@ -98,10 +99,12 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 		directedElsewhere := isGroup && (replyCtx != nil || qqDirectedAtOtherMember(d, content))
 		namedBot := config.BotName() != "" && strings.Contains(content, config.BotName())
 		botAddressed := botMentioned || quotedBot || (isGroup && !directedElsewhere && namedBot && !strings.HasPrefix(strings.TrimSpace(content), "/"))
-		groupContinuation := false
+		continuationDecision := groupchat.ContinuationNone
 		if isGroup && !botAddressed {
-			groupContinuation = q.evaluateGroupContinuation(convID, userID, content, d, replyCtx, quotedBot)
+			continuationDecision = q.evaluateGroupContinuation(convID, userID, content, d, replyCtx, quotedBot)
 		}
+		groupContinuation := continuationDecision != groupchat.ContinuationNone
+		groupContinuationAmbiguous := continuationDecision == groupchat.ContinuationAmbiguous
 		if isGroup && runtime.IsAdapterSlashCommand("qq", content) {
 			q.handleGroupBotRegistryCommand(convID, msgID, userID, role, content, d)
 			return true
@@ -201,9 +204,10 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 			ReplyContext:          replyCtx,
 			RawMessageID:          msgID,
 			OccurredAt:            time.Now(),
-			GroupMessageObserved:  groupContinuation,
-			GroupContinuation:     groupContinuation,
-			MentionedUsers:        mentionedUsers,
+			GroupMessageObserved:       groupContinuation,
+			GroupContinuation:          groupContinuation,
+			GroupContinuationAmbiguous: groupContinuationAmbiguous,
+			MentionedUsers:             mentionedUsers,
 		})
 		if !accepted {
 			return false

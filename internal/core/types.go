@@ -159,7 +159,8 @@ type SensoryEvent struct {
 	OccurredAt            time.Time     // 事件发生时间
 	GroupMessageObserved  bool          // 未 @ 机器人的 QQ 群消息；写入本群历史，但默认不触发认知回复
 	GroupInterjection     bool          // 当前未 @ 群消息通过低频判断，可尝试生成一条短回复
-	GroupContinuation     bool          // 免 @ 续聊候选，须先确认当前发言对象
+	GroupContinuation          bool          // 免 @ 续聊（由活跃对话会话触发）
+	GroupContinuationAmbiguous bool          // 中间存在其他群友插话，须先确认当前发言对象
 	GroupExpression       string        // 已核验的群内表达类型：chatter/dream；仅用于交付后的记忆处理
 	ReplyTargetID         string        // 本轮回复实际指向的对象 ID；群聊未点名主动发言时为空
 	SkipFactExtraction    bool          // 本轮操作不参与自动提炼个人事实与熟悉度计数

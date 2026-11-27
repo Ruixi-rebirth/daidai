@@ -225,10 +225,11 @@ func (q *QQChannel) transmitInlineImages(ctx context.Context, u *entity.Utteranc
 			}
 		}
 		attempted = true
+		quoteRef := index == 0 && u.IsGroup && !u.Proactive && u.QuoteMsgID != "" && !(u.GroupInterjection && len(u.MentionUserIDs) == 0)
 		if len(part.image) > 0 {
-			err = q.client.sendMediaMessage(ctx, targetType, u.ChannelID, part.content, part.image, u.QuoteMsgID, metadata)
+			err = q.client.sendMediaMessageWithReference(ctx, targetType, u.ChannelID, part.content, part.image, u.QuoteMsgID, quoteRef, metadata)
 		} else {
-			err = q.client.sendMessageWithContext(ctx, targetType, u.ChannelID, part.content, u.QuoteMsgID, metadata)
+			err = q.client.sendMessageWithReference(ctx, targetType, u.ChannelID, part.content, u.QuoteMsgID, quoteRef, metadata)
 		}
 		if err != nil {
 			var unsent *entity.UnsentError

@@ -106,7 +106,7 @@ func (c *Cortex) Think(ctx context.Context, event *entity.SensoryEvent) (out *en
 		return c.thinkGroupInterjection(ctx, event)
 	}
 	if event.GroupContinuation {
-		if !c.addressedGroupContinuation(ctx, event) {
+		if event.GroupContinuationAmbiguous && !c.addressedGroupContinuation(ctx, event) {
 			return nil, nil
 		}
 		event.GroupMessageObserved = false

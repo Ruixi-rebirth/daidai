@@ -20,11 +20,12 @@ func (m *continuationModel) Chat(_ context.Context, messages []core.ChatMessage,
 	return m.target, nil
 }
 
-func TestGroupContinuationChecksAddresseeBeforeAnswering(t *testing.T) {
+func TestGroupContinuationChecksAddresseeWhenAmbiguous(t *testing.T) {
 	ctx := context.Background()
 	cortex, _, store, event := expressionFixture(t)
 	event.GroupInterjection = false
 	event.GroupContinuation = true
+	event.GroupContinuationAmbiguous = true
 	event.HistoryRecordIDs = nil
 	if _, err := store.Database.LogBotReply(ctx, event.Platform, "group", event.ChannelID, "这是上一条机器人回复", event.SenderID, 0); err != nil {
 		t.Fatal(err)
@@ -44,5 +45,26 @@ func TestGroupContinuationChecksAddresseeBeforeAnswering(t *testing.T) {
 		if strings.Contains(msg.Content, "reply_target") || strings.Contains(msg.Content, "这条回复的对象") {
 			t.Fatal("the normal reply model saw continuation-only metadata")
 		}
+	}
+}
+
+func TestGroupContinuationDirectSkipsSecondaryClassifier(t *testing.T) {
+	ctx := context.Background()
+	cortex, _, store, event := expressionFixture(t)
+	event.GroupInterjection = false
+	event.GroupContinuation = true
+	event.GroupContinuationAmbiguous = false
+	event.Content = "我要10 11"
+	event.HistoryRecordIDs = nil
+	if _, err := store.Database.LogBotReply(ctx, event.Platform, "group", event.ChannelID, "在呢，咋啦", event.SenderID, 0); err != nil {
+		t.Fatal(err)
+	}
+	// Even if the secondary classifier would return "skip", a direct clean-stream
+	// continuation goes straight to the main brain without being dropped.
+	model := &continuationModel{target: "skip", expressionModel: expressionModel{response: "来啦，第 10 和 11 条在这。"}}
+	cortex.llm = model
+	out, err := cortex.Think(ctx, event)
+	if out == nil || err != nil || model.calls != 1 || out.Text != "来啦，第 10 和 11 条在这。" {
+		t.Fatalf("direct continuation should reach main brain directly: out=%v err=%v calls=%d", out, err, model.calls)
 	}
 }
