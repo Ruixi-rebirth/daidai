@@ -112,8 +112,9 @@ func (m *Manager) RecentMessagesBefore(ctx context.Context, platform, chatType, 
 }
 
 // SampleMessagesInChatSince samples evenly across every message in the given
-// time range while keeping the returned payload bounded. Session reset
-// boundaries are applied before sampling.
+// time range while keeping the returned payload bounded. Private chats respect
+// session reset boundaries, while group chats keep the full day's archive so
+// clearing working context does not truncate daily group summaries.
 func (m *Manager) SampleMessagesInChatSince(ctx context.Context, platform, chatType, convID string, since time.Time, limit int) ([]StoredMessage, error) {
 	if chatType != "private" && chatType != "group" {
 		return nil, fmt.Errorf("chatType must be private or group")
@@ -132,9 +133,12 @@ func (m *Manager) SampleMessagesInChatSince(ctx context.Context, platform, chatT
 	if err != nil {
 		return nil, err
 	}
-	resetID, err := sessionHistoryBoundary(ctx, db, chatType, convID)
-	if err != nil {
-		return nil, err
+	var resetID int64
+	if chatType != "group" {
+		resetID, err = sessionHistoryBoundary(ctx, db, chatType, convID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	where := `platform = ? AND chat_type = ? AND conv_id = ? AND created_at >= ? AND id > ?`
 	args := []any{limit, p, chatType, convID, since.UnixMilli(), resetID}

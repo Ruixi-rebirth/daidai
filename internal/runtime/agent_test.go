@@ -655,10 +655,44 @@ func TestGroupSlashCommandsDecoupleWorkspacesAndTickets(t *testing.T) {
 		t.Fatalf("group /status leaked workspace or ticket details: %s", statusReply)
 	}
 
-	// Partner /reset in group is also restricted to private chat so daily group summaries stay intact.
-	resetReply := partnerGroup("/reset")
-	if !strings.Contains(resetReply, "私聊") || strings.Contains(resetReply, "secret-project") || strings.Contains(resetReply, base) {
-		t.Fatalf("group /reset should direct partner to private chat without leaking workspace: %s", resetReply)
+	// Partner /clear and /reset in group clear group working context without touching workspace or private history.
+	if _, err := store.LogInboundMessage(ctx, "qq", "group", "group-1", "guest", "群友", "群里旧上下文", "msg-g1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LogInboundMessage(ctx, "qq", "private", "owner-dm", "owner", "主人", "私聊保留消息", "msg-p1"); err != nil {
+		t.Fatal(err)
+	}
+	clearReply := partnerGroup("/clear")
+	if !strings.Contains(clearReply, "当前群聊上下文已清空") || strings.Contains(clearReply, "secret-project") || strings.Contains(clearReply, base) {
+		t.Fatalf("group /clear should reset group context without leaking workspace: %s", clearReply)
+	}
+	groupMsgs, err := store.RecentMessages(ctx, "qq", "group", "group-1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groupMsgs) != 0 {
+		t.Fatalf("expected group /clear to hide prior group messages, got %+v", groupMsgs)
+	}
+	privateMsgs, err := store.RecentMessages(ctx, "qq", "private", "owner-dm", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(privateMsgs) != 1 {
+		t.Fatalf("expected group /clear to preserve private messages, got %+v", privateMsgs)
+	}
+
+	// Guest /clear in group is denied by role.
+	channel.sentUtter = nil
+	agent.Process(ctx, &entity.SensoryEvent{
+		Platform:  "qq",
+		ChannelID: "group-1",
+		IsGroup:   true,
+		SenderID:  "guest",
+		Role:      entity.RoleGuest,
+		Content:   "/clear",
+	})
+	if channel.sentUtter == nil || !strings.Contains(channel.sentUtter.Text, "权限不足") {
+		t.Fatalf("expected guest /clear in group to be denied by role, got: %+v", channel.sentUtter)
 	}
 
 	// Partner private /task with no args automatically displays the latest ticket and resolved worker.

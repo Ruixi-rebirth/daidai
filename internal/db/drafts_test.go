@@ -97,3 +97,46 @@ func TestResetConversationClearsDraftsOnlyInSelectedChat(t *testing.T) {
 		}
 	}
 }
+
+func TestSampleMessagesInChatSincePreservesGroupArchiveAfterReset(t *testing.T) {
+	ctx := context.Background()
+	store := NewManager(t.TempDir())
+	t.Cleanup(func() { _ = store.Close() })
+
+	since := time.Now().Add(-time.Hour)
+	if _, err := store.LogInboundMessage(ctx, "qq", "group", "g1", "u1", "甲", "群里上午的讨论", "m-g1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LogInboundMessage(ctx, "qq", "private", "p1", "u1", "甲", "私聊上午的讨论", "m-p1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ResetConversation("qq", "group", "g1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ResetConversation("qq", "private", "p1"); err != nil {
+		t.Fatal(err)
+	}
+
+	groupRecent, err := store.RecentMessages(ctx, "qq", "group", "g1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groupRecent) != 0 {
+		t.Fatalf("expected group RecentMessages to respect reset boundary, got %+v", groupRecent)
+	}
+	groupSample, err := store.SampleMessagesInChatSince(ctx, "qq", "group", "g1", since, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groupSample) != 1 || groupSample[0].Text != "群里上午的讨论" {
+		t.Fatalf("expected group daily summary sampling to preserve pre-reset messages, got %+v", groupSample)
+	}
+
+	privateSample, err := store.SampleMessagesInChatSince(ctx, "qq", "private", "p1", since, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(privateSample) != 0 {
+		t.Fatalf("expected private daily summary sampling to respect reset boundary, got %+v", privateSample)
+	}
+}

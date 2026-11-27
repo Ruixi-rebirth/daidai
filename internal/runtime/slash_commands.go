@@ -49,7 +49,7 @@ func slashCommandRegistry(a *SuperAgent) []slashCommand {
 			return ok
 		}, handle: a.handleContinueCommand},
 		{section: "对话与会话", usage: "/stop [工单编号]", help: "中断当前思考；私聊中还可中断后台工单", access: "仅核心搭档", match: prefix("/stop"), handle: a.handleStopCommand},
-		{section: "对话与会话", usage: "/reset · /new · /clear", help: "重开当前私聊会话并清除近期历史", access: "仅私聊；核心搭档", match: exact("/reset", "/new", "/clear", "/ws clear", "/ws reset"), handle: a.handleResetCommand},
+		{section: "对话与会话", usage: "/reset · /new · /clear", help: "清空当前会话近期对话记忆（私聊同时重开 AGY 工程会话）", access: "仅核心搭档", match: exact("/reset", "/new", "/clear", "/ws clear", "/ws reset"), handle: a.handleResetCommand},
 		{section: "状态与模型", usage: "/status · /sysinfo", help: "查看运行状态与系统指标（私聊含工作空间与活跃工单）", access: "仅核心搭档", match: exact("/status", "/sysinfo"), handle: a.handleStatusCommand},
 		{section: "状态与模型", usage: "/model", help: "查看当前对话使用的模型；此命令不会切换模型", access: "仅核心搭档", match: exact("/model"), handle: a.handleModelCommand},
 		{section: "状态与模型", usage: "/models", help: "列出可用模型", access: "仅核心搭档", match: exact("/models"), handle: a.handleModelsCommand},

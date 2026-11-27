@@ -236,13 +236,39 @@ func (a *SuperAgent) handleStopCommand(ctx context.Context, event *entity.Sensor
 	a.replyText(ctx, event, msg)
 }
 
-func (a *SuperAgent) handleResetCommand(ctx context.Context, event *entity.SensoryEvent, _ string) {
+func (a *SuperAgent) handleResetCommand(ctx context.Context, event *entity.SensoryEvent, content string) {
 	if err := a.delegationPermissionError(event.Role); err != nil {
 		a.replyText(ctx, event, err.Error())
 		return
 	}
 	if event.IsGroup {
-		a.replyText(ctx, event, fmt.Sprintf("群聊采用自动滚动上下文，不支持在群内重置（避免误清今日群聊总结记录）；如需重开工程会话，请在与%s的私聊中使用 `/reset`。", config.BotName()))
+		if strings.HasPrefix(strings.TrimSpace(content), "/ws ") {
+			a.replyText(ctx, event, fmt.Sprintf("工作空间和工程会话仅限在与%s的私聊中重置；如需清空当前群聊上下文，请使用 `/clear`。", config.BotName()))
+			return
+		}
+		a.cancelThinkingSession(event)
+		unlock := a.lockSession(event)
+		defer unlock()
+		if a.database == nil {
+			a.replyText(ctx, event, "【群聊上下文清空失败】\n近期对话历史存储未配置。")
+			return
+		}
+		if err := a.database.ResetConversation(event.Platform, "group", event.ChannelID); err != nil {
+			slog.Error("superagent: 清空群聊上下文失败", "platform", event.Platform, "channelID", event.ChannelID, "err", err)
+			a.replyText(ctx, event, "【群聊上下文清空失败】\n近期对话历史未能重置，请稍后重试。")
+			return
+		}
+		a.clearSessionReplyContinuations(event)
+		if attachmentCleaner, ok := a.Cognition.(interface{ ClearPendingAttachments(*entity.SensoryEvent) }); ok {
+			attachmentCleaner.ClearPendingAttachments(event)
+		}
+		if a.OnSessionReset != nil {
+			if err := a.OnSessionReset(ctx, event); err != nil {
+				a.replyText(ctx, event, "近期群聊对话已清空，但早报指代上下文未能清除，请稍后重试。")
+				return
+			}
+		}
+		a.replyText(ctx, event, "【当前群聊上下文已清空】\n已重置本群的近期对话记忆与历史检索起点，今日群聊总结、长期画像与私聊工作空间不受影响。")
 		return
 	}
 	a.cancelThinkingSession(event)
