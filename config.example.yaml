@@ -16,20 +16,21 @@ telegram:
   owner_username: "YOUR_TELEGRAM_USERNAME" # 每条消息按 Telegram 用户名核对，不区分大小写，可带 @ 前缀
 
 llm:
-  base_url: "https://api.deepseek.com/v1"
-  api_key: "YOUR_DEEPSEEK_API_KEY"
-  model: "deepseek-chat"
-  # 可选：按顺序尝试的 OpenAI 兼容对话兜底链（位于 AGY 之后、上方基础 API 之前；适合接免费 GLM 等）
-  fallbacks: []
-  #   - name: "GLM"
-  #     base_url: "https://open.bigmodel.cn/api/paas/v4"
-  #     api_key: "YOUR_ZHIPU_API_KEY"
-  #     model: "glm-4.7-flash"
+  # 按顺序尝试的 OpenAI 兼容对话兜底链（位于 AGY 之后；排在前面的免费模型优先，后面的作为最终兜底）
+  fallbacks:
+    - name: "GLM"
+      base_url: "https://open.bigmodel.cn/api/paas/v4"
+      api_key: "YOUR_ZHIPU_API_KEY"
+      model: "glm-4.7-flash"
+    - name: "DeepSeek"
+      base_url: "https://api.deepseek.com/v1"
+      api_key: "YOUR_DEEPSEEK_API_KEY"
+      model: "deepseek-chat"
   # 可选：纯文生图备用 API（兼容 /images/generations，如智谱 cogview-3-flash、硅基流动 Kolors 等）
   image_fallback:
-    base_url: ""
-    api_key: ""
-    model: ""
+    base_url: "https://open.bigmodel.cn/api/paas/v4"
+    api_key: "YOUR_ZHIPU_API_KEY"
+    model: "cogview-3-flash"
   embedding:
     base_url: "https://api.siliconflow.cn/v1"
     api_key: "YOUR_EMBEDDING_API_KEY"

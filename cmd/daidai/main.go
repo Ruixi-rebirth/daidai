@@ -103,12 +103,15 @@ func run() int {
 	// 启动本机公网 IP 自动探测与全局出站脱敏护栏
 	core.InitPublicIPGuard(rootCtx)
 
-	// 初始化底层大语言模型驱动 (API 通道与 AGY 通道)
-	apiProvider := llm.NewOpenAIProvider(llm.OpenAIConfig{
-		BaseURL: cfg.LLM.BaseURL,
-		APIKey:  cfg.LLM.APIKey,
-		Model:   cfg.LLM.Model,
-	})
+	// 初始化底层大语言模型驱动 (可选旧版单 API 通道与 AGY 通道)
+	var legacyAPIProvider core.LLMProvider
+	if cfg.LLM.BaseURL != "" && cfg.LLM.APIKey != "" {
+		legacyAPIProvider = llm.NewOpenAIProvider(llm.OpenAIConfig{
+			BaseURL: cfg.LLM.BaseURL,
+			APIKey:  cfg.LLM.APIKey,
+			Model:   cfg.LLM.Model,
+		})
+	}
 
 	agyCommand, agyDesc, defaultWorkDir, err := resolveAGYRuntime(cfg)
 	if err != nil {
@@ -138,7 +141,9 @@ func run() int {
 		configuredFallbacks = append(configuredFallbacks, fallbackEntry{channel: ch, cfg: fb})
 		fallbackChannels = append(fallbackChannels, ch)
 	}
-	fallbackChannels = append(fallbackChannels, "API")
+	if legacyAPIProvider != nil {
+		fallbackChannels = append(fallbackChannels, "API")
+	}
 
 	// 组装统一异构多心智开放路由器 (支持运行时动态探测各通道可用模型列表)
 	mindRouter := llm.NewMindRouter(llm.MindRouterConfig{
@@ -155,13 +160,17 @@ func run() int {
 		SessionDB:   database,
 	})
 
-	// 按配置顺序挂载 OpenAI 兼容兜底通道（位于 AGY 之后、基础 API 之前）
+	// 按配置顺序挂载 OpenAI 兼容兜底通道
+	var primaryAPIFallback core.LLMProvider
 	for _, entry := range configuredFallbacks {
 		fbProvider := llm.NewOpenAIProvider(llm.OpenAIConfig{
 			BaseURL: entry.cfg.BaseURL,
 			APIKey:  entry.cfg.APIKey,
 			Model:   entry.cfg.Model,
 		})
+		if primaryAPIFallback == nil {
+			primaryAPIFallback = fbProvider
+		}
 		mindRouter.RegisterChannel(llm.ChannelRegistration{
 			Channel:  entry.channel,
 			Provider: fbProvider,
@@ -175,11 +184,16 @@ func run() int {
 		})
 	}
 
-	// 挂载 API 通道 (自动调用 OpenAI 兼容 GET /models 探测可用模型池)
-	mindRouter.RegisterChannel(llm.ChannelRegistration{
-		Channel:  "API",
-		Provider: apiProvider,
-	})
+	// 兼容旧版顶层 llm.base_url / api_key / model 配置
+	if legacyAPIProvider != nil {
+		if primaryAPIFallback == nil {
+			primaryAPIFallback = legacyAPIProvider
+		}
+		mindRouter.RegisterChannel(llm.ChannelRegistration{
+			Channel:  "API",
+			Provider: legacyAPIProvider,
+		})
+	}
 
 	// 挂载 AGY 自主智能体通道 (自动调用 `agy models` 实时探测可用模型与思考强度)
 	mindRouter.RegisterChannel(llm.ChannelRegistration{
@@ -187,7 +201,12 @@ func run() int {
 		Provider: agyMind,
 	})
 
-	memEngine := newMemoryEngine(cfg, database, apiProvider)
+	// 后台记忆提取优先走兜底链首通道（如免费 GLM），避免消耗付费 API 或 AGY 额度
+	memoryLLM := primaryAPIFallback
+	if memoryLLM == nil {
+		memoryLLM = mindRouter
+	}
+	memEngine := newMemoryEngine(cfg, database, memoryLLM)
 
 	mediaSources := &media.Sources{}
 	visEngine := vision.NewEngine(vision.Config{
@@ -264,7 +283,7 @@ func run() int {
 				slog.Warn("关闭早报归档失败", "err", closeErr)
 			}
 		}()
-		briefingService, err = briefing.New(rootCtx, briefingStore, cfg.Briefing, apiProvider, channelRegistry)
+		briefingService, err = briefing.New(rootCtx, briefingStore, cfg.Briefing, memoryLLM, channelRegistry)
 		if err != nil {
 			slog.Error("初始化早报服务失败", "err", err)
 			return 1
