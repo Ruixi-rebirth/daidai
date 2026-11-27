@@ -399,6 +399,10 @@ func (t *ImageTool) Execute(ctx context.Context, rawArgs json.RawMessage) (*core
 	if cleanupAGY != nil {
 		defer cleanupAGY()
 	}
+	// Remove input reference images before scanning workDir so output recovery never returns an input reference.
+	for _, ref := range refs {
+		_ = os.Remove(ref.Path)
+	}
 	if execErr != nil {
 		slog.Warn("image_tool: 生成图片失败", "err", execErr)
 		return &core.ToolResult{
