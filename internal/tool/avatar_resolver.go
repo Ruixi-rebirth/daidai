@@ -73,6 +73,15 @@ func isSelfTarget(target string) bool {
 	}
 }
 
+func isQuotedAuthorTarget(target string) bool {
+	switch strings.ToLower(strings.TrimSpace(target)) {
+	case "quoted", "reply", "他", "她", "ta", "对方", "这个人", "这位":
+		return true
+	default:
+		return false
+	}
+}
+
 func matchesMemberTarget(target, id, name string) bool {
 	t := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(target, "@"), "＠"))
 	if t == "" {
@@ -105,9 +114,11 @@ func (r *AvatarResolver) resolveMember(ctx context.Context, event *entity.Sensor
 		}
 	}
 
-	// 3. Author of the quoted message.
-	if event.ReplyContext != nil && matchesMemberTarget(trimmed, event.ReplyContext.SenderID, event.ReplyContext.SenderName) && strings.TrimSpace(event.ReplyContext.SenderID) != "" {
-		return strings.TrimSpace(event.ReplyContext.SenderID), strings.TrimSpace(event.ReplyContext.SenderName), nil
+	// 3. Author of the quoted message (by explicit match or pronoun like "他"/"对方").
+	if event.ReplyContext != nil && strings.TrimSpace(event.ReplyContext.SenderID) != "" {
+		if isQuotedAuthorTarget(trimmed) || matchesMemberTarget(trimmed, event.ReplyContext.SenderID, event.ReplyContext.SenderName) {
+			return strings.TrimSpace(event.ReplyContext.SenderID), strings.TrimSpace(event.ReplyContext.SenderName), nil
+		}
 	}
 
 	// 4. Known recent group participants attached to the event.
@@ -117,7 +128,7 @@ func (r *AvatarResolver) resolveMember(ctx context.Context, event *entity.Sensor
 		}
 	}
 
-	// 5. Recent conversation history in SQLite (newest first).
+	// 5. Recent conversation history in SQLite (newest first), rejecting ambiguous nicknames.
 	if r.database != nil && event.ChannelID != "" {
 		chatType := "private"
 		if event.IsGroup {
@@ -125,26 +136,51 @@ func (r *AvatarResolver) resolveMember(ctx context.Context, event *entity.Sensor
 		}
 		msgs, err := r.database.RecentMessages(ctx, event.Platform, chatType, event.ChannelID, 200)
 		if err == nil {
-			// Pass 1: exact (case-insensitive) match on user_id or name.
-			for i := len(msgs) - 1; i >= 0; i-- {
-				m := msgs[i]
-				if m.IsBot || strings.TrimSpace(m.UserID) == "" {
-					continue
-				}
-				if matchesMemberTarget(trimmed, m.UserID, m.Name) {
-					return strings.TrimSpace(m.UserID), strings.TrimSpace(m.Name), nil
-				}
+			type matchedMember struct {
+				id   string
+				name string
 			}
-			// Pass 2: substring match on nickname when target is at least 1 rune.
+			collectMatches := func(match func(id, name string) bool) []matchedMember {
+				seen := make(map[string]struct{})
+				var matches []matchedMember
+				for i := len(msgs) - 1; i >= 0; i-- {
+					m := msgs[i]
+					uid := strings.TrimSpace(m.UserID)
+					if m.IsBot || uid == "" {
+						continue
+					}
+					if _, exists := seen[uid]; exists {
+						continue
+					}
+					if match(uid, m.Name) {
+						seen[uid] = struct{}{}
+						matches = append(matches, matchedMember{id: uid, name: strings.TrimSpace(m.Name)})
+					}
+				}
+				return matches
+			}
+
+			// Pass 1: exact (case-insensitive) match on user_id or name.
+			exact := collectMatches(func(id, name string) bool {
+				return matchesMemberTarget(trimmed, id, name)
+			})
+			if len(exact) == 1 {
+				return exact[0].id, exact[0].name, nil
+			}
+			if len(exact) > 1 {
+				return "", "", fmt.Errorf("当前会话中最近有 %d 位叫「%s」的成员，请 @ 一下或引用你想指定的那位", len(exact), trimmed)
+			}
+
+			// Pass 2: substring match on nickname.
 			lowerTarget := strings.ToLower(trimmed)
-			for i := len(msgs) - 1; i >= 0; i-- {
-				m := msgs[i]
-				if m.IsBot || strings.TrimSpace(m.UserID) == "" || strings.TrimSpace(m.Name) == "" {
-					continue
-				}
-				if strings.Contains(strings.ToLower(strings.TrimSpace(m.Name)), lowerTarget) {
-					return strings.TrimSpace(m.UserID), strings.TrimSpace(m.Name), nil
-				}
+			partial := collectMatches(func(_, name string) bool {
+				return name != "" && strings.Contains(strings.ToLower(strings.TrimSpace(name)), lowerTarget)
+			})
+			if len(partial) == 1 {
+				return partial[0].id, partial[0].name, nil
+			}
+			if len(partial) > 1 {
+				return "", "", fmt.Errorf("当前会话中匹配「%s」的成员有 %d 位，请 @ 一下或引用你想指定的那位", trimmed, len(partial))
 			}
 		}
 	}

@@ -81,6 +81,29 @@ func TestAvatarResolver_ResolvesSelfMentionQuoteAndHistory(t *testing.T) {
 	if err != nil || name != "月" || ref != "qq-avatar:OPENID_YUE" {
 		t.Fatalf("history resolve = (%q, %q, %v)", name, ref, err)
 	}
+
+	// Pronoun targeting quoted message author.
+	name, ref, err = resolver.Resolve(ctx, event, "他")
+	if err != nil || name != "小红" || ref != "qq-avatar:OPENID_QUOTED" {
+		t.Fatalf("quoted pronoun resolve = (%q, %q, %v)", name, ref, err)
+	}
+
+	// Duplicate nickname in history returns disambiguation error unless @-mentioned.
+	if _, err := dbMgr.LogMessage(ctx, "qq", "group", "g1", "OPENID_DUP_1", "阿强", "你好", false, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbMgr.LogMessage(ctx, "qq", "group", "g1", "OPENID_DUP_2", "阿强", "我也叫阿强", false, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := resolver.Resolve(ctx, event, "阿强"); err == nil || !strings.Contains(err.Error(), "2 位") {
+		t.Fatalf("expected duplicate nickname error, got %v", err)
+	}
+	eventWithMention := *event
+	eventWithMention.MentionedUsers = []core.GroupParticipant{{ID: "OPENID_DUP_1", Name: "阿强"}}
+	name, ref, err = resolver.Resolve(ctx, &eventWithMention, "阿强")
+	if err != nil || name != "阿强" || ref != "qq-avatar:OPENID_DUP_1" {
+		t.Fatalf("explicit mention should disambiguate duplicate nickname, got (%q, %q, %v)", name, ref, err)
+	}
 }
 
 func TestImageTool_PrepareReferenceImages_QuoteAndAvatar(t *testing.T) {
