@@ -56,6 +56,7 @@ var defaultToolPolicies = map[string]toolPolicy{
 	"screenshot_web":     {scope: scopeAny, roles: publicToolRoles},
 	"search_nix_package": {scope: scopeAny, roles: publicToolRoles},
 	"analyze_images":     {scope: scopeAny, roles: publicToolRoles},
+	"get_user_avatar":    {scope: scopeAny, roles: publicToolRoles},
 	"express_face":       {scope: scopeAny, roles: publicToolRoles},
 	"generate_image":     {scope: scopeAny, roles: publicToolRoles},
 	"get_geek_briefing": {

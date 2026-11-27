@@ -168,3 +168,45 @@ func TestImageTool_PrepareReferenceImages_QuoteAndAvatar(t *testing.T) {
 		t.Fatalf("expected both reference labels in goal, got:\n%s", goal)
 	}
 }
+
+func TestUserAvatarTool_SendsOriginalAvatarDirectly(t *testing.T) {
+	ctx := context.Background()
+	dbMgr := db.NewManager(filepath.Join(t.TempDir(), "db"))
+	defer func() { _ = dbMgr.Close() }()
+	if _, err := dbMgr.LogMessage(ctx, "qq", "group", "g1", "OPENID_YUE", "月", "在的", false, "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	samplePNG := tinyPNGBytes(t)
+	sources := &media.Sources{}
+	sources.Register("qq-avatar", func(_ context.Context, ref string, _ int64) ([]byte, error) {
+		if ref != "qq-avatar:OPENID_YUE" {
+			t.Fatalf("unexpected avatar ref: %s", ref)
+		}
+		return samplePNG, nil
+	})
+	resolver := NewAvatarResolver(dbMgr, sources)
+	avatarTool := NewUserAvatarTool(sources, resolver)
+
+	if _, ok := avatarTool.DefinitionForEvent(&entity.SensoryEvent{Platform: "qq", IsGroup: true}); !ok {
+		t.Fatal("expected get_user_avatar to be advertised on QQ")
+	}
+	if _, ok := avatarTool.DefinitionForEvent(&entity.SensoryEvent{Platform: "telegram", IsGroup: true}); ok {
+		t.Fatal("expected get_user_avatar to be hidden on telegram without telegram-avatar loader")
+	}
+
+	event := &entity.SensoryEvent{
+		Platform:  "qq",
+		IsGroup:   true,
+		ChannelID: "g1",
+		SenderID:  "OPENID_GUEST",
+		Role:      entity.RoleGuest,
+	}
+	res, err := avatarTool.Execute(entity.WithSensoryEvent(ctx, event), []byte(`{"target_user":"月"}`))
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	if len(res.ImageData) == 0 || !res.ImageOnly || !res.FixedPresentation {
+		t.Fatalf("expected direct image output, got len=%d ImageOnly=%t Fixed=%t Text=%q", len(res.ImageData), res.ImageOnly, res.FixedPresentation, res.Text)
+	}
+}

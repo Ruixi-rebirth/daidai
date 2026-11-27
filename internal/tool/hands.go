@@ -80,6 +80,7 @@ func NewHandsWithConfig(cfg HandsConfig) *HandsRegistry {
 	var avatarResolver *AvatarResolver
 	if cfg.MediaSources != nil {
 		avatarResolver = NewAvatarResolver(cfg.Database, cfg.MediaSources)
+		h.Register(NewUserAvatarTool(cfg.MediaSources, avatarResolver))
 	}
 	if cfg.Vision != nil {
 		h.Register(NewImageAnalysisToolWithAvatars(cfg.Vision, avatarResolver))
