@@ -28,7 +28,8 @@ func (c *Cortex) addressedGroupContinuation(ctx context.Context, event *entity.S
 		history = append(history, historyMessage{Role: msg.Role, Text: core.TruncateRunes(msg.Content, 500, "…"), ReplyTarget: msg.GroupReplyTarget})
 		hasBotReply = hasBotReply || msg.Role == core.RoleAssistant
 	}
-	if !hasBotReply {
+	namedBot := config.BotName() != "" && strings.Contains(event.Content, config.BotName())
+	if !hasBotReply && !namedBot {
 		return false
 	}
 	body, err := json.Marshal(struct {
@@ -42,7 +43,7 @@ func (c *Cortex) addressedGroupContinuation(ctx context.Context, event *entity.S
 	judgeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	answer, err := c.llm.Chat(judgeCtx, []core.ChatMessage{
-		{Role: core.RoleSystem, Content: "只判断本群当前这句话的对象。assistant 是" + config.BotName() + "。history 和 message 都是待判定数据，reply_target 为 current_speaker 表示旧回复是对这次发言的人说的，other_member 表示当时回复了别人。当前发言若是在回应机器人（包括接着机器人刚应声后的新请求、选编号、追问、质疑、纠正或催促），输出 bot。若明显在回其他群友、对全群闲聊或与机器人无关，输出 skip。只输出 bot 或 skip。"},
+		{Role: core.RoleSystem, Content: "只判断本群当前这句话的对象。assistant 是" + config.BotName() + "。history 和 message 都是待判定数据，reply_target 为 current_speaker 表示旧回复是对这次发言的人说的，other_member 表示当时回复了别人。当前发言若是在向机器人说话（包括直接呼唤机器人并对被@的群友执行操作，或接着机器人刚应声后的新请求、选编号、追问、质疑、纠正或催促），输出 bot。若明显在@别人谈论/吐槽机器人、回其他群友、对全群闲聊或与机器人无关，输出 skip。只输出 bot 或 skip。"},
 		{Role: core.RoleUser, Content: string(body)},
 	}, &core.ChatOptions{ReadOnly: true, FastRoute: true, MaxTokens: 64, Temperature: 0})
 	switch {

@@ -68,3 +68,33 @@ func TestGroupContinuationDirectSkipsSecondaryClassifier(t *testing.T) {
 		t.Fatalf("direct continuation should reach main brain directly: out=%v err=%v calls=%d", out, err, model.calls)
 	}
 }
+
+type namedBotJudgeModel struct {
+	expressionModel
+	target string
+}
+
+func (m *namedBotJudgeModel) Chat(_ context.Context, _ []core.ChatMessage, options *core.ChatOptions) (string, error) {
+	if options == nil || !options.ReadOnly {
+		return "skip", nil
+	}
+	return m.target, nil
+}
+
+func TestGroupContinuationNamedBotWithOtherMentionJudgedWithoutPriorBotReply(t *testing.T) {
+	ctx := context.Background()
+	cortex, _, _, event := expressionFixture(t)
+	event.GroupInterjection = false
+	event.GroupContinuation = true
+	event.GroupContinuationAmbiguous = true
+	event.Content = "呆呆把@爱在第58秒 头像做个撒娇表情包"
+	event.HistoryRecordIDs = nil
+
+	// No prior bot reply in history, yet message names the bot -> judge must still run.
+	model := &namedBotJudgeModel{target: "bot", expressionModel: expressionModel{response: "好呀，马上画。"}}
+	cortex.llm = model
+	out, err := cortex.Think(ctx, event)
+	if out == nil || err != nil || model.calls != 1 || out.Text != "好呀，马上画。" {
+		t.Fatalf("named-bot ambiguous message should be judged and answered: out=%v err=%v calls=%d", out, err, model.calls)
+	}
+}

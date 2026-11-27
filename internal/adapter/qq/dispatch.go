@@ -99,10 +99,17 @@ func (q *QQChannel) dispatchEvent(ctx context.Context, payload map[string]any) b
 		}
 		directedElsewhere := isGroup && (replyCtx != nil || qqDirectedAtOtherMember(d, content))
 		namedBot := config.BotName() != "" && strings.Contains(content, config.BotName())
-		botAddressed := botMentioned || quotedBot || (isGroup && !directedElsewhere && namedBot && !strings.HasPrefix(strings.TrimSpace(content), "/"))
+		isSlash := strings.HasPrefix(strings.TrimSpace(content), "/")
+		botAddressed := botMentioned || quotedBot || (isGroup && !directedElsewhere && namedBot && !isSlash)
 		continuationDecision := groupchat.ContinuationNone
 		if isGroup && !botAddressed {
-			continuationDecision = q.evaluateGroupContinuation(convID, userID, content, d, replyCtx, quotedBot)
+			if namedBot && replyCtx == nil && !isSlash {
+				// Message names the bot while also @-mentioning another member (e.g. "呆呆把@某人头像..."):
+				// let Cortex's addressee judge distinguish addressing the bot from talking about the bot.
+				continuationDecision = groupchat.ContinuationAmbiguous
+			} else {
+				continuationDecision = q.evaluateGroupContinuation(convID, userID, content, d, replyCtx, quotedBot)
+			}
 		}
 		groupContinuation := continuationDecision != groupchat.ContinuationNone
 		groupContinuationAmbiguous := continuationDecision == groupchat.ContinuationAmbiguous
